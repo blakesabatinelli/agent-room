@@ -28,6 +28,7 @@ import { issueKey } from "../discovery/tokens.js"; // 1.3
 import { buildInvite, presetAgent } from "../discovery/invite.js"; // 1.3
 import { emptyCapabilities, cleanNeeds } from "../discovery/connectors.js"; // 1.3
 import { platformBlock } from "../discovery/apply.js"; // 1.3
+import { commandGroups, loadCommandIndex } from "../commands/index.js"; // 2.6
 import { SignInManager } from "../install/signin.js";
 import { registerInstallRoutes } from "../install/routes.js";
 import { setupTimer } from "../install/timer.js";
@@ -579,6 +580,8 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   const discovery = discoveryDep ?? new DiscoveryService(store, { control: () => orch.control, mcpUrl: () => `http://127.0.0.1:${port()}/mcp`, tokens: mcpTokens });
   app.decorate("discovery", discovery);
   app.get("/discovery", async () => discovery.state());
+  // 2.6: the / palette: room commands first, then every agent's skills, commands and prompts, from the index discovery keeps fresh.
+  app.get("/commands", async () => { const i = loadCommandIndex(store); return { at: i.at, groups: commandGroups(i) }; });
   app.post("/discovery/run", async () => { await discovery.run(); return discovery.state(); });
   app.put("/discovery/settings", async (req, reply) => {
     const b = z.object({ connectAutomatically: z.boolean() }).safeParse(req.body);

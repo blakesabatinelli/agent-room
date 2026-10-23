@@ -507,7 +507,8 @@ export type RoutingReason =
   | "planned_owner"    // the plan named this agent and it was free
   | "revision"         // a revision stays with the same agent
   | "planner_choice"   // the planner answered "direct" and named the agent
-  | "only_candidate";  // one agent connected
+  | "only_candidate"   // one agent connected
+  | "command";         // 2.6: the owner typed /<agent>:<command>, so no policy chose
 
 export interface RoutingCandidate {
   agentId: string;
@@ -980,3 +981,32 @@ export type WriteProposalSummary = Omit<WriteProposal, "diff"> & { diffBytes: nu
 export type FolderCheck =
   | { ok: true; root: string; protected: boolean; because?: string }
   | { ok: false; error: string; canForce: boolean };
+
+// ---- 2.6 slash commands from agent skills
+export type CommandKind = "skill" | "prompt" | "command" | "plugin-skill";
+/** How the command reaches the agent: its own `/name args` text, the prompt file's content inlined, or a plain instruction to use the skill. */
+export type CommandMode = "slash" | "inline" | "instruction";
+/** One command in the index. `name` is the namespaced form without the leading slash, e.g. "claude:board-deck". */
+export interface CommandEntry {
+  name: string;
+  agentId: string;
+  kind: CommandKind;
+  title: string;
+  description: string;
+  argsHint?: string;
+  /** The file it came from (kept on this Mac; GET /commands does not send it). */
+  source: string;
+  /** What the agent itself calls it, e.g. "board-deck", "my-plugin:review" or "prompts:review-pr". */
+  native: string;
+  mode: CommandMode;
+}
+export interface CommandIndex { at: number; agents: { id: string; label: string }[]; entries: CommandEntry[] }
+/** One row in the palette. */
+export interface CommandRow { name: string; title: string; description: string; argsHint?: string; kind: CommandKind | "room" }
+/** A palette group: "room" first, then one per agent. */
+export interface CommandGroup { id: string; label: string; commands: CommandRow[] }
+/** GET /commands. */
+export interface CommandsResponse { at: number; groups: CommandGroup[] }
+/** What a task was started by: recorded on the task so the log shows the skill that ran. */
+export interface TaskCommand { name: string; agentId: string; kind: CommandKind; mode: CommandMode; args: string }
+export interface Task { command?: TaskCommand }

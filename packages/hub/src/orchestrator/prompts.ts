@@ -30,7 +30,7 @@ const PLAN_TASK_SCHEMA = `{"key":"t1","owner":"<agent id>","title":"...","role":
   "needs":["data sources or connectors this task must read, e.g. salesforce, gmail, drive, slack, snowflake; [] when none"],
   "taskType":"research","dependsOn":[]}`;
 
-export const planPrompt = (goal: string, agents: AgentConfig[], memory: MemoryEntry[], ownerNotes: string[], conversation = "", scores: AgentScore[] = [], lead?: string, problems: string[] = [], previous?: string) => `[[PLAN]]
+export const planPrompt = (goal: string, agents: AgentConfig[], memory: MemoryEntry[], ownerNotes: string[], conversation = "", scores: AgentScore[] = [], lead?: string, problems: string[] = [], previous?: string, commands = "") => `[[PLAN]]
 You are the orchestrator of a multi-agent chat room. Decide how to handle the owner's latest message.
 
 Goal: ${goal}
@@ -40,6 +40,7 @@ ${conversation || "(none)"}
 
 Available agents:
 ${track(agents, scores)}
+${commands ? `Skills and commands each agent has (an agent whose skill matches a task is a good owner for it):\n${commands}\n` : ""}
 Shared memory:
 ${mem(memory)}
 

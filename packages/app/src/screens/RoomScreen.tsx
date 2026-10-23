@@ -1,7 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View, useWindowDimensions } from "react-native";
-import type { FolderGrant, Message, Task } from "@agent-room/shared";
+import type { CommandGroup, CommandRow, FolderGrant, Message, Task } from "@agent-room/shared";
 import { presence, useRoom } from "../state/store";
 import { DayDivider, MessageRow } from "../components/MessageRow";
 import { Avatar, Button, Dot, IconButton } from "../components/ui";
@@ -105,8 +105,38 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
     : [];
   const pickMention = (id: string) => { setText(text.replace(/@([\w-]*)$/, `@${id} `)); input.current?.focus(); };
 
+  // 2.6 slash commands: "/" at the start of the box opens a palette (Room first, then each agent). Up/down/Escape on the Mac, tap anywhere.
+  const [cmdGroups, setCmdGroups] = useState<CommandGroup[] | null>(null);
+  const [cmdAt, setCmdAt] = useState(0);
+  const [cmdIdx, setCmdIdx] = useState(0);
+  const [cmdOff, setCmdOff] = useState(false);
+  const cmdQuery = !cmdOff ? /^\/(\S*)$/.exec(text)?.[1]?.toLowerCase() : undefined;
+  useEffect(() => {
+    if (cmdQuery === undefined || !hub || (cmdGroups && Date.now() - cmdAt < 30_000)) return;
+    let live = true;
+    hub.commands().then((r) => { if (live) { setCmdGroups(r.groups); setCmdAt(Date.now()); } }).catch(() => undefined);
+    return () => { live = false; };
+  }, [hub, cmdQuery === undefined]);
+  const cmdRows = useMemo(() => {
+    if (cmdQuery === undefined || !cmdGroups) return [] as { group: string; row: CommandRow }[];
+    const hit = (c: CommandRow) => !cmdQuery || c.name.toLowerCase().includes(cmdQuery) || c.description.toLowerCase().includes(cmdQuery);
+    return cmdGroups.flatMap((g) => g.commands.filter(hit).map((row) => ({ group: g.label, row })));
+  }, [cmdGroups, cmdQuery]);
+  const cmdSel = cmdRows[Math.min(cmdIdx, Math.max(0, cmdRows.length - 1))]?.row;
+  const pickCommand = (name: string) => { setText(`/${name} `); setCmdIdx(0); input.current?.focus(); };
+  const onTextChange = (v: string) => { setText(v); setCmdIdx(0); setCmdOff(false); };
+  const cmdKey = (e: { nativeEvent: { key: string } }) => {
+    if (!cmdRows.length) return;
+    const k = e.nativeEvent.key;
+    if (k === "ArrowDown") setCmdIdx((i) => (i + 1) % cmdRows.length);
+    else if (k === "ArrowUp") setCmdIdx((i) => (i + cmdRows.length - 1) % cmdRows.length);
+    else if (k === "Escape") setCmdOff(true);
+  };
+
   const send = async () => {
     if (suggestions.length && mentionQuery !== undefined) return pickMention(suggestions[0].id);
+    // A command typed out in full still sends; a partial one is completed from the highlighted row.
+    if (cmdSel && cmdSel.name !== cmdQuery) return pickCommand(cmdSel.name);
     const v = text.trim(); if (!v || !hub || !roomId) return;
     setText(""); setHeight(22);
     try { await hub.post(roomId, v, folder?.id); setFolderId(""); setPickOpen(false); }
@@ -216,6 +246,21 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
       ) : null}
 
       <View style={{ paddingHorizontal: space(5), paddingBottom: space(1) }}>
+        {cmdQuery !== undefined && cmdGroups ? (
+          <ScrollView keyboardShouldPersistTaps="handled" accessibilityLabel="Commands"
+            style={{ maxHeight: 260, marginBottom: space(1), borderRadius: radius.lg, borderWidth: 1, borderColor: p.line, backgroundColor: p.canvas, ...lift(0.1, 12, 4) }}>
+            {cmdRows.length ? cmdRows.map(({ group, row }, i) => (
+              <View key={row.name}>
+                {i === 0 || cmdRows[i - 1].group !== group ? <Text style={[t.tiny, { color: p.muted, fontWeight: "700", paddingHorizontal: space(3), paddingTop: space(2) }]}>{group.toUpperCase()}</Text> : null}
+                <Pressable accessibilityRole="button" accessibilityLabel={`/${row.name}`} onPress={() => pickCommand(row.name)}
+                  style={{ paddingHorizontal: space(3), paddingVertical: space(1.5), backgroundColor: row.name === cmdSel?.name ? p.tint : "transparent" }}>
+                  <Text style={[t.small, t.name, { color: p.inkStrong }]}>/{row.name}{row.argsHint ? <Text style={{ color: p.faint }}> {row.argsHint}</Text> : null}</Text>
+                  <Text numberOfLines={1} style={[t.tiny, { color: p.muted }]}>{row.description}</Text>
+                </Pressable>
+              </View>
+            )) : <Text style={[t.tiny, { color: p.muted, padding: space(3) }]}>No commands match.</Text>}
+          </ScrollView>
+        ) : null}
         {suggestions.length ? (
           <View style={{ marginBottom: space(1), borderRadius: radius.lg, borderWidth: 1, borderColor: p.line, backgroundColor: p.canvas, paddingVertical: space(1), ...lift(0.1, 12, 4) }}>
             {suggestions.map((a, i) => (
@@ -230,8 +275,9 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
           </View>
         ) : null}
         {/* The composer is the one raised surface on the page. */}
-        <View style={{ borderWidth: 1, borderColor: text ? p.accent : p.lineStrong, borderRadius: radius.lg, backgroundColor: p.canvas, ...lift(0.07, 10, 2) }}>
-          <TextInput ref={input} value={text} onChangeText={setText} multiline placeholder={room?.paused ? `${placeholder} (paused)` : placeholder}
+        <View {...({ keyDownEvents: [{ key: "ArrowDown" }, { key: "ArrowUp" }, { key: "Escape" }], onKeyDown: cmdKey } as object)}
+          style={{ borderWidth: 1, borderColor: text ? p.accent : p.lineStrong, borderRadius: radius.lg, backgroundColor: p.canvas, ...lift(0.07, 10, 2) }}>
+          <TextInput ref={input} value={text} onChangeText={onTextChange} multiline placeholder={room?.paused ? `${placeholder} (paused)` : placeholder}
             placeholderTextColor={p.faint} accessibilityLabel="Message"
             onContentSizeChange={(e) => setHeight(Math.min(160, Math.max(22, e.nativeEvent.contentSize.height)))}
             onSubmitEditing={send}

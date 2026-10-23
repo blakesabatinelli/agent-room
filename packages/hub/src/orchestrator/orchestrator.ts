@@ -27,6 +27,8 @@ import { CapacityGovernor } from "../capacity/governor.js";
 import { detectHardware } from "../capacity/hardware.js";
 import { cleanNeeds } from "../discovery/connectors.js"; // 1.3
 import { needsGate, needsMessage, type NeedsGate } from "../discovery/routing.js"; // 1.3
+import { loadCommandIndex, plannerCommands } from "../commands/index.js"; // 2.6
+import { buildInvocation, parseCommand, unknownReply, type Invocation } from "../commands/invoke.js"; // 2.6
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -305,6 +307,7 @@ export class Orchestrator {
     if (cmd === "/pause") return this.setPaused(roomId, true);
     if (cmd === "/resume") return this.setPaused(roomId, false);
     if (cmd === "/stop") return this.stopRoom(roomId);
+    if (this.slashCommand(roomId, text)) return msg; // 2.6: /<agent>:<command> args, or an unknown /command
 
     // Direct-message room: the agent answers, nobody else is involved.
     const room = this.store.getRoom(roomId);
@@ -346,6 +349,38 @@ export class Orchestrator {
     }
     void this.runGoal(roomId, body, { folderGrantId: opts.folderGrantId });
     return msg;
+  }
+
+  /**
+   * 2.6: `/<agent>:<command> args` goes straight to that agent (no planning), with the skill invoked the way that agent supports.
+   * A `/word` that is neither a room command nor an indexed command gets a short reply and reaches no agent.
+   * Returns true when the message was handled here; room commands and ordinary text return false and carry on below.
+   */
+  private slashCommand(roomId: string, text: string): boolean {
+    const p = parseCommand(text, loadCommandIndex(this.store));
+    if (p.kind === "none" || p.kind === "room") return false;
+    if (p.kind === "unknown") { this.post(roomId, SYS, unknownReply(p), "system"); return true; }
+    const built = buildInvocation(p.entry, p.args);
+    if (!built.ok) { this.post(roomId, SYS, built.error, "system"); return true; }
+    this.store.audit("owner", "command.run", `/${p.entry.name} in ${roomId}`);
+    void this.runCommand(roomId, text, p.entry.agentId, built.invocation);
+    return true;
+  }
+
+  private async runCommand(roomId: string, text: string, agentId: string, inv: Invocation) {
+    const ready = await this.readyAgents();
+    const agent = ready.find((a) => a.id === agentId);
+    if (!agent) {
+      const a = this.store.getAgent(agentId);
+      this.post(roomId, SYS, a?.enabled ? `${a.name} isn't connected right now, so /${inv.command.name} didn't run.` : `${a?.name ?? agentId} is switched off. Turn it on from the sidebar to use /${inv.command.name}.`, "system");
+      return;
+    }
+    const goal: Goal = { id: id("goal"), roomId, text, status: "planning", createdAt: now() };
+    this.store.saveGoal(goal);
+    const ctrl = new AbortController();
+    this.running.set(goal.id, ctrl);
+    try { await this.lane(agent.id, () => this.answerDirect(goal, fixedDecision(this.store, agent, ready, "other", "command", 0), ctrl.signal, inv)); }
+    finally { if (this.running.get(goal.id) === ctrl) this.running.delete(goal.id); }
   }
 
   private activeGoal(roomId: string) {
@@ -683,7 +718,7 @@ export class Orchestrator {
     this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", label: "planning", active: true });
     const folderNote = this.goalSources.note(goal); // 1.1: tell the planner about the granted folder (label, read/write)
     const plan = await this.callJson<Plan>(
-      planPrompt(text + folderNote, agents, this.store.listShared(roomId), notes, this.conversation(roomId), this.store.listScores(), orch.name), orch, signal,
+      planPrompt(text + folderNote, agents, this.store.listShared(roomId), notes, this.conversation(roomId), this.store.listScores(), orch.name, [], undefined, plannerCommands(loadCommandIndex(this.store), agents.map((a) => a.id), text)), orch, signal, // 2.6
     );
     this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", active: false });
     if (signal.aborted) return;
@@ -704,7 +739,7 @@ export class Orchestrator {
     if (problems.length && current?.tasks?.length) {
       this.log(roomId, `Plan needs fixing before work starts: ${problems.join(" ")}`);
       this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", label: "planning", active: true });
-      const fixed = await this.callJson<Plan>(planPrompt(text + folderNote, agents, this.store.listShared(roomId), notes, this.conversation(roomId), this.store.listScores(), orch.name, problems, JSON.stringify(current)), orch, signal);
+      const fixed = await this.callJson<Plan>(planPrompt(text + folderNote, agents, this.store.listShared(roomId), notes, this.conversation(roomId), this.store.listScores(), orch.name, problems, JSON.stringify(current), plannerCommands(loadCommandIndex(this.store), agents.map((a) => a.id), text)), orch, signal); // 2.6
       this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", active: false });
       if (signal.aborted) return;
       if (fixed?.tasks?.length) { current = fixed; raw = fixed.tasks; problems = validatePlan(raw, reqsOf(current), agentIds); }
@@ -824,17 +859,18 @@ export class Orchestrator {
   }
 
   /** Conversational fast path: one agent replies, no plan, judge or summary. */
-  private async answerDirect(goal: Goal, route: RouteDecision, signal: AbortSignal): Promise<Goal> {
+  private async answerDirect(goal: Goal, route: RouteDecision, signal: AbortSignal, command?: Invocation): Promise<Goal> {
     const agent = route.agent;
     const task: Task = {
       id: id("task"), roomId: goal.roomId, goalId: goal.id, title: goal.text.slice(0, 80), description: goal.text,
       taskType: "other", acceptance: "Answers the owner.", dependsOn: [], assignee: agent.id, owner: agent.id,
       status: "running", attempts: 1, createdAt: now(), updatedAt: now(),
+      ...(command ? { command: command.command } : {}), // 2.6: the skill this task was started with
     };
     task.routingId = openRecord(this.store, route, task, goal.text, "direct").id;
     this.store.saveTask(task);
     goal.status = "running"; this.store.saveGoal(goal);
-    this.log(goal.roomId, `Routed to ${agent.name} directly.`, task.id);
+    this.log(goal.roomId, command ? `Routed to ${agent.name} by /${command.command.name}.` : `Routed to ${agent.name} directly.`, task.id);
     this.busy.add(agent.id);
     this.governor.start(task.id, agent); // 1.5: counted, never refused (the owner asked)
     this.floor.give(agent.id, goal.roomId);
@@ -842,6 +878,7 @@ export class Orchestrator {
     let convo = this.conversation(goal.roomId);
     if (!convo.includes(goal.text)) convo += `${convo ? "\n" : ""}Owner: ${goal.text}`;
     const res = await this.call(agent,
+      command ? command.prompt : // 2.6: the skill invocation itself (a Claude Code `/command` has to start the prompt)
       directPrompt(convo, this.store.listShared(goal.roomId), this.store.listPrivate(agent.id), this.ownerNotes.get(goal.id) ?? [], this.enabledAgents(), agent.id),
       { roomId: goal.roomId, taskId: task.id, signal });
     this.working(goal.roomId, agent, false);
