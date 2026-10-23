@@ -37,6 +37,7 @@ import { registerRoomRoutes } from "../rooms/routes.js"; // 4.3
 import { registerPersonaRoutes } from "../persona/routes.js"; // 3.2
 import { registerResumeRoutes } from "../resume/routes.js"; // 2.3
 import { registerReportRoutes } from "../report/routes.js"; // 2.7
+import { registerNightShiftRoutes } from "../nightshift/index.js"; // 4.5
 import { registerOfficeRoutes } from "../office/routes.js"; // 3.4
 import { setupTimer } from "../install/timer.js";
 import { firstPassMetrics, retroDb } from "../retro/index.js"; // 2.1
@@ -683,6 +684,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   registerPersonaRoutes(app, store, () => orch.control); // 3.2: GET /personas/templates, GET and PUT /agents/:id/persona
   registerResumeRoutes(app, store, orch.resumes); // 2.3: GET /agents/:id/resume, GET /resumes, POST /agents/:id/probation
   registerReportRoutes(app, store); // 2.7: GET /reports/scorecard, /reports/ledger, /reports/kill-review, GET /attention
+  registerNightShiftRoutes(app, store, orch.nightshift); // 4.5: GET /nightshift, /nightshift/runs, /nightshift/head-to-head
   registerRoomRoutes(app, () => ({ store, control: () => orch.control, files: orch.files, standing: orch.standing })); // 4.3: GET and PUT /rooms/:id/definition
   registerOfficeRoutes(app, store); // 3.4: GET /office?roomId=
   app.put("/settings", async (req) => {
@@ -710,6 +712,14 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
       }).optional(),
       minutesSavedPerTask: z.number().min(0).max(600).optional(), // 2.7
       standingCatchUpHours: z.number().min(0).max(168).optional(), // 4.3: how late a standing room's scheduled run may still start after the hub was asleep
+      nightShift: z.object({ // 4.5
+        enabled: z.boolean().optional(),
+        from: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/).optional(),
+        to: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/).optional(),
+        maxRunsPerNight: z.number().int().min(0).max(200).optional(),
+        minExpiringShare: z.number().min(0).max(1).optional(),
+        weight: z.number().min(0).max(1).optional(),
+      }).optional(),
       capacity: z.object({
         maxConcurrentTasks: z.number().int().min(1).max(32).optional(),
         localModels: z.enum(["auto", "on", "off"]).optional(),

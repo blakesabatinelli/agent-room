@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import type { RoutingRecord } from "@agent-room/shared";
+import type { HeadToHeadRow, RoutingRecord } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import { listJuries } from "../jury/records.js";
+import { headToHead } from "../nightshift/headToHead.js"; // 4.5
 import { quotaFor } from "../quota/index.js";
 import { isoWeek, weekStart } from "../retro/metrics.js";
 import { DAY, clip, mean, pct, round, ymd } from "./periods.js";
@@ -199,12 +200,12 @@ export function reviewSubscriptions(store: Store, now: number): SubscriptionRevi
 
 // ---------------------------------------------------------------- the report
 
-export interface KillReview { generatedAt: number; routing: RoutingReview; juries: JuryReview; attention: AttentionReview; subscriptions: SubscriptionReview; markdown: string }
+export interface KillReview { generatedAt: number; routing: RoutingReview; juries: JuryReview; attention: AttentionReview; subscriptions: SubscriptionReview; /** 4.5: night-shift head-to-head rows (same task, two agents, graded blind) */ headToHead: HeadToHeadRow[]; markdown: string }
 
 export function buildKillReview(store: Store, o: { now?: number; force?: boolean } = {}): KillReview {
   const now = o.now ?? Date.now();
   const records = store.listRouting();
-  const r: KillReview = { generatedAt: now, routing: reviewRouting(records, now, o), juries: reviewJuries(store), attention: reviewAttention(store, records), subscriptions: reviewSubscriptions(store, now), markdown: "" };
+  const r: KillReview = { generatedAt: now, routing: reviewRouting(records, now, o), juries: reviewJuries(store), attention: reviewAttention(store, records), subscriptions: reviewSubscriptions(store, now), headToHead: headToHead(store), markdown: "" };
   r.markdown = killReviewMarkdown(r);
   return r;
 }
@@ -236,6 +237,11 @@ export function killReviewMarkdown(r: KillReview): string {
     }
   }
   L.push(`Graded tasks: ${r.routing.gradedTasks} of ${r.routing.need}.`, "");
+  if (r.headToHead?.length) { // 4.5: the same tasks done twice, which the replay above can only estimate
+    L.push("Night-shift head-to-head: tasks that were accepted and then re-run overnight by another agent, both results graded blind. Here the two agents really did the same work, so this is the direct evidence for or against \"always use X\" on a kind of work.", "",
+      "| Task type | Agents | Runs | Preferred | Mean score |", "|---|---|---|---|---|",
+      ...r.headToHead.map((h) => `| ${h.taskType} | ${h.first} vs ${h.second} | ${h.n} | ${h.first} ${h.firstWins}, ${h.second} ${h.secondWins}, tied ${h.ties} | ${h.firstMean.toFixed(2)} vs ${h.secondMean.toFixed(2)} |`), "");
+  }
 
   const j = r.juries;
   L.push("## 2. Juries are worse than the user", "", "Condition: cross-vendor judges disagree with your spot ratings more often than same-vendor judges do. Remedy: drop cross-vendor judging.", "", j.detail, "");

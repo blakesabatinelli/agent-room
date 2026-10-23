@@ -34,6 +34,8 @@ import { learnedBlock, runRetro } from "../retro/index.js"; // 2.1
 import { MemoryKeeper, type KeeperOptions, type ProposeOptions } from "../memory/keeper.js"; // 2.5
 import { withPersona } from "../persona/index.js"; // 3.2
 import { Resumes, ShadowRunner, barredSet, planNotes, realAgents, type ShadowHost } from "../resume/index.js"; // 2.3
+import { NightShift, type NightHost } from "../nightshift/index.js"; // 4.5
+import { personaOf } from "../persona/index.js"; // 4.5
 import { attentionFor, type Attention } from "../attention/index.js"; // 2.7
 import { Subagents, subagentSettings, type SubagentHost } from "../subagents/index.js"; // 3.3
 import { RoomRules, StandingRooms } from "../rooms/index.js"; // 4.3
@@ -115,6 +117,8 @@ export class Orchestrator {
   resumes: Resumes;
   /** 2.3: shadow copies of real tasks for agents on probation. */
   shadows: ShadowRunner;
+  /** 4.5: night-shift tournaments (started by main.ts with orch.nightshift.start()). */
+  nightshift: NightShift;
   /** 2.7: the gate every owner-facing alert goes through (pushes up to the daily cap, the rest wait for the evening digest). */
   attention: Attention;
   /** 3.3: helpers (room subagents from spawn_agent, native ones seen in an agent's own stream). */
@@ -155,6 +159,7 @@ export class Orchestrator {
     // 2.3: résumés (RESUME.md after graded runs) and shadow tasks for agents on probation.
     this.resumes = new Resumes({ store, control: () => this.control, say: (roomId, text) => { if (roomId) this.post(roomId, SYS, text, "system"); } });
     this.shadows = new ShadowRunner(this.shadowHost());
+    this.nightshift = new NightShift({ store, shadows: this.shadows, host: this.nightHost() }); // 4.5
     this.subagents = new Subagents(this.subagentHost()); // 3.3
     // 4.3: the calendar trigger for standing rooms (started by main.ts with orch.standing.start()).
     this.standing = new StandingRooms({
@@ -208,6 +213,24 @@ export class Orchestrator {
       ledger: (g) => this.ledgerText(g),
       checksAllowed: (g) => !!g.approvedAt || this.cfg().autoRunChecks,
       log: (roomId, text) => { this.log(roomId, text); },
+    };
+  }
+
+  /** 4.5: what the night shift may use of the orchestrator. Its re-runs go through the shadow runner (and so call() with `shadow: true`); its judges through call() like any judge. */
+  private nightHost(): NightHost {
+    return {
+      store: this.store, governor: this.governor, workspaces: this.workspaces,
+      ref: (g) => this.goalSources.ref(g, g.folder ?? goalFolder(this.opts.dataDir, g.id)),
+      readyAgents: (roomId) => this.readyAgents(roomId),
+      busy: (agentId, set) => {
+        if (set === true) this.busy.add(agentId); else if (set === false) this.busy.delete(agentId);
+        return this.busy.has(agentId) || this.chatting.has(agentId);
+      },
+      call: (agent, prompt, o) => this.call(agent, prompt, o),
+      callJson: (p, a, sig, r) => this.callJson(p, a, sig, r),
+      quotaLimited: (agentId, at) => quotaLimited(this.store, agentId, at),
+      notes: (goalId) => this.ownerNotes.get(goalId) ?? [],
+      aliases: (a) => { const p = personaOf(this.store, this.control, a)?.name; return p ? [p] : []; },
     };
   }
 
@@ -1441,6 +1464,7 @@ export class Orchestrator {
     // 1.4: the agent never works in the base. Its own worktree (or copy) is `work`: the cwd, the checks and the judge's view.
     const ref = this.goalSources.ref(fresh, folder); // 1.1: carries the granted folder, when the goal has one
     const ws = await this.workspaces.open(ref, task, agent.id);
+    await this.nightshift.opened(task, ws, agent.id); // 4.5 HOOK: remember the commit this task started from (a night-shift re-run starts there)
     const work = ws.path;
     await this.workspaceHook("beforeRun", ws, agent.id); // 1.9 HOOK: write the agent's context file into `work` here
     // The owner may have stopped or cancelled this while the worktree was being cut: don't resurrect the task or leak the worktree.
@@ -1584,6 +1608,7 @@ export class Orchestrator {
       await this.workspaceHook("beforeMerge", ws, agent.id); // 1.9 HOOK: restore the agent's context file in `work` before it is committed
       const merge = await this.workspaces.accept(this.goalSources.ref(this.store.getGoal(goal.id) ?? fresh, folder), task); // 1.1: the grant is checked again at the moment of merging
       if (!merge.ok) { route("revise", judged); return this.sendBackConflict(goal, task, agent, judgment, merge.conflict, !!merge.markers, goalSignal); }
+      this.nightshift.accepted(task, agent.id, changed, this.deliverableText(work, task, changed)); // 4.5 HOOK: what the accepted attempt handed back, as the judge saw it
       await this.discardWorktree(goal, task);
       if (merge.source) this.goalSources.afterAccept(fresh, task, agent, merge.source, (t) => this.post(goal.roomId, SYS, t, "system", task.id)); // 1.1
       if (merge.merged.length) this.store.audit(agent.id, "worktree.merge", `"${task.title}" merged (${merge.how}): ${merge.merged.slice(0, 12).join(", ")}`.slice(0, 400));

@@ -62,6 +62,7 @@ orch.resumes.sweep(); // 2.3: close practice runs the last stop cut short, gradu
 joinOpenRosters(store, () => orch.control, (m) => console.warn(`[rooms] ${m}`));
 orch.standing.tick();
 orch.standing.start();
+orch.nightshift.start(); // 4.5: every 15 minutes inside the night window (off until the owner turns nightShift on)
 if (resumed.length) console.log(`Resumed ${resumed.length} goal${resumed.length > 1 ? "s" : ""} after restart.`);
 const tsStatus = await tailscale.status(true, port);
 const ts = remoteHost(tsStatus);

@@ -28,7 +28,7 @@ export function expectedFor(store: Store, agentId: string, taskType: string, at 
 /** The version rows add up to the agent-level roll-up. If the roll-up was changed some other way (an import, a repair), the roll-up wins. */
 function accountsFor(rows: VersionScore[], roll: AgentScore) {
   const n = rows.reduce((a, r) => a + r.runs, 0);
-  return n === roll.runs && Math.abs(rows.reduce((a, r) => a + r.runs * r.quality, 0) / n - roll.quality) < 0.01;
+  return Math.abs(n - roll.runs) < 1e-6 && Math.abs(rows.reduce((a, r) => a + r.runs * r.quality, 0) / n - roll.quality) < 0.01;
 }
 
 /** Epsilon-greedy pick among enabled, idle agents. */
@@ -52,19 +52,23 @@ export function recordOutcome(
   store: Store, agentId: string, taskType: string,
   outcome: { judgment?: Judgment; seconds: number; failed: boolean; revision: boolean },
   modelVersion?: string, at = Date.now(),
+  /** 4.5: how much this run counts next to a real graded run (1). A night-shift tournament result can count for less. */
+  weight = 1,
 ) {
+  if (!(weight > 0)) return;
+  const w = Math.min(1, weight);
   const s = store.getScore(agentId, taskType);
   const before = { ...s };
-  s.runs += 1;
-  if (outcome.failed) s.failures += 1;
-  if (outcome.revision) s.revisions += 1;
+  s.runs += w;
+  if (outcome.failed) s.failures += w;
+  if (outcome.revision) s.revisions += w;
   const q = outcome.failed ? 0 : outcome.judgment?.score ?? 0;
-  s.quality += (q - s.quality) / s.runs;
-  s.avgSeconds += (outcome.seconds - s.avgSeconds) / s.runs;
+  s.quality += (w * (q - s.quality)) / s.runs;
+  s.avgSeconds += (w * (outcome.seconds - s.avgSeconds)) / s.runs;
   store.saveScore(s);
   // 2.4: the same run under its model version (pre-2.4 history becomes the "unknown" version the first time)
   const version = resolveModelVersion(modelVersion, store.getAgent(agentId)?.settings?.model);
-  recordVersionRun(store, agentId, taskType, version, { quality: q, failed: outcome.failed, revision: outcome.revision, seconds: outcome.seconds }, at, before);
+  recordVersionRun(store, agentId, taskType, version, { quality: q, failed: outcome.failed, revision: outcome.revision, seconds: outcome.seconds, ...(w !== 1 ? { weight: w } : {}) }, at, before);
 }
 
 /** Owner calibration: nudge the agent's score toward the owner's rating. `modelVersion` names the version that did the work (default: its current one). */
