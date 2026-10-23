@@ -6,7 +6,7 @@ import { launcher, LOCAL_HUB } from "../native/hub";
 
 const KEY = "agent-room.connection";
 
-export type Page = "agents" | "approvals" | "memory" | "permissions" | "settings";
+export type Page = "agents" | "approvals" | "memory" | "permissions" | "folders" | "settings";
 /** What the main pane shows: a channel/DM, or one of the workspace pages. */
 export type View = { kind: "room" } | { kind: "page"; page: Page };
 

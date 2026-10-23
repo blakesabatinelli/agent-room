@@ -7,12 +7,15 @@
   const st = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
-    view: "rooms",          // rooms | room | approvals | permissions | control | subscriptions | remote | pair
+    view: "rooms",          // rooms | room | approvals | diff | permissions | folders | control | subscriptions | remote | pair
     tools: [], control: null, quota: [], remote: null,
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, working: {}, approvals: [],
     unread: new Set(), readAt: 0, readSent: {}, positioned: "",
     online: false, ws: null, wsDelay: 1000,
     capacity: null,
+    // 1.1 file access: folder grants, the write proposals behind file approvals (full diffs), and the approval open for review
+    grants: null, proposals: null, proposalsErr: "", reviewId: "",
+    gform: { path: "", label: "", roomId: "", agentId: "*", read: true, write: false, err: "", busy: false },
   };
 
   // ---------- helpers
@@ -143,6 +146,7 @@
         st.approvals = st.approvals.filter((a) => a.id !== e.approval.id);
         if (e.approval.status === "pending") st.approvals.unshift(e.approval);
         renderBadge(); if (st.view === "approvals") renderApprovals();
+        if (st.view === "diff" && st.reviewId === e.approval.id && e.approval.status !== "pending") go("approvals"); // decided elsewhere (the Mac)
         break;
       }
       case "room": {
@@ -218,11 +222,13 @@
     $("#composer").hidden = st.view !== "room";
     const room = st.rooms.find((r) => r.id === st.roomId);
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : `# ${room.name}`)
-      : st.view === "approvals" ? "Approvals" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : "Agent Room";
+      : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : "Agent Room";
     renderDot(); renderBadge();
     if (st.view === "pair") return renderPair();
     if (st.view === "rooms") return renderRooms();
     if (st.view === "approvals") return renderApprovals();
+    if (st.view === "diff") return renderReview();
+    if (st.view === "folders") return renderFolders();
     if (st.view === "permissions") return renderPermissions();
     if (st.view === "control") return renderControl();
     if (st.view === "subscriptions") return renderSubscriptions();
@@ -233,7 +239,7 @@
   function renderDot() { $("#dot").classList.toggle("on", st.online); $("#dot").hidden = st.view === "pair"; }
   function renderBadge() {
     const n = st.approvals.length;
-    $("#approvalsBtn").hidden = !n || st.view === "pair" || st.view === "approvals";
+    $("#approvalsBtn").hidden = !n || st.view === "pair" || st.view === "approvals" || st.view === "diff";
     $("#approvalsCount").textContent = String(n);
   }
 
@@ -251,6 +257,7 @@
       : `<div class="empty">No rooms yet. Make one on the Mac.</div>`;
     const nCtl = st.control ? st.control.notices.length : 0;
     $("#view").innerHTML += `<div class="section">Settings</div><button class="row" data-nav="permissions"><span class="hash">⚙︎</span><span class="name">Permissions</span></button>
+      <button class="row" data-nav="folders"><span class="hash">▤</span><span class="name">Folders</span></button>
       <button class="row" data-nav="remote"><span class="hash">⇄</span><span class="name">Remote access</span></button>
       <button class="row" data-nav="subscriptions"><span class="hash">◔</span><span class="name">Subscriptions</span></button>
       <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>${st.capacity ? `<div class="capline">${esc(st.capacity.summary)}</div>` : ""}`;
@@ -284,7 +291,9 @@
   }
 
   function renderApprovals() {
-    $("#view").innerHTML = st.approvals.length ? st.approvals.map((a) => `
+    // 1.1: a file write is never approved from the preview text. It opens the full diff (renderReview) instead.
+    wantProposals();
+    $("#view").innerHTML = st.approvals.length ? st.approvals.map((a) => ARDiff.isFileWriteApproval(a) ? fileApprovalCard(a) : `
       <div class="card">
         <div class="what">${esc(st.agents[a.agentId]?.name || a.agentId)} wants to ${esc(a.action)}</div>
         <div class="detail">Using ${esc(a.tool)}${a.detail ? `\n\n${esc(a.detail)}` : ""}</div>
@@ -293,6 +302,227 @@
           <button class="btn small plain" data-approval="${esc(a.id)}" data-decision="rejected">Reject</button>
         </div>
       </div>`).join("") : `<div class="empty">Nothing waiting for you.</div>`;
+  }
+
+  // ---------- 1.1 file writes: the full diff, read to the end before Approve
+  const proposalFor = (a) => (st.proposals ? ARDiff.findProposalForApproval(a, st.proposals) : undefined);
+  const agentName = (id) => st.agents[id]?.name || id;
+
+  function fileApprovalCard(a) {
+    const p = proposalFor(a);
+    const who = esc(agentName(a.agentId));
+    const reject = `<button class="btn small plain" data-approval="${esc(a.id)}" data-decision="rejected">Reject</button>`;
+    if (!p) {
+      const msg = st.proposalsLoading ? "Loading the full change…" : st.proposalsErr ? `Can't load the full change: ${esc(st.proposalsErr)}` : "The full change isn't available, so it can't be approved here. You can reject it.";
+      return `<div class="card"><div class="what">${who} wants to ${esc(a.action)}</div><div class="detail">${msg}</div>
+        <div class="actions">${st.proposalsLoading ? "" : `<button class="btn small plain" data-reload="proposals">Try again</button>`}${reject}</div></div>`;
+    }
+    const d = ARDiff.parseUnifiedDiff(p.diff);
+    return `<div class="card"><div class="what">${who} wants to ${p.baseSha256 ? "change" : "create"} ${esc(p.relPath)}</div>
+      <div class="detail"><span class="plus">+${d.added}</span> <span class="minus">-${d.removed}</span> in ${d.hunks.length} ${d.hunks.length === 1 ? "place" : "places"}. Open the full change to approve it.</div>
+      ${d.problem ? `<div class="detail warn">${esc(d.problem)}</div>` : ""}
+      <div class="actions"><button class="btn small" data-review="${esc(a.id)}">Review change</button>${reject}</div></div>`;
+  }
+
+  // The full diffs come from the hub's list of write proposals. Fetched when a file approval has no diff yet, once per approval.
+  const triedProposals = new Set();
+  function wantProposals() {
+    const missing = st.approvals.filter((a) => ARDiff.isFileWriteApproval(a) && !proposalFor(a) && !triedProposals.has(a.id));
+    if (!missing.length || st.proposalsLoading) return;
+    for (const a of missing) triedProposals.add(a.id);
+    void loadProposals();
+  }
+
+  async function loadProposals() {
+    st.proposalsErr = ""; st.proposalsLoading = true;
+    try { st.proposals = await api("/write-proposals"); }
+    catch (e) { if (e.message === "unpaired") return; st.proposalsErr = e.message; }
+    finally { st.proposalsLoading = false; }
+    if (st.view === "approvals") renderApprovals(); else if (st.view === "diff") renderReview(); else if (st.view === "folders") paintGrantList();
+  }
+
+  const h = (tag, props, ...kids) => {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(props || {})) {
+      if (v === undefined || v === null || v === false) continue;
+      if (k === "class") e.className = v; else if (k === "text") e.textContent = v;
+      else if (k.startsWith("data-") || k.startsWith("aria-") || k === "for" || k === "role") e.setAttribute(k, v === true ? "" : v);
+      else e[k] = v;
+    }
+    for (const c of kids.flat()) if (c !== null && c !== undefined && c !== false) e.append(c.nodeType ? c : document.createTextNode(String(c)));
+    return e;
+  };
+
+  const ROWS_PER_CHUNK = 250;
+  let review = null; // the diff on screen: rows, how many are drawn, and whether Approve has been earned
+
+  function renderReview() {
+    const view = $("#view");
+    const a = st.approvals.find((x) => x.id === st.reviewId);
+    if (!a) { view.replaceChildren(h("div", { class: "empty", text: "This one was already decided." })); review = null; return; }
+    const p = proposalFor(a);
+    if (!p) {
+      view.replaceChildren(h("div", { class: "empty", text: st.proposalsLoading ? "Loading the full change…" : st.proposalsErr ? `Can't load the full change: ${st.proposalsErr}` : "The full change isn't available, so it can't be approved here." }),
+        h("div", { class: "actions pad" }, st.proposalsLoading ? null : h("button", { class: "btn small plain", "data-reload": "proposals", text: "Try again" }),
+          h("button", { class: "btn small plain", "data-approval": a.id, "data-decision": "rejected", text: "Reject" })));
+      wantProposals();
+      review = null; return;
+    }
+    const d = ARDiff.parseUnifiedDiff(p.diff);
+    const rows = ARDiff.flattenDiff(d);
+    const head = h("div", { class: "dv-head" },
+      h("div", { class: "dv-path", text: p.relPath }),
+      h("div", { class: "dv-sub" }, `${agentName(a.agentId)} ${p.baseSha256 ? "wants to change this file" : "wants to create this file"}. `,
+        h("span", { class: "plus", text: `+${d.added}` }), " ", h("span", { class: "minus", text: `-${d.removed}` }), ` in ${d.hunks.length} ${d.hunks.length === 1 ? "place" : "places"}.`),
+      d.problem ? h("div", { class: "detail warn", text: d.problem }) : null);
+    const body = h("div", { class: "dv-body", role: "region", "aria-label": `Changes to ${p.relPath}` });
+    const hint = h("div", { class: "dv-hint" });
+    const approve = h("button", { class: "btn small", "data-approval": a.id, "data-decision": "approved", text: "Approve", disabled: true });
+    const reject = h("button", { class: "btn small plain", "data-approval": a.id, "data-decision": "rejected", text: "Reject" });
+    const bar = h("div", { class: "dv-bar" }, hint, h("div", { class: "actions" }, approve, reject));
+    const more = h("div", { class: "dv-more", hidden: true, text: "Loading more…" });
+    view.replaceChildren(head, body, more, bar);
+    view.scrollTop = 0;
+    review = { approvalId: a.id, rows, shown: 0, problem: d.problem, body, more, approve, hint, view, done: false };
+    appendRows();
+    // Fits on one screen: nothing to scroll, so nothing to gate. Otherwise the owner reads to the end first.
+    requestAnimationFrame(updateGate);
+  }
+
+  // Rows go in a chunk at a time, so a huge diff never freezes the phone. All of it is still there: the end is the end of the diff.
+  function appendRows() {
+    const r = review; if (!r || r.shown >= r.rows.length) return;
+    const frag = document.createDocumentFragment();
+    const upto = Math.min(r.rows.length, r.shown + ROWS_PER_CHUNK);
+    for (let i = r.shown; i < upto; i++) {
+      const row = r.rows[i];
+      if (row.type === "hunk") { frag.append(h("div", { class: "dl hunk", text: row.header })); continue; }
+      const L = row.line;
+      frag.append(h("div", { class: `dl ${L.kind}` },
+        h("span", { class: "ln", text: String((L.kind === "del" ? L.oldNo : L.newNo) ?? "") }),
+        h("span", { class: "mk", text: L.kind === "add" ? "+" : L.kind === "del" ? "-" : " " }),
+        h("span", { class: "tx", text: L.text === "" ? " " : L.text })));
+      if (L.noNewline) frag.append(h("div", { class: "dl note", text: "No newline at end of file" }));
+    }
+    r.shown = upto;
+    r.body.append(frag);
+    r.more.hidden = r.shown >= r.rows.length;
+  }
+
+  function updateGate() {
+    const r = review; if (!r || st.view !== "diff") return;
+    const v = r.view;
+    if (!r.more.hidden && v.scrollTop + v.clientHeight >= v.scrollHeight - 600) { appendRows(); return updateGate(); }
+    const allShown = r.shown >= r.rows.length;
+    const gated = ARDiff.needsScrollGate(v.clientHeight, v.scrollHeight);
+    const atEnd = allShown && ARDiff.scrolledToEnd(v.scrollTop, v.clientHeight, v.scrollHeight);
+    if (atEnd || (!gated && allShown)) r.done = true;   // once read to the end it stays read
+    const ok = r.done && !r.problem && allShown;
+    r.approve.disabled = !ok;
+    r.hint.textContent = r.problem ? "This change can't be approved here. You can reject it." : ok ? "You've seen the whole change." : "Scroll to the end to approve.";
+  }
+
+  function renderFolders() {
+    const v = $("#view");
+    const form = st.gform;
+    const rooms = [...st.rooms].sort((a, b) => roomName(a).localeCompare(roomName(b)));
+    const agents = Object.values(st.agents).sort((a, b) => a.name.localeCompare(b.name));
+    const field = (id, label, input) => h("div", { class: "field" }, h("label", { for: id, text: label }), input);
+    const sel = (id, value, opts) => h("select", { id, "data-gform": id }, opts.map(([val, text]) => h("option", { value: val, text, selected: val === value })));
+    const sw = (id, label, hint, on) => h("label", { class: "perm", for: id }, h("span", { class: "txt" }, h("span", { class: "lbl", text: label }), h("span", { class: "hint2", text: hint })),
+      h("input", { type: "checkbox", id, role: "switch", class: "switch", "aria-label": label, "data-gform": id, checked: on }));
+    const f = h("form", { class: "gform", id: "grantForm", autocomplete: "off" },
+      h("div", { class: "section flush", text: "Add a folder" }),
+      field("gfPath", "Folder on your Mac", h("input", { id: "gfPath", "data-gform": "gfPath", value: form.path, placeholder: "/Users/you/Documents/notes", autocapitalize: "off", autocorrect: "off", spellcheck: false, inputMode: "url" })),
+      field("gfLabel", "Name (optional)", h("input", { id: "gfLabel", "data-gform": "gfLabel", value: form.label, maxLength: 80, placeholder: "Notes" })),
+      field("gfRoom", "Room", sel("gfRoom", form.roomId, [["", "All rooms"], ...rooms.map((r) => [r.id, roomName(r)])])),
+      field("gfAgent", "Agent", sel("gfAgent", form.agentId, [["*", "Any agent"], ...agents.map((a) => [a.id, a.name])])),
+      sw("gfRead", "Read", "Agents can look at files here.", form.read),
+      sw("gfWrite", "Write", "Agents can propose changes. Writes always come to you as changes to approve.", form.write),
+      h("div", { class: "err", id: "gfErr", role: "alert", text: form.err }),
+      h("button", { class: "btn", type: "submit", id: "gfAdd", text: "Add folder", disabled: form.busy }));
+    v.replaceChildren(
+      h("div", { class: "card" }, h("div", { class: "what", text: "Folders agents can use" }), h("div", { class: "detail", text: "Agents can read files here. Writes always come to you as changes to approve." })),
+      h("div", { id: "grantList" }), f);
+    paintGrantList();
+    if (!st.grants) void loadGrants();
+  }
+
+  async function loadGrants() {
+    try {
+      const [grants, proposals] = await Promise.all([api("/folder-grants"), api("/write-proposals").catch(() => st.proposals || [])]);
+      st.grants = grants; st.proposals = proposals; st.proposalsErr = "";
+    } catch (e) { if (e.message !== "unpaired") toast(`Can't load folders: ${e.message}`); st.grants = st.grants || []; }
+    if (st.view === "folders") paintGrantList();
+  }
+
+  const grantScope = (g) => {
+    const r = g.roomId ? st.rooms.find((x) => x.id === g.roomId) : null;
+    return g.roomId ? (r ? roomName(r) : "A room that was deleted") : "All rooms";
+  };
+  const grantAgent = (g) => (g.agentId === "*" ? "Any agent" : agentName(g.agentId));
+  const pendingFor = (g) => (st.proposals || []).filter((p) => p.grantId === g.id && p.status === "pending").length;
+
+  function paintGrantList() {
+    const host = $("#grantList"); if (!host) return;
+    if (!st.grants) { host.replaceChildren(h("div", { class: "empty", text: "Loading…" })); return; }
+    const sorted = [...st.grants].sort((a, b) => a.path.localeCompare(b.path) || (a.roomId || "").localeCompare(b.roomId || "") || a.agentId.localeCompare(b.agentId) || a.createdAt - b.createdAt);
+    if (!sorted.length) { host.replaceChildren(h("div", { class: "empty", text: "No folders yet. Agents can't see any files until you add one." })); return; }
+    host.replaceChildren(h("div", { class: "section", text: `Added folders (${sorted.length})` }), ...sorted.map((g) => {
+      const name = g.label || g.path.split("/").filter(Boolean).pop() || g.path;
+      const row = (kind, label, hint, on) => h("label", { class: "perm" }, h("span", { class: "txt" }, h("span", { class: "lbl", text: label }), h("span", { class: "hint2", text: hint })),
+        h("input", { type: "checkbox", role: "switch", class: "switch", "aria-label": `${label} ${name}`, "data-grant": g.id, "data-access": kind, checked: on }));
+      return h("div", { class: "grant" },
+        h("div", { class: "gtop" }, g.label ? h("div", { class: "gname", text: g.label }) : null, h("div", { class: "gpath", text: g.path }),
+          h("div", { class: "gmeta", text: `${grantScope(g)} · ${grantAgent(g)}` })),
+        row("read", "Read", "Agents can look at files here.", g.read),
+        row("write", "Write", "Writes always come to you as changes to approve.", g.write),
+        h("div", { class: "actions pad" }, h("button", { class: "btn small plain", "data-grant-remove": g.id, text: "Remove" })));
+    }));
+  }
+
+  // The hub has no "edit" for a grant, so a switch adds the changed grant first and then removes the old one.
+  // Anything the agent had waiting for approval from the old grant is dropped; it can ask again.
+  async function setGrantAccess(input) {
+    const g = st.grants.find((x) => x.id === input.dataset.grant); if (!g) return;
+    const key = input.dataset.access, value = input.checked;
+    const next = { read: g.read, write: g.write, [key]: value };
+    if (!next.read && !next.write) { input.checked = !value; toast("A folder needs Read or Write. Remove it to stop all access."); return; }
+    const n = pendingFor(g);
+    if (n && !confirm(`${n} change${n === 1 ? " is" : "s are"} waiting for your approval from this folder. Changing this drops ${n === 1 ? "it" : "them"}, and the agent can ask again. Continue?`)) { input.checked = !value; return; }
+    input.disabled = true;
+    try {
+      const added = await api("/folder-grants", { method: "POST", body: { path: g.path, label: g.label, roomId: g.roomId, agentId: g.agentId, read: next.read, write: next.write } });
+      try { await api(`/folder-grants/${g.id}`, { method: "DELETE" }); }
+      catch (e) { await api(`/folder-grants/${added.id}`, { method: "DELETE" }).catch(() => {}); throw e; }
+      await loadGrants();
+    } catch (e) { input.checked = !value; input.disabled = false; if (e.message !== "unpaired") toast(e.message); }
+  }
+
+  async function removeGrant(btn) {
+    const g = st.grants.find((x) => x.id === btn.dataset.grantRemove); if (!g) return;
+    const n = pendingFor(g);
+    if (!confirm(`Remove ${g.label || g.path}? Agents lose access to it right away.${n ? ` ${n} change${n === 1 ? "" : "s"} waiting for approval will be dropped.` : ""}`)) return;
+    btn.disabled = true;
+    try { await api(`/folder-grants/${g.id}`, { method: "DELETE" }); await loadGrants(); }
+    catch (e) { btn.disabled = false; if (e.message !== "unpaired") toast(e.message); }
+  }
+
+  async function addGrant() {
+    const f = st.gform;
+    if (!f.path.trim()) { f.err = "Type the folder's full path, like /Users/you/Documents/notes."; $("#gfErr").textContent = f.err; return; }
+    if (!f.read && !f.write) { f.err = "Turn on Read, Write or both."; $("#gfErr").textContent = f.err; return; }
+    f.busy = true; f.err = ""; $("#gfErr").textContent = ""; $("#gfAdd").disabled = true;
+    try {
+      await api("/folder-grants", { method: "POST", body: { path: f.path.trim(), label: f.label.trim() || undefined, roomId: f.roomId || undefined, agentId: f.agentId, read: f.read, write: f.write } });
+      Object.assign(f, { path: "", label: "", roomId: "", agentId: "*", read: true, write: false });
+      await loadGrants();
+      if (st.view === "folders") renderFolders();
+    } catch (e) {
+      if (e.message === "unpaired") return;
+      f.err = e.message.charAt(0).toUpperCase() + e.message.slice(1);   // the hub says why a folder can't be shared (home folder, credentials, not found)
+      const el = $("#gfErr"); if (el) el.textContent = f.err;
+    } finally { f.busy = false; const b = $("#gfAdd"); if (b) b.disabled = false; }
   }
 
   // Per-agent tool switches. A sub-setting is nested under its parent (indented, with a left rule); labels never carry spaces.
@@ -440,6 +670,10 @@
         if (!st.tools.length) { st.tools = await api("/tools"); if (st.view === "permissions") renderPermissions(); }
         return;
       }
+      if (t.dataset.nav === "folders") { st.grants = null; go("folders"); void loadGrants(); return; }
+      if (t.dataset.review) { st.reviewId = t.dataset.review; go("diff"); return; }
+      if (t.dataset.reload === "proposals") { triedProposals.clear(); st.proposalsErr = ""; if (st.view === "approvals") renderApprovals(); else renderReview(); return; }
+      if (t.dataset.grantRemove) { await removeGrant(t); return; }
       if (t.dataset.nav === "control") { go("control"); loadControl().catch(() => {}); return; }
       if (t.dataset.control === "lint") {
         t.disabled = true;
@@ -469,9 +703,13 @@
         return;
       }
       if (t.dataset.approval) {
+        // 1.1: a file write is approved only from the full diff, after it has been read to the end.
+        const target = st.approvals.find((a) => a.id === t.dataset.approval);
+        if (t.dataset.decision === "approved" && target && ARDiff.isFileWriteApproval(target) && !(review && review.approvalId === target.id && review.done && !review.problem)) return;
         t.disabled = true;
         await api(`/approvals/${t.dataset.approval}`, { method: "POST", body: { decision: t.dataset.decision } });
-        st.approvals = st.approvals.filter((a) => a.id !== t.dataset.approval); renderBadge(); renderApprovals();
+        st.approvals = st.approvals.filter((a) => a.id !== t.dataset.approval); review = null;
+        if (st.view === "diff") go("approvals"); else { renderBadge(); renderApprovals(); }
         return;
       }
       if (t.dataset.steer) {
@@ -484,7 +722,7 @@
 
   // Permission switches: tool on/off, or the nested "without asking" setting.
   document.addEventListener("change", async (e) => {
-    const el = e.target; if (!el.matches?.("input.switch") || el.dataset.remote) return;
+    const el = e.target; if (!el.matches?.("input.switch") || el.dataset.remote || el.dataset.grant || el.dataset.gform) return;
     const { agent, kind, tool } = el.dataset;
     el.disabled = true;
     try {
@@ -493,6 +731,21 @@
       renderPermissions();
     } catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
   });
+
+  // Folder grants (1.1): the Read and Write switches on a folder, and the Add folder form.
+  document.addEventListener("change", (e) => {
+    const el = e.target;
+    if (el.matches?.("input.switch[data-grant]")) { void setGrantAccess(el); return; }
+    const id = el.dataset?.gform; if (!id) return;
+    const f = st.gform;
+    if (id === "gfRead") f.read = el.checked; else if (id === "gfWrite") f.write = el.checked;
+    else if (id === "gfRoom") f.roomId = el.value; else if (id === "gfAgent") f.agentId = el.value;
+  });
+  document.addEventListener("input", (e) => {
+    const id = e.target.dataset?.gform;
+    if (id === "gfPath") st.gform.path = e.target.value; else if (id === "gfLabel") st.gform.label = e.target.value;
+  });
+  document.addEventListener("submit", (e) => { if (e.target.id === "grantForm") { e.preventDefault(); void addGrant(); } });
 
   // Funnel switch (1.2). Turning it on asks first; the hub does the work and tells us what Tailscale ended up doing.
   document.addEventListener("change", async (e) => {
@@ -503,7 +756,7 @@
     catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
   });
 
-  $("#back").onclick = () => go("rooms");
+  $("#back").onclick = () => go(st.view === "diff" ? "approvals" : "rooms");
   $("#jumpNew").onclick = () => {
     const line = $("#newLine"), view = $("#view");
     if (line) view.scrollTo({ top: Math.max(0, line.offsetTop - view.offsetTop - 8), behavior: "smooth" });
@@ -514,6 +767,9 @@
     const line = $("#newLine"), view = $("#view");
     if (!$("#jumpNew").hidden && line && line.offsetTop - view.offsetTop >= view.scrollTop) $("#jumpNew").hidden = true;
   }, { passive: true });
+  // 1.1: reading a file change to the end is what turns Approve on.
+  $("#view").addEventListener("scroll", () => { if (st.view === "diff") updateGate(); }, { passive: true });
+  window.addEventListener("resize", () => { if (st.view === "diff") updateGate(); });
   $("#approvalsBtn").onclick = () => go("approvals");
   $("#send").onsubmit = (e) => { e.preventDefault(); void sendMessage($("#input").value); };
   $("#input").addEventListener("input", grow);

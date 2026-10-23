@@ -1,6 +1,6 @@
 import type {
-  AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, McpConnection, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
-  Message, OrchestratorSettings, RemoteStatus, Room, ServerEvent, Subscription, SubscriptionStatus, Task,
+  AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, FolderGrant, McpConnection, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
+  Message, OrchestratorSettings, RemoteStatus, Room, ServerEvent, Subscription, SubscriptionStatus, Task, WriteProposal,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -92,6 +92,12 @@ export class Hub {
   controlHistory = (path?: string) => this.req<ControlCommit[]>(`/control/history${path ? `?path=${encodeURIComponent(path)}` : ""}`);
   controlRevert = (commit: string) => this.send<{ ok: boolean; commit: string; files: string[] }>("POST", `/control/revert/${commit}`);
   controlLint = () => this.send<{ blocks: ControlNotice[]; flags: ControlNotice[] }>("POST", "/control/lint");
+  // 1.1 folder grants and file writes
+  folderGrants = () => this.req<FolderGrant[]>("/folder-grants");
+  addFolderGrant = (g: { path: string; label?: string; roomId?: string; agentId: string; read: boolean; write: boolean }) => this.send<FolderGrant>("POST", "/folder-grants", g);
+  removeFolderGrant = (id: string) => this.send("DELETE", `/folder-grants/${id}`);
+  /** Every write proposal with its full diff. File approvals are decided from this, never from the approval's preview text. */
+  writeProposals = () => this.req<WriteProposal[]>("/write-proposals");
   mcpToken = (agentId: string, name: string) => this.send<{ token: string; url: string }>("POST", "/mcp-tokens", { agentId, name });
 
   /** Live events with automatic reconnect. Returns a stop function. */

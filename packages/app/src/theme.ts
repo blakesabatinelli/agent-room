@@ -33,6 +33,11 @@ const light = {
   owner: "#1E242C",
   orchestrator: "#0B6E69",   // legacy key: accent text
   shadow: "rgba(30, 36, 44, 0.08)",
+  // file changes: tinted rows, with the +/- sign kept so colour is never the only cue
+  diffAddBg: "rgba(24, 121, 78, 0.12)",
+  diffAddInk: "#12603F",
+  diffDelBg: "rgba(198, 45, 59, 0.11)",
+  diffDelInk: "#A3232F",
 };
 export type Palette = typeof light;
 export const usePalette = (): Palette => light;

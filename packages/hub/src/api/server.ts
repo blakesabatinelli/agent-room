@@ -77,6 +77,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     ["index.html", "text/html; charset=utf-8"], ["app.js", "text/javascript; charset=utf-8"], ["app.css", "text/css; charset=utf-8"],
     ["manifest.webmanifest", "application/manifest+json"], ["icon-180.png", "image/png"], ["icon-512.png", "image/png"],
     ["favicon-32.png", "image/png"],
+    ["diff.js", "text/javascript; charset=utf-8"], // 1.1: reads the full diff of a file write
   ] as const) {
     try { webFiles.set(name, { type, body: readFileSync(new URL(name, webDir)) }); } catch { /* missing asset: that route 404s */ }
   }
