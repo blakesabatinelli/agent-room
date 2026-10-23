@@ -11,7 +11,12 @@ export interface McpConnection {
   agentId: string;
   token: string;
   localUrl: string;
+  /** Preferred tailnet address: the MagicDNS name when there is one, else the tailnet IP. */
   tailscaleUrl?: string;
+  /** 1.2: the tailnet IP form, for clients that can't resolve MagicDNS names. */
+  tailscaleIpUrl?: string;
+  /** 1.2: public https address of /mcp, present only while Tailscale Funnel is on. */
+  funnelUrl?: string;
   /** mcpServers JSON block for clients that take one */
   config: string;
   /** standing instructions to paste into the agent's system prompt */
@@ -551,4 +556,42 @@ export interface RoutingRecord {
   failureTag?: FailureTag;
   failureNote?: string;
   completedAt?: number;
+}
+
+// ---- 1.2 Remote access over Tailscale
+export type TailscaleState = "not_installed" | "stopped" | "needs_login" | "running";
+
+/** What the Tailscale CLI says about this Mac. */
+export interface TailscaleStatus {
+  state: TailscaleState;
+  /** Tailnet IPv4 (or IPv6 when there is no v4). */
+  ip?: string;
+  /** MagicDNS name without the trailing dot, e.g. blakes-mac.tail1234.ts.net. */
+  dnsName?: string;
+  tailnet?: string;
+  /** What Tailscale Funnel is doing right now, read from the CLI. */
+  funnel: { on: boolean; url?: string; extraPaths: string[] };
+  /** One plain sentence for the UI. */
+  detail: string;
+  checkedAt: number;
+}
+
+/** GET /remote/status: Tailscale's state plus what the owner asked for. */
+export interface RemoteStatus extends Omit<TailscaleStatus, "funnel"> {
+  /** Best host to give other devices: MagicDNS name, else tailnet IP. */
+  host?: string;
+  /** Hub address on the tailnet, e.g. http://blakes-mac.tail1234.ts.net:4747 */
+  hubUrl?: string;
+  funnel: {
+    /** Funnel is exposing /mcp right now (per Tailscale). */
+    on: boolean;
+    /** Public address of /mcp while on. */
+    url?: string;
+    /** What the owner asked for in the hub (off by default). */
+    intent: boolean;
+    /** Set when Tailscale and the hub disagree. The hub only reports this; it never changes Funnel by itself. */
+    drift?: "on_in_tailscale" | "off_in_tailscale";
+    /** Other paths or raw TCP that Funnel exposes on the same port. Anything here is a problem. */
+    extraPaths: string[];
+  };
 }

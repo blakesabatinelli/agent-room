@@ -1,4 +1,4 @@
-import { runProc } from "./adapters/proc.js";
+import { defaultTailscale } from "./remote/tailscale.js";
 
 /** Loopback or Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48) only. */
 export function isAllowedLocalAddress(addr: string | undefined): boolean {
@@ -10,13 +10,11 @@ export function isAllowedLocalAddress(addr: string | undefined): boolean {
   return !!m && Number(m[1]) >= 64 && Number(m[1]) <= 127;
 }
 
+/** The Mac's tailnet IP. Sourced from the Tailscale status (remote/tailscale.ts); AGENT_ROOM_TAILSCALE_IP overrides it. */
 export async function tailscaleIp(): Promise<string | undefined> {
   if (process.env.AGENT_ROOM_TAILSCALE_IP) return process.env.AGENT_ROOM_TAILSCALE_IP;
-  for (const bin of ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]) {
-    const r = await runProc(bin, ["ip", "-4"], { timeoutMs: 3000 });
-    if (r.code === 0 && r.stdout.trim()) return r.stdout.trim().split("\n")[0];
-  }
-  return undefined;
+  const st = await defaultTailscale().status();
+  return st.state === "running" ? st.ip : undefined;
 }
 
 /** Optional phone push via ntfy (set AGENT_ROOM_NTFY_TOPIC; use a long random topic). */

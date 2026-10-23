@@ -1,6 +1,6 @@
 import type {
   AgentConfig, AgentScore, AgentStatus, McpConnection, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
-  Message, OrchestratorSettings, Room, ServerEvent, Task,
+  Message, OrchestratorSettings, RemoteStatus, Room, ServerEvent, Task,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -19,7 +19,7 @@ export class Hub {
       headers: { ...(init.body !== undefined ? { "content-type": "application/json" } : {}), ...(this.token ? { authorization: `Bearer ${this.token}` } : {}), ...(init.headers ?? {}) },
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error((body as { error?: string }).error ?? `Hub returned ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error((body as { error?: string }).error ?? `Hub returned ${res.status}`), { approvalUrl: (body as { approvalUrl?: string }).approvalUrl });
     return body as T;
   }
   private send<T>(method: string, path: string, body?: unknown) { return this.req<T>(path, { method, body: body === undefined ? undefined : JSON.stringify(body) }); }
@@ -32,6 +32,11 @@ export class Hub {
   signIn = (agentId: string) => this.send<{ ok: boolean; message: string }>("POST", `/setup/signin/${agentId}`);
 
   signInLog = (agentId: string) => this.req<{ log: string | null }>(`/setup/signin/${agentId}/log`);
+
+  // 1.2 remote access over Tailscale
+  remoteStatus = (fresh = false) => this.req<RemoteStatus>(`/remote/status${fresh ? "?fresh=1" : ""}`);
+  setFunnel = (on: boolean) => this.send<RemoteStatus>("POST", "/remote/funnel", { on });
+  openTailscale = () => this.send<{ ok: boolean; message: string }>("POST", "/remote/open");
 
   rooms = () => this.req<Room[]>("/rooms");
   createRoom = (name: string, topic?: string) => this.send<Room>("POST", "/rooms", { name, topic });

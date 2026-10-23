@@ -9,17 +9,26 @@ import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { Approvals } from "../orchestrator/approvals.js";
 import { adapters, inbox } from "../adapters/index.js";
 import { handleMcp } from "../mcp/server.js";
-import { isAllowedLocalAddress, pushNotify, tailscaleIp } from "../net.js";
+import { isAllowedLocalAddress, pushNotify } from "../net.js";
 import { openSignIn, signInLog } from "../setup.js";
 import { pairingCode, token } from "../util.js";
 import { listFiles } from "../orchestrator/workspace.js";
 import { routingJsonl } from "../orchestrator/routing.js";
 import { runProc } from "../adapters/proc.js";
 import { PathDenied } from "../files/paths.js";
+import { defaultTailscale, type Tailscale } from "../remote/tailscale.js";
+import { AuthLimiter, forwardedIp, isRemoteRequest, rpcSummary } from "../remote/guard.js";
+import { composeRemote, remoteHost } from "../remote/status.js";
 
-export interface ServerDeps { store: Store; orch: Orchestrator; approvals: Approvals; ownerName: string; restrictInterfaces?: boolean }
+export interface ServerDeps {
+  store: Store; orch: Orchestrator; approvals: Approvals; ownerName: string; restrictInterfaces?: boolean;
+  /** 1.2: the Tailscale CLI wrapper (tests inject one pointed at a fake CLI). */
+  tailscale?: Tailscale;
+  /** 1.2: failed-auth allowance for proxied (Funnel) /mcp callers. Default 10 failures, one more every 6 s. */
+  remoteAuth?: { burst?: number; refillMs?: number };
+}
 
-export async function buildServer({ store, orch, approvals, ownerName, restrictInterfaces = true }: ServerDeps) {
+export async function buildServer({ store, orch, approvals, ownerName, restrictInterfaces = true, tailscale = defaultTailscale(), remoteAuth }: ServerDeps) {
   const app = Fastify({ logger: false, bodyLimit: 5 * 1024 * 1024 });
   // Accept POSTs that say "JSON" but carry no body (e.g. button actions with nothing to send).
   app.removeContentTypeParser("application/json");
@@ -36,12 +45,19 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   app.decorate("pairingCode", () => currentCode());
   let pairFailures = 0;
 
+  const authLimiter = new AuthLimiter(remoteAuth?.burst ?? 10, remoteAuth?.refillMs ?? 6000);
+
   const bearer = (h?: string) => (h?.startsWith("Bearer ") ? h.slice(7) : undefined);
   const externalMcp = () => store.getKV<Record<string, { agentId: string; name: string }>>("mcp_tokens", {});
 
   app.addHook("onRequest", async (req, reply) => {
     if (restrictInterfaces && !isAllowedLocalAddress(req.socket.localAddress)) return reply.code(403).send({ error: "Only reachable over localhost or Tailscale." });
     const path = req.url.split("?")[0];
+    // 1.2: a request that came through Tailscale Funnel (or any proxy) reaches POST /mcp and its 405 GET, and nothing else.
+    if (isRemoteRequest(req)) {
+      if (path !== "/mcp" || (req.method !== "POST" && req.method !== "GET")) return reply.code(404).send({ error: "Not found." });
+      return; // /mcp authenticates every call itself
+    }
     if (path === "/health" || path === "/pair" || path === "/pair/local" || path === "/mcp") return;
     if (path === "/" || path.startsWith("/web/")) return; // the phone web app itself; everything it calls still needs a token
     const t = bearer(req.headers.authorization) ?? (path === "/ws" ? new URL(req.url, "http://x").searchParams.get("token") ?? undefined : undefined);
@@ -97,7 +113,9 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
    * loopback connection, a localhost Host header (blocks DNS rebinding) and no Origin
    * header (browsers always send one on POST, so web pages can't use this).
    */
-  const isLoopback = (req: { socket: { remoteAddress?: string } }) => ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress ?? "");
+  // 1.2: a proxied request (Tailscale Funnel/serve) arrives from 127.0.0.1 too; it is never "the app on this Mac".
+  const isLoopback = (req: { socket: { remoteAddress?: string }; headers: Record<string, string | string[] | undefined> }) =>
+    ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress ?? "") && !isRemoteRequest(req);
   app.post("/pair/local", async (req, reply) => {
     const host = (req.headers.host ?? "").split(":")[0];
     if (!isLoopback(req) || !["127.0.0.1", "localhost"].includes(host) || req.headers.origin)
@@ -113,12 +131,12 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     const agents = store.listAgents();
     const status = await Promise.all(agents.map(async (a) => ({ id: a.id, name: a.name, enabled: a.enabled, color: a.color, adapter: a.adapter, ...(await adapters[a.adapter].status(a)) })));
     for (const a of agents) orch.forgetStatus(a.id);
-    const ts = await tailscaleIp();
+    const host = remoteHost(await tailscale.status());
     return {
       agents: status,
       practiceMode: store.getKV("practice_mode", false),
       onboarded: store.getKV("onboarded", false),
-      phone: { url: ts ? `http://${ts}:${(app.server.address() as { port: number } | null)?.port ?? 4747}` : null, code: currentCode() },
+      phone: { url: host ? `http://${host}:${(app.server.address() as { port: number } | null)?.port ?? 4747}` : null, code: currentCode() },
     };
   });
   app.put("/setup", async (req) => {
@@ -141,11 +159,57 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     return { log: signInLog(a.adapter) };
   });
 
+  // ---------- 1.2 remote access over Tailscale (paired devices only; a proxied/Funnel request never gets here)
+  const funnelIntent = () => store.getKV<boolean>("remote_funnel", false);
+  const remoteNow = async (fresh = false) => composeRemote(await tailscale.status(fresh), funnelIntent(), port());
+  app.get("/remote/status", async (req) => remoteNow((req.query as { fresh?: string }).fresh === "1"));
+  // Funnel is the owner's call: { on: true } exposes /mcp at a public https address; { on: false } removes it.
+  app.post("/remote/funnel", async (req, reply) => {
+    const b = z.object({ on: z.boolean() }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: "Send on: true or false." });
+    const r = b.data.on ? await tailscale.enableFunnel(port()) : await tailscale.disableFunnel();
+    if (!b.data.on) store.setKV("remote_funnel", false); // the owner asked for off; if Tailscale still has it on, that shows up as drift
+    if (!r.ok) {
+      store.audit("owner", "remote.funnel.failed", `${b.data.on ? "on" : "off"}: ${r.error}`);
+      return reply.code(409).send({ error: r.error, approvalUrl: r.approvalUrl });
+    }
+    if (b.data.on) store.setKV("remote_funnel", true);
+    store.audit("owner", b.data.on ? "remote.funnel.on" : "remote.funnel.off", r.status.funnel.url ?? "/mcp");
+    return remoteNow(true);
+  });
+  // Opens the Tailscale app on this Mac so the owner can sign in. Only the Mac app may ask.
+  app.post("/remote/open", async (req, reply) => {
+    if (!isLoopback(req)) return reply.code(403).send({ error: "Open Tailscale from the Mac app." });
+    return tailscale.openApp();
+  });
+  // Start-up check (main.ts calls it): the hub reports when Tailscale and the owner's setting disagree, and never changes either.
+  let lastDrift = "";
+  app.decorate("remoteCheck", async () => {
+    try {
+      const r = await remoteNow(true);
+      const now = [r.funnel.drift ?? "", ...r.funnel.extraPaths].join(",");
+      if (now && now !== lastDrift) {
+        if (r.funnel.drift) store.audit("hub", "remote.funnel.drift", r.funnel.drift === "on_in_tailscale" ? "Funnel is on in Tailscale but off in Agent Room" : "Funnel is off in Tailscale but on in Agent Room");
+        if (r.funnel.extraPaths.length) store.audit("hub", "remote.funnel.extra_paths", `Funnel also exposes: ${r.funnel.extraPaths.join(", ")}`);
+      }
+      lastDrift = now;
+      return r;
+    } catch { return undefined; }
+  });
+
   // ---------- MCP (agents + external MCP apps)
   app.post("/mcp", async (req, reply) => {
+    // 1.2: callers that came through Funnel get a failed-auth limit (checked first, so guessing gains nothing) and every call is audited.
+    const remote = isRemoteRequest(req);
+    const from = remote ? forwardedIp(req) : "";
+    if (remote && authLimiter.blocked(from)) return reply.code(429).send({ error: "Too many failed attempts. Try again in a minute." });
     const t = bearer(req.headers.authorization);
     const grant = t ? orch.grants.get(t) ?? (externalMcp()[t] ? { agentId: externalMcp()[t].agentId } : undefined) : undefined;
-    if (!grant || (grant.expiresAt && grant.expiresAt < Date.now())) return reply.code(401).send({ error: "Invalid MCP token." });
+    if (!grant || (grant.expiresAt && grant.expiresAt < Date.now())) {
+      if (remote) { authLimiter.fail(from); store.audit("remote", "mcp.remote.denied", `from ${from}`); }
+      return reply.code(401).send({ error: "Invalid MCP token." });
+    }
+    if (remote) store.audit(grant.agentId, "mcp.remote", `agent=${grant.agentId} ${rpcSummary(req.body)} from ${from}`);
     reply.hijack();
     await handleMcp(store, orch, grant, req.raw, reply.raw, req.body);
   });
@@ -323,9 +387,13 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   const existingToken = (agentId: string) => Object.entries(externalMcp()).find(([, v]) => v.agentId === agentId)?.[0];
   /** Builds the config snippets and start message for a key. Same key in, same text out. */
   const connectionFor = async (a: AgentConfig, t: string): Promise<McpConnection> => {
-    const ts = await tailscaleIp();
+    const st = await tailscale.status();
+    const host = remoteHost(st); // MagicDNS name first, then the tailnet IP
+    const ip = process.env.AGENT_ROOM_TAILSCALE_IP ?? (st.state === "running" ? st.ip : undefined);
     const localUrl = `http://127.0.0.1:${port()}/mcp`;
-    const tailscaleUrl = ts ? `http://${ts}:${port()}/mcp` : undefined;
+    const tailscaleUrl = host ? `http://${host}:${port()}/mcp` : undefined;
+    const tailscaleIpUrl = ip && ip !== host ? `http://${ip}:${port()}/mcp` : undefined;
+    const funnelUrl = st.funnel.on ? st.funnel.url : undefined;
     const yaml = (url: string) => [
       "mcp_servers:",
       "  agent-room:",
@@ -338,12 +406,14 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     const snippets: NonNullable<McpConnection["snippets"]> = [
       { id: "hermes", label: "Hermes Agent", where: "Add to ~/.hermes/config.yaml, then restart Hermes.", text: yaml(localUrl) },
       { id: "json", label: "Claude Desktop, Cursor and most MCP apps", where: "Add to the app's MCP servers JSON.", text: json(localUrl) },
-      ...(tailscaleUrl ? [{ id: "remote", label: "From another computer (Tailscale)", where: "Use when the agent runs on a different machine.", text: yaml(tailscaleUrl) }] : []),
+      ...(tailscaleUrl ? [{ id: "remote", label: "From another computer (Tailscale)", where: "Use when the agent runs on a different machine on your tailnet.", text: yaml(tailscaleUrl) }] : []),
+      ...(tailscaleIpUrl ? [{ id: "remote-ip", label: "Same, by tailnet IP", where: "If the other computer can't resolve the Tailscale name.", text: yaml(tailscaleIpUrl) }] : []),
+      ...(funnelUrl ? [{ id: "funnel", label: "Cloud agents (Tailscale Funnel)", where: "For connectors that need a public https address. Only /mcp is reachable and the key above is required on every call.", text: json(funnelUrl) }] : []),
       { id: "test", label: "Test from Terminal", where: "Should print a list of Agent Room tools.", text:
         `curl -s ${localUrl} -H 'Authorization: Bearer ${t}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'` },
     ];
     const conn: McpConnection = {
-      agentId: a.id, token: t, localUrl, tailscaleUrl, snippets,
+      agentId: a.id, token: t, localUrl, tailscaleUrl, tailscaleIpUrl, funnelUrl, snippets,
       config: json(localUrl),
       instructions: [
         `You are ${a.name}, a member of Agent Room, a shared workspace where several AI agents work for ${ownerName}.`,

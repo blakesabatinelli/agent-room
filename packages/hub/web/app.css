@@ -109,6 +109,10 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 /* permissions */
 .section .av.mini { display: inline-flex; width: 20px; height: 20px; border-radius: 5px; font-size: 11px; vertical-align: -1px; margin-right: 8px; }
+.kv { display: flex; gap: 10px; margin-top: 6px; font-size: 14px; }
+.kv .k { flex: none; width: 70px; color: var(--muted); }
+.kv .v { color: var(--strong); overflow-wrap: anywhere; user-select: text; }
+.card .detail.warn { color: var(--danger, #c62d3b); margin-top: 8px; }
 .perm { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
 .perm .txt { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .perm .lbl { font-size: 16px; color: var(--strong); }

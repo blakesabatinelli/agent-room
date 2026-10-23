@@ -47,7 +47,7 @@ The app starts the hub on your Mac by itself and connects to it with no codes. A
 
 **Documents.** Agents save documents with the `save_document` MCP tool. Each lands as Markdown with front matter in `~/Agent Room/Library/<room>/<goal>/YYYY-MM-DD-slug.md` and is indexed (`GET /documents`). See `docs/DOCUMENTS.md`.
 
-**Local files (spike).** The owner grants folders per room and per agent (`/folder-grants`); agents read through `read_file` and write only by proposing a diff (`propose_file_write`) that the owner approves. Agents on other tailnet devices (Muse) reach the same tools over Tailscale; vendor-cloud agents can reach `/mcp` only through Tailscale Funnel (planned in 1.2). See `docs/spikes/0.3-file-access.md`.
+**Local files (spike).** The owner grants folders per room and per agent (`/folder-grants`); agents read through `read_file` and write only by proposing a diff (`propose_file_write`) that the owner approves. Agents on other tailnet devices (Muse) reach the same tools over Tailscale; vendor-cloud agents can reach `/mcp` only through Tailscale Funnel, which the owner switches on in Settings (1.2; `docs/1.2-remote-access.md`). See `docs/spikes/0.3-file-access.md`.
 
 **MCP.** The hub serves the room at `POST /mcp` (Streamable HTTP). Tools: `read_room`, `post_message`, `read_memory`, `propose_memory`, `list_tasks`, `update_task`, `request_approval`. CLI agents get a short-lived token per run. For Claude Desktop or another MCP app, use Settings > Let MCP apps join the room on the Mac.
 
@@ -61,7 +61,7 @@ The app starts the hub on your Mac by itself and connects to it with no codes. A
 
 ## Settings (environment)
 
-`AGENT_ROOM_PORT` (4747), `AGENT_ROOM_DATA` (`~/.agent-room`), `AGENT_ROOM_OWNER` (Blake), `AGENT_ROOM_TAILSCALE_IP` (auto-detected), `AGENT_ROOM_NTFY_TOPIC`, `AGENT_ROOM_DEMO`, `AGENT_ROOM_LIBRARY` (`~/Agent Room/Library`), and, to dial out to a relay, `AGENT_ROOM_RELAY_URL`, `AGENT_ROOM_RELAY_HUB_ID`, `AGENT_ROOM_RELAY_SECRET`.
+`AGENT_ROOM_PORT` (4747), `AGENT_ROOM_DATA` (`~/.agent-room`), `AGENT_ROOM_OWNER` (Blake), `AGENT_ROOM_TAILSCALE_IP` (auto-detected; forces the address given to other devices), `AGENT_ROOM_TAILSCALE_BIN` (path to the `tailscale` CLI; default is PATH, then the Mac app), `AGENT_ROOM_FUNNEL_PORT` (443, 8443 or 10000), `AGENT_ROOM_NTFY_TOPIC`, `AGENT_ROOM_DEMO`, `AGENT_ROOM_LIBRARY` (`~/Agent Room/Library`), and, to dial out to a relay, `AGENT_ROOM_RELAY_URL`, `AGENT_ROOM_RELAY_HUB_ID`, `AGENT_ROOM_RELAY_SECRET`.
 
 ## Tests
 
