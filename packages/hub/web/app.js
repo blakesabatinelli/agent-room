@@ -880,11 +880,12 @@
   async function loadScorecard() {
     const week = st.scWeek === "last" ? isoWeekOf(Date.now() - 7 * 86400000) : isoWeekOf(Date.now());
     const month = new Date().toISOString().slice(0, 7);
-    const [fp, sc, lg, at] = await Promise.all([
+    const [fp, sc, lg, at, ns] = await Promise.all([
       api("/metrics/first-pass?weeks=12"), api(`/reports/scorecard?week=${week}`).catch(() => null),
       api(`/reports/ledger?month=${month}`).catch(() => null), api("/attention").catch(() => null),
+      api("/nightshift").catch(() => null), // 4.5
     ]);
-    st.firstPass = fp; st.scorecard = sc; st.ledger = lg; st.attention = at;
+    st.firstPass = fp; st.scorecard = sc; st.ledger = lg; st.attention = at; st.nightShift = ns;
     if (st.view === "scorecard") renderScorecard();
   }
   function renderScorecard() {
@@ -921,6 +922,15 @@
       <div class="card"><div class="what">${sc.interruptions.total} this week</div>
         <div class="detail">Daily cap ${sc.interruptions.cap}.${at ? ` Today: ${at.day.interrupts} used, ${at.queue.length} waiting for the evening digest.` : ""}</div></div>
       ${sc.lessons.length ? `<div class="section">What the agents learned</div>${sc.lessons.map((l) => `<div class="card"><div class="what">${esc(l.agentId)}, ${esc(l.taskType)}</div><div class="detail">${esc(l.text)}</div></div>`).join("")}` : ""}` : "";
+    // 4.5 Night shift: spare quota re-runs the day's finished tasks on other agents, graded blind. Who beat whom, by task type.
+    const ns = st.nightShift;
+    const who = (id) => (st.agents[id] && st.agents[id].name) || id;
+    const nightShift = ns ? `
+      <div class="section">Night shift</div>
+      <div class="card"><div class="what">${!ns.settings.enabled ? "Off" : ns.inWindow ? `Running tonight, ${ns.runsTonight} of ${ns.settings.maxRunsPerNight} runs so far` : `On, ${esc(ns.settings.from)} to ${esc(ns.settings.to)}`}</div>
+        <div class="detail">${ns.settings.enabled ? `Re-runs the day's finished tasks on other agents with quota that would expire, and grades both results blind. Nothing is merged or said in a room.` : "Would re-run the day's finished tasks on other agents with quota that would expire, and grade both results blind."}${ns.nights.length && ns.nights[0].line ? ` Latest night: ${esc(ns.nights[0].line.replace(/^Night shift: /, ""))}.` : ""}</div></div>
+      ${ns.headToHead.length ? ns.headToHead.slice(0, 12).map((r) => `<div class="card"><div class="what">${esc(who(r.first))} against ${esc(who(r.second))}, ${esc(r.taskType)}</div>
+        <div class="detail">${r.n} run${r.n === 1 ? "" : "s"}: ${esc(who(r.first))} ${r.firstWins}, ${esc(who(r.second))} ${r.secondWins}, ${r.ties} tied. Average score ${r.firstMean.toFixed(2)} against ${r.secondMean.toFixed(2)}.</div></div>`).join("") : `<div class="card"><div class="detail">No head-to-head runs yet.</div></div>`}` : "";
     const ledger = lg ? `
       <div class="section">Return ledger, ${esc(lg.month)}</div>
       ${lg.rows.map((r) => `<div class="card"><div class="what">${esc(r.label)}</div><div class="detail">${esc(r.line)}</div></div>`).join("")}` : "";
@@ -931,7 +941,7 @@
       </div>
       ${total ? `<div class="fpbars">${bars}</div><div class="qnote flat fpnote">Last ${m.weeks} weeks, newest on the right. Pale bars are from before this started.</div>` : ""}
       ${m.overall.filter((w) => w.tasks).slice(-6).reverse().map((w) => `<div class="kv"><span class="k">${esc(w.week)}</span><span class="v">${pct(w.rate)} of ${w.tasks}</span></div>`).join("")}
-      ${week}${ledger}`;
+      ${week}${ledger}${nightShift}`;
     for (const el of document.querySelectorAll("[data-h]")) el.style.height = `${el.dataset.h}%`;
   }
 

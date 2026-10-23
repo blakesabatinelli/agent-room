@@ -232,6 +232,22 @@ export class TaskWorkspaces {
   private async out(cwd: string, args: string[], owner = false) { const r = await this.git(cwd, args, undefined, owner); return r.code === 0 ? r.stdout.trim() : ""; }
   private names(stdout: string) { return stdout.split("\0").filter(Boolean).sort(); }
 
+  /**
+   * 4.5: the repository holding a goal's accepted work right now, when a task could still be cut from it: the goal's own folder, or the hub's
+   * clone of a granted repo while the goal keeps it. A goal on a granted folder whose clone is gone has none (it is never re-cloned for this).
+   */
+  private repoFor(goal: GoalRef): string | undefined {
+    const s = this.sourceOf(goal.id);
+    if (s?.mode === "granted-git") return s.clone && existsSync(s.clone) ? s.clone : undefined;
+    if (s?.mode === "shadow" || goal.source) return undefined;
+    return isDir(join(goal.folder, ".git")) ? goal.folder : undefined;
+  }
+  /** 4.5: is this commit still in the goal's repository (so a task can be cut from it)? */
+  async hasCommit(goal: GoalRef, commit: string): Promise<boolean> {
+    const repo = this.repoFor(goal);
+    return !!repo && /^[0-9a-f]{7,64}$/i.test(commit) && (await this.gitOk(repo, ["cat-file", "-e", `${commit}^{commit}`]));
+  }
+
   /** Run one goal's workspace operations one at a time. */
   locked<T>(goalId: string, fn: () => Promise<T>): Promise<T> {
     const next = (this.chains.get(goalId) ?? Promise.resolve()).catch(() => undefined).then(fn);
@@ -276,8 +292,10 @@ export class TaskWorkspaces {
 
   // ---------- open
   /** The task's workspace for this attempt: reused for the same agent, otherwise fresh from the current base. */
-  open(goalIn: GoalRef, task: { id: string }, agentId: string): Promise<TaskWorkspace & { reused: boolean }> {
+  open(goalIn: GoalRef, task: { id: string }, agentId: string, opts: { from?: string } = {}): Promise<TaskWorkspace & { reused: boolean }> {
     return this.locked(goalIn.id, async () => {
+      // 4.5: `from` cuts the worktree from an earlier commit (a night-shift re-run starts where the real task started), never from the current head.
+      if (opts.from && !(await this.hasCommit(goalIn, opts.from))) throw new Error("The state this task started from is no longer available.");
       // 1.1: a goal on a granted folder gets its base from the grant (the owner's repo through a branch, or a private copy). Otherwise the base is the hub's goal folder, as before.
       const src = await this.ensureSource(goalIn);
       const goal: GoalRef = src?.mode === "shadow" ? { id: goalIn.id, folder: src.shadow! } : { id: goalIn.id, folder: goalIn.folder };
@@ -291,7 +309,7 @@ export class TaskWorkspaces {
         // The task's branch comes from the head of agent-room/<goal> (all accepted work so far), in the hub's OWN clone of the owner's repo:
         // the agent's worktree shares that clone's .git, never the owner's. The owner's checked-out branch and files are never touched.
         const clone = src.clone!;
-        const head = await this.out(src.integration!, ["rev-parse", "HEAD"]);
+        const head = opts.from ?? await this.out(src.integration!, ["rev-parse", "HEAD"]); // 4.5: or the commit asked for
         await this.git(clone, ["worktree", "prune"]); // forget a work folder of the same task that a crash left registered
         const add = head ? await this.git(clone, ["worktree", "add", "-q", "-B", BRANCH(task.id), path, head]) : undefined;
         if (add?.code !== 0) { rmSync(path, { recursive: true, force: true }); await this.git(clone, ["worktree", "prune"]); throw new Error("Could not cut a work folder from the hub's copy of the granted folder's repository."); }
@@ -300,7 +318,7 @@ export class TaskWorkspaces {
         this.save(m); this.bindTask(m); return { ...m, reused: false };
       }
       if ((await this.base(goal)) === "git") {
-        const head = await this.out(goal.folder, ["rev-parse", "HEAD"]);
+        const head = opts.from ?? await this.out(goal.folder, ["rev-parse", "HEAD"]); // 4.5: or the commit asked for
         const add = head ? await this.git(goal.folder, ["worktree", "add", "-q", "-B", BRANCH(task.id), path, head]) : undefined;
         if (add?.code === 0) {
           this.guard.snapshot(goal.folder);
@@ -310,6 +328,7 @@ export class TaskWorkspaces {
         rmSync(path, { recursive: true, force: true });
         await this.git(goal.folder, ["worktree", "prune"]);
       }
+      if (opts.from) throw new Error("Could not cut a work folder from the state this task started from."); // 4.5: a copy of today's folder would be the wrong starting state
       // No git: a plain folder copy that remembers what it was cut from.
       const snap = snapshot(goal.folder);
       mkdirSync(path, { recursive: true });

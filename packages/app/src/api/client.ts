@@ -1,7 +1,8 @@
 import type {
   AgentConfig, AgentScore, VersionScoreRow, ModelShift, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
   Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task,
-  WriteProposal, JuryCalibration, CommandsResponse, FirstPassMetrics, MemoryExportInfo, PersonaInput, PersonaTemplate, PersonaView, AgentResume, ProbationStatus, Scorecard, ReturnLedger, AttentionState, RoomDefinition, RoomDefinitionInput, ForkView, ForkSideId,
+  WriteProposal, JuryCalibration, CommandsResponse, FirstPassMetrics, MemoryExportInfo, PersonaInput, PersonaTemplate, PersonaView, AgentResume,
+  ProbationStatus, Scorecard, ReturnLedger, AttentionState, RoomDefinition, RoomDefinitionInput, ForkView, ForkSideId, NightShiftState,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -92,6 +93,7 @@ export class Hub {
   scorecard = (week?: string) => this.req<Scorecard>(`/reports/scorecard${week ? `?week=${encodeURIComponent(week)}` : ""}`); // 2.7
   ledger = (month?: string) => this.req<ReturnLedger>(`/reports/ledger${month ? `?month=${encodeURIComponent(month)}` : ""}`); // 2.7
   attention = () => this.req<AttentionState>("/attention"); // 2.7
+  nightShift = () => this.req<NightShiftState>("/nightshift"); // 4.5
   tools = () => this.req<{ id: string; label: string; sensitive: boolean }[]>("/tools");
   // 2.3: the résumé the orchestrator keeps for an agent, and the owner's switch for probation
   resume = (id: string) => this.req<AgentResume>(`/agents/${id}/resume`);

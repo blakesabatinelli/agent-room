@@ -3,7 +3,7 @@ import React from "react";
 import { ScrollView } from "react-native";
 import { useRoom } from "../state/store";
 import { FirstPass } from "../components/FirstPass"; // 2.1
-import { ReturnLedgerView, WeeklyScorecard } from "../components/Scorecard"; // 2.7
+import { NightShiftView, ReturnLedgerView, WeeklyScorecard } from "../components/Scorecard"; // 2.7
 import { Screen, Section } from "../components/ui";
 import { space } from "../theme";
 
@@ -19,6 +19,9 @@ export function ScorecardScreen() {
         </Section>
         <Section title="Return ledger" hint="What each plan cost this month against the tasks you accepted from it.">
           <ReturnLedgerView hub={hub} />
+        </Section>
+        <Section title="Night shift" hint="Quota that would expire overnight re-runs the day's finished tasks on other agents, graded blind next to the original.">
+          <NightShiftView hub={hub} />
         </Section>
       </ScrollView>
     </Screen>

@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { Text, View } from "react-native";
-import type { ReturnLedger, Scorecard } from "@agent-room/shared";
+import type { NightShiftState, ReturnLedger, Scorecard } from "@agent-room/shared";
 import type { Hub } from "../api/client";
+import { useRoom } from "../state/store";
 import { space, type as t, usePalette } from "../theme";
 import { Button } from "./ui";
 
@@ -108,6 +109,41 @@ export function WeeklyScorecard({ hub }: { hub?: Hub }) {
           </Block>
         </>
       ) : null}
+    </View>
+  );
+}
+
+/**
+ * 4.5 Night shift: quota that would expire overnight re-runs the day's finished tasks on other agents, and the two results are graded blind.
+ * What the owner sees here: whether it is on, the last night's one line, and who beat whom by task type (the same table the kill-criteria review reads).
+ */
+export function NightShiftView({ hub }: { hub?: Hub }) {
+  const p = usePalette();
+  const agents = useRoom((s) => s.agents);
+  const [ns, setNs] = useState<NightShiftState>();
+  const [err, setErr] = useState<string>();
+  useEffect(() => { hub?.nightShift().then(setNs).catch((e: Error) => setErr(e.message)); }, [hub]);
+  const who = (id: string) => agents.find((a) => a.id === id)?.name ?? id;
+  if (err) return <Text style={[t.small, { color: p.warn, padding: space(4) }]}>{err}</Text>;
+  if (!ns) return <Text style={[t.small, { color: p.muted, padding: space(4) }]}>Loading.</Text>;
+  const s = ns.settings;
+  const status = !s.enabled ? "Off." : ns.inWindow ? `Running tonight: ${ns.runsTonight} of ${s.maxRunsPerNight} runs so far.` : `On, ${s.from} to ${s.to} (${s.timezone}).`;
+  const latest = ns.nights.find((n) => n.line);
+  return (
+    <View style={{ padding: space(4), gap: space(3) }}>
+      <Text style={[t.body, { color: p.ink }]}>{status}</Text>
+      <Text style={[t.small, { color: p.muted }]}>
+        {`${s.enabled ? "Re-runs" : "Would re-run"} the day's finished tasks on other agents with quota that would expire, and grades both results blind. Nothing is merged and nothing is said in a room.`}
+      </Text>
+      {latest?.line ? <Text style={[t.body, { color: p.ink }]}>{latest.line}</Text> : null}
+      <Block title="Head to head">
+        {ns.headToHead.length ? ns.headToHead.slice(0, 12).map((r) => (
+          <Text key={`${r.taskType}${r.first}${r.second}`} style={[t.body, { color: p.ink }]}>
+            {`${who(r.first)} against ${who(r.second)}, ${r.taskType}: ${r.firstWins} to ${r.secondWins}${r.ties ? `, ${r.ties} tied` : ""} over ${r.n} run${r.n === 1 ? "" : "s"}`}
+            <Text style={{ color: p.muted }}>{` (average ${r.firstMean.toFixed(2)} against ${r.secondMean.toFixed(2)})`}</Text>
+          </Text>
+        )) : <Text style={[t.small, { color: p.muted }]}>No head-to-head runs yet.</Text>}
+      </Block>
     </View>
   );
 }

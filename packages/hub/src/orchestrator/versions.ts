@@ -109,7 +109,7 @@ export function versionRows(store: Store, agentId?: string, at = clock()): Versi
 
 // ---------- recording
 
-export interface RunStats { quality: number; failed: boolean; revision: boolean; seconds: number }
+export interface RunStats { quality: number; failed: boolean; revision: boolean; seconds: number; /** 4.5: how much the run counts (default 1) */ weight?: number }
 
 /** File one run under its version. `legacy` is the agent-level roll-up from before this run: if no version has been recorded yet, it becomes the "unknown" version so old evidence isn't lost. */
 export function recordVersionRun(store: Store, agentId: string, taskType: string, version: string, run: RunStats, at: number, legacy?: { runs: number; quality: number; avgSeconds: number; revisions: number; failures: number }) {
@@ -119,13 +119,14 @@ export function recordVersionRun(store: Store, agentId: string, taskType: string
   trackVersion(store, agentId, version, at);
   const v = store.getVersionScore(agentId, taskType, version)
     ?? { agentId, taskType, modelVersion: version, runs: 0, quality: 0, avgSeconds: 0, revisions: 0, failures: 0, m2: 0, firstSeen: at, lastSeen: at };
-  v.runs += 1;
-  if (run.failed) v.failures += 1;
-  if (run.revision) v.revisions += 1;
+  const w = run.weight ?? 1;
+  v.runs += w;
+  if (run.failed) v.failures += w;
+  if (run.revision) v.revisions += w;
   const d = run.quality - v.quality;
-  v.quality += d / v.runs;
-  v.m2 += d * (run.quality - v.quality);
-  v.avgSeconds += (run.seconds - v.avgSeconds) / v.runs;
+  v.quality += (w * d) / v.runs;
+  v.m2 += w * d * (run.quality - v.quality);
+  v.avgSeconds += (w * (run.seconds - v.avgSeconds)) / v.runs;
   v.lastSeen = Math.max(v.lastSeen, at);
   store.saveVersionScore(v);
   detectShift(store, agentId, taskType, version, at);

@@ -2,6 +2,8 @@ import type { RoutingRecord, Scorecard, ScorecardAgentRow, ScorecardGoalCost, Sc
 import { attentionFor } from "../attention/index.js";
 import type { Store } from "../db/store.js";
 import { listJuries } from "../jury/records.js";
+import { headToHeadOf, nightLine } from "../nightshift/headToHead.js"; // 4.5
+import { listTournaments } from "../nightshift/records.js"; // 4.5
 import { quotaFor } from "../quota/index.js";
 import { retroDb } from "../retro/index.js";
 import { isoWeek } from "../retro/metrics.js";
@@ -163,8 +165,18 @@ export function buildScorecard(store: Store, week: string | number = Date.now(),
     },
     lessons, markdown: "",
   };
+  const night = nightShiftOf(store, start, end); // 4.5
+  if (night) sc.nightShift = night;
   sc.markdown = scorecardMarkdown(sc);
   return sc;
+}
+
+/** 4.5: what the night shift ran in the week, and how each pair of agents compared on each kind of work. Absent when nothing ran. */
+function nightShiftOf(store: Store, start: number, end: number): Scorecard["nightShift"] {
+  const runs = listTournaments(store, { since: start, until: end });
+  if (!runs.length) return undefined;
+  const lines = [...new Set(runs.map((t) => t.night))].sort().map((n) => `${n}: ${nightLine(store, n)?.replace(/^Night shift: /, "") ?? ""}`);
+  return { runs: runs.length, lines, rows: headToHeadOf(runs) };
 }
 
 const dist = (g: ScorecardJudgeGroup) => (g.n ? `${g.meanDistance!.toFixed(2)} (${g.n})` : "no ratings");
@@ -205,6 +217,15 @@ export function scorecardMarkdown(s: Scorecard): string {
     L.push("| Goal | Runs | Tokens | Cost | Accepted | Per accepted task |", "|---|---|---|---|---|---|");
     for (const g of s.costPerGoal) L.push(`| ${g.goal} | ${g.runs} | ${g.tokens.toLocaleString("en-US")}${g.estimated ? " (estimated)" : ""} | ${g.costUsd === null ? "not reported" : money(g.costUsd)} | ${g.accepted} | ${g.costPerAccepted === null ? "n/a" : money(g.costPerAccepted)} |`);
     L.push("", `Total: ${s.cost.tokens.toLocaleString("en-US")} tokens, ${s.cost.costUsd === null ? "cost not reported" : `${money(s.cost.costUsd)} at API prices`}, ${s.cost.accepted} accepted. Subscription runs show what they would have cost at API prices; the monthly ledger has what you actually pay.`, "");
+  }
+
+  if (s.nightShift) {
+    const n = s.nightShift;
+    L.push("## Night shift", "", `${n.runs} task${n.runs === 1 ? " was" : "s were"} re-run overnight on spare quota by an agent that had not done it, and graded blind next to the original.`, "");
+    for (const l of n.lines) L.push(`- ${l}`);
+    L.push("", "| Task type | Agents | Runs | Preferred | Mean score |", "|---|---|---|---|---|");
+    for (const r of n.rows) L.push(`| ${r.taskType} | ${r.first} vs ${r.second} | ${r.n} | ${r.first} ${r.firstWins}, ${r.second} ${r.secondWins}, tied ${r.ties} | ${r.firstMean.toFixed(2)} vs ${r.secondMean.toFixed(2)} |`);
+    L.push("");
   }
 
   L.push("## Interruptions", "");

@@ -1,4 +1,4 @@
-import type { AgentConfig, Goal, Judgment, Profile, RoutingOutcome, Task } from "@agent-room/shared";
+import type { AgentConfig, CheckRun, Goal, Judgment, Profile, RoutingOutcome, RunUsage, Task, TaskReport } from "@agent-room/shared";
 import type { ControlFolder } from "../control/folder.js";
 import type { Store } from "../db/store.js";
 import type { RunResult } from "../adapters/types.js";
@@ -124,10 +124,58 @@ export class ShadowRunner {
     await Promise.allSettled(picked.map((a) => this.runOne(goal, task, a, goalSignal)));
   }
 
+
   private async runOne(goal: Goal, real: Task, agent: AgentConfig, goalSignal: AbortSignal) {
     const { host } = this;
+    const store = host.store;
+    await this.runCopy(goal, real, agent, goalSignal, {}, async (c) => {
+      const { shadow, ranModel, usage, seconds, close } = c;
+      if (c.crashed) {
+        // A crash scores 0, like a real failed run. (A rate limit or timeout says nothing about the agent: runCopy closes those as interrupted.)
+        recordOutcome(store, agent.id, shadow.taskType, { seconds, failed: true, revision: false }, ranModel);
+        const { tag, why } = classifyFailure({ kind: "run_error" });
+        close("run_failed", { usage, seconds, ...(ranModel ? { modelVersion: ranModel } : {}), failureTag: tag, failureNote: `${why}: ${firstLine(c.error)}`.slice(0, 300),
+          judgment: { score: 0, verdict: "reassign", judgeAgentId: "hub" } });
+        this.say(goal, agent, shadow, 0);
+        return;
+      }
+      const { report, changed, failedChecks, fileDrift, fresh } = c;
+      const judgment: Judgment = failedChecks.length
+        ? { score: 0.3, verdict: "revise", judgeAgentId: "checks", criteria: {}, onTask: true,
+            feedback: `These checks failed: ${failedChecks.map((r) => `${r.criterionId} \`${r.command}\` exited ${r.exitCode}`).join("; ")}.` }
+        : await host.judge(shadow, agent, fresh, c.signal, changed, c.deliverables);
+      if (c.signal.aborted) { close("interrupted", { usage, seconds }); return; }
+      for (const r of shadow.checks ?? []) (judgment.criteria ??= {})[r.criterionId] = { verdict: r.ok ? "PASS" : "FAIL", evidence: r.ok ? `\`${r.command}\` passed` : `\`${r.command}\` exited ${r.exitCode}` };
+      const drift = [...(fileDrift.length ? [`Changed files outside its scope: ${fileDrift.slice(0, 8).join(", ")}`] : []), ...(judgment.onTask === false || judgment.drift ? [`Judge: ${judgment.drift || "off task"}`] : [])];
+      if (drift.length && judgment.verdict === "accept") { judgment.verdict = "revise"; judgment.feedback = `Stay on your task and in scope. ${drift.join(" ")} ${judgment.feedback}`.trim(); }
+      shadow.judgment = judgment;
+
+      recordOutcome(store, agent.id, shadow.taskType, { judgment, seconds, failed: false, revision: false }, ranModel);
+      const accepted = judgment.verdict === "accept";
+      const fail = accepted ? undefined : classifyFailure({ kind: "sent_back", report, judgment, drift, failedChecks: failedChecks.map((r) => r.criterionId) });
+      close(accepted ? "accepted" : judgment.verdict === "reassign" ? "reassign" : "revise", {
+        usage, seconds, ...(ranModel ? { modelVersion: ranModel } : {}),
+        ...(fail ? { failureTag: fail.tag, failureNote: `${fail.why}: ${firstLine(judgment.feedback)}`.slice(0, 300) } : {}),
+        ...(judgment.jury ? { juryId: judgment.jury.id } : {}),
+        // Last: the judgment is what makes it a graded run (the résumé and probation listen for it).
+        judgment: { score: judgment.score, verdict: judgment.verdict, judgeAgentId: judgment.judgeAgentId },
+      });
+      this.say(goal, agent, shadow, judgment.score);
+    });
+  }
+
+  /**
+   * One copy of a real task, run by `agent` in its own worktree and always thrown away afterwards (never merged). Shared by the probation
+   * practice above and by 4.5's night-shift tournaments (`label: "tournament"`), which start from `from`, an earlier commit, and judge the
+   * copy themselves. `after` runs while the copy is still registered (and its slot held), with what the run produced; it is not called for a
+   * run that was interrupted, hit a rate limit or a timeout (those close the routing record as interrupted and say nothing about the agent).
+   * Resolves to what `after` returned, or undefined when it was not called or failed (a failure is audited, and the record closed as interrupted).
+   */
+  async runCopy<T>(goal: Goal, real: Task, agent: AgentConfig, goalSignal: AbortSignal, o: CopyOptions, after: (c: CopyOutcome) => Promise<T>): Promise<T | undefined> {
+    const { host } = this;
     const store = host.store, clock = host.now ?? now;
-    const sid = `${real.id}-shadow-${agent.id}`;
+    const label = o.label ?? "shadow";
+    const sid = `${real.id}-${label === "shadow" ? "shadow" : "night"}-${agent.id}`;
     const shadow: Task = {
       ...real, id: sid, owner: agent.id, assignee: agent.id, status: "running", attempts: 0, history: [], failures: undefined, replans: 0,
       triedBy: [], judgment: undefined, result: undefined, report: undefined, checks: [], drift: undefined, flagged: undefined,
@@ -146,13 +194,13 @@ export class ShadowRunner {
     try {
       const rec = openRecord(store, fixedDecision(store, agent, [], real.taskType, "shadow", 0), shadow, goal.text, "shadow");
       rid = shadow.routingId = rec.id;
-      close("pending", { shadow: true, shadowOf: real.id });
-      store.audit(agent.id, "shadow.started", `a copy of "${real.title}" (${real.id}); never merged`);
+      close("pending", { shadow: true, shadowOf: real.id, ...(label === "tournament" ? { tournament: true } : {}) });
+      store.audit(agent.id, `${label}.started`, label === "shadow" ? `a copy of "${real.title}" (${real.id}); never merged` : `a night-shift re-run of "${real.title}" (${real.id}); never merged`);
 
-      const ws = await host.workspaces.open(ref, shadow, agent.id);
+      const ws = await host.workspaces.open(ref, shadow, agent.id, o.from ? { from: o.from } : undefined);
       const work = ws.path;
       await host.beforeRun(ws, agent.id);
-      if (ctrl.signal.aborted) { close("interrupted"); return; }
+      if (ctrl.signal.aborted) { close("interrupted"); return undefined; }
       const profile = pickProfile(agent, shadow.role ?? "worker", real.minTier ?? 1);
       shadow.profileId = profile.id;
       close("pending", { profileId: profile.id, modelRequested: profile.model ?? ((agent.settings?.model as string | undefined) || undefined) });
@@ -161,24 +209,22 @@ export class ShadowRunner {
       const deps = store.listTasks({ goalId: goal.id }).filter((t) => shadow.dependsOn.includes(t.id));
       const agents = store.listAgents().filter((a) => a.enabled);
       // The prompt is the real task's prompt, in this agent's own worktree. The progress ledger is the orchestrator's: it is shown, not pointed at.
+      // A tournament re-run is a look back: it is shown no progress ledger, no decisions made after the contract, and no lessons (the goal's retro came after the task).
       const prompt = taskPrompt(shadow, goal.text, fresh.contract, deps, store.listShared(goal.roomId), store.listPrivate(agent.id), host.notes(goal.id), agents, agent.id,
-        undefined, { path: work, files: [...before.keys()] }, host.ledger(fresh), host.decisions(fresh), learnedBlock(store, host.control, agent, shadow.taskType));
+        undefined, { path: work, files: [...before.keys()] }, label === "tournament" ? "" : host.ledger(fresh), label === "tournament" ? [...(fresh.contract?.decisions ?? [])] : host.decisions(fresh),
+        label === "tournament" ? undefined : learnedBlock(store, host.control, agent, shadow.taskType));
       const t0 = clock();
       const res = await host.run(agent, prompt, { roomId: goal.roomId, taskId: sid, signal: ctrl.signal, profile, cwd: work });
       const seconds = Math.max(0, (clock() - t0) / 1000);
       const ranModel = res.model ?? profile.model;
       const usage = res.usage;
-      if (ctrl.signal.aborted) { close("interrupted", { usage, seconds }); return; }
+      if (ctrl.signal.aborted) { close("interrupted", { usage, seconds }); return undefined; }
 
+      const base = { shadow, agent, fresh, signal: ctrl.signal, profile, usage, seconds, ranModel, rid, close };
       if (!res.ok) {
-        // A rate limit or timeout says nothing about the agent: not a graded run. A crash does: it scores 0, like a real failed run.
-        if (isRateLimit(res.error) || isTransient(res.error)) { close("interrupted", { usage, seconds, failureNote: `transient: ${firstLine(res.error)}` }); return; }
-        recordOutcome(store, agent.id, shadow.taskType, { seconds, failed: true, revision: false }, ranModel);
-        const { tag, why } = classifyFailure({ kind: "run_error" });
-        close("run_failed", { usage, seconds, ...(ranModel ? { modelVersion: ranModel } : {}), failureTag: tag, failureNote: `${why}: ${firstLine(res.error)}`.slice(0, 300),
-          judgment: { score: 0, verdict: "reassign", judgeAgentId: "hub" } });
-        this.say(goal, agent, shadow, 0);
-        return;
+        // A rate limit or timeout says nothing about the agent: not a graded run.
+        if (isRateLimit(res.error) || isTransient(res.error)) { close("interrupted", { usage, seconds, failureNote: `transient: ${firstLine(res.error)}` }); return undefined; }
+        return await after({ ...base, crashed: true, error: res.error });
       }
 
       const { body, report } = parseReport(res.text);
@@ -188,30 +234,12 @@ export class ShadowRunner {
       if (host.checksAllowed(fresh)) for (const c of (shadow.criteria ?? []).filter((x) => x.check)) shadow.checks.push(await runCheck(c.id, c.check!, work));
       const failedChecks = shadow.checks.filter((r) => !r.ok);
       const fileDrift = outsideScope(changed, shadow.files);
-      const judgment: Judgment = failedChecks.length
-        ? { score: 0.3, verdict: "revise", judgeAgentId: "checks", criteria: {}, onTask: true,
-            feedback: `These checks failed: ${failedChecks.map((r) => `${r.criterionId} \`${r.command}\` exited ${r.exitCode}`).join("; ")}.` }
-        : await host.judge(shadow, agent, fresh, ctrl.signal, changed, readDeliverables(work, [...new Set([...changed, ...(shadow.files ?? []).filter((f) => !/[*?[]/.test(f))])], 16000));
-      if (ctrl.signal.aborted) { close("interrupted", { usage, seconds }); return; }
-      for (const r of shadow.checks) (judgment.criteria ??= {})[r.criterionId] = { verdict: r.ok ? "PASS" : "FAIL", evidence: r.ok ? `\`${r.command}\` passed` : `\`${r.command}\` exited ${r.exitCode}` };
-      const drift = [...(fileDrift.length ? [`Changed files outside its scope: ${fileDrift.slice(0, 8).join(", ")}`] : []), ...(judgment.onTask === false || judgment.drift ? [`Judge: ${judgment.drift || "off task"}`] : [])];
-      if (drift.length && judgment.verdict === "accept") { judgment.verdict = "revise"; judgment.feedback = `Stay on your task and in scope. ${drift.join(" ")} ${judgment.feedback}`.trim(); }
-      shadow.judgment = judgment;
-
-      recordOutcome(store, agent.id, shadow.taskType, { judgment, seconds, failed: false, revision: false }, ranModel);
-      const accepted = judgment.verdict === "accept";
-      const fail = accepted ? undefined : classifyFailure({ kind: "sent_back", report, judgment, drift, failedChecks: failedChecks.map((r) => r.criterionId) });
-      close(accepted ? "accepted" : judgment.verdict === "reassign" ? "reassign" : "revise", {
-        usage, seconds, ...(ranModel ? { modelVersion: ranModel } : {}),
-        ...(fail ? { failureTag: fail.tag, failureNote: `${fail.why}: ${firstLine(judgment.feedback)}`.slice(0, 300) } : {}),
-        ...(judgment.jury ? { juryId: judgment.jury.id } : {}),
-        // Last: the judgment is what makes it a graded run (the résumé and probation listen for it).
-        judgment: { score: judgment.score, verdict: judgment.verdict, judgeAgentId: judgment.judgeAgentId },
-      });
-      this.say(goal, agent, shadow, judgment.score);
+      const deliverables = readDeliverables(work, [...new Set([...changed, ...(shadow.files ?? []).filter((f) => !/[*?[]/.test(f))])], 16000);
+      return await after({ ...base, crashed: false, report, changed, failedChecks, fileDrift, deliverables });
     } catch (e) {
-      if (rid) { try { close("interrupted", { failureNote: `shadow run failed: ${firstLine(String((e as Error)?.message ?? e))}` }); } catch { /* the log keeps the pending row */ } }
-      store.audit(agent.id, "shadow.failed", `${real.id}: ${firstLine(String((e as Error)?.message ?? e))}`);
+      if (rid) { try { close("interrupted", { failureNote: `${label} run failed: ${firstLine(String((e as Error)?.message ?? e))}` }); } catch { /* the log keeps the pending row */ } }
+      store.audit(agent.id, `${label}.failed`, `${real.id}: ${firstLine(String((e as Error)?.message ?? e))}`);
+      return undefined;
     } finally {
       // Always thrown away, never merged.
       await host.workspaces.discard(ref, sid).catch(() => undefined);
@@ -228,3 +256,25 @@ export class ShadowRunner {
     this.host.log(goal.roomId, `${agent.name} practised on a copy of "${t.title}" (${Math.round(score * 100)}/100). Nothing was kept.`, undefined);
   }
 }
+
+/** What a copy is for: probation practice (the default), or a night-shift tournament run, which starts from the commit the real task started from. */
+export interface CopyOptions { label?: "shadow" | "tournament"; from?: string }
+interface CopyBase {
+  /** The in-memory task of the copy (its id is not in the database). */
+  shadow: Task;
+  agent: AgentConfig;
+  fresh: Goal;
+  signal: AbortSignal;
+  profile: Profile;
+  usage?: RunUsage;
+  seconds: number;
+  ranModel?: string;
+  rid?: string;
+  /** Close the copy's routing record. */
+  close(outcome: RoutingOutcome, extra?: Parameters<typeof closeRecord>[2]): void;
+}
+/** The agent's run failed outright. */
+export type CopyCrashed = CopyBase & { crashed: true; error?: string };
+/** The agent finished: its reply, the files it changed and what the checks said. `deliverables` is the text of those files, read before the worktree goes. */
+export type CopyRan = CopyBase & { crashed: false; report: TaskReport; changed: string[]; failedChecks: CheckRun[]; fileDrift: string[]; deliverables: string };
+export type CopyOutcome = CopyCrashed | CopyRan;

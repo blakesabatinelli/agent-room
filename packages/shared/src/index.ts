@@ -1808,3 +1808,95 @@ export interface ForkView {
 }
 /** A recorded preference from a merged fork: the roster that won (or lost) on a task type. Routing can read it; it is never a judge score. */
 export interface ForkPreference { agentId: string; taskType: string; wins: number; losses: number; lastAt: number; forks: string[] }
+// ---- 4.5 Night-shift tournaments
+/**
+ * OrchestratorSettings.nightShift. Quota that would otherwise expire overnight re-runs the day's accepted tasks on agents that did not get them.
+ * Off until the owner turns it on. `from` and `to` are local times in the same time zone the attention gate uses (a window that ends before it starts runs across midnight).
+ */
+export interface NightShiftSettings {
+  enabled: boolean;
+  from: string;
+  to: string;
+  /** Most tournament runs started in one night. */
+  maxRunsPerNight: number;
+  /** A subscription only lends spare capacity when at least this share of it would expire at its next reset (see quota expiresSoon). */
+  minExpiringShare: number;
+  /** How much a tournament result counts in the challenger's scores, next to a real graded run (1 = the same). */
+  weight: number;
+}
+export const NIGHT_SHIFT_DEFAULTS: NightShiftSettings = { enabled: false, from: "23:00", to: "06:00", maxRunsPerNight: 20, minExpiringShare: 0.2, weight: 1 };
+export interface OrchestratorSettings { nightShift?: Partial<NightShiftSettings> }
+
+/** Which side of a tournament: the agent that really did the task (and was accepted), or the one that re-ran it. */
+export type TournamentSide = "original" | "challenger";
+export interface TournamentResult { agentId: string; modelVersion: string; score: number; verdict: Judgment["verdict"] }
+/** One re-run of an accepted task on another agent, judged blind next to the original result. The `tournaments` table holds these. */
+export interface TournamentRun {
+  id: string;
+  /** The night it belongs to: the local date the window opened on, "YYYY-MM-DD". */
+  night: string;
+  at: number;
+  taskId: string;
+  goalId: string;
+  roomId: string;
+  taskTitle: string;
+  taskType: string;
+  original: TournamentResult;
+  challenger: TournamentResult;
+  /** Who the judges preferred: the higher score, or a tie when the two scores are within 0.05 of each other. */
+  preference: TournamentSide | "tie";
+  /** How far apart the two scores were (0 to 1). */
+  margin: number;
+  /** Who judged (by family, never a worker's own), and how: a jury, or one cross-family judge. */
+  judging: "jury" | "single";
+  judges: { agentId: string; family: string; local: boolean }[];
+  /** The order the two results were put in front of the judges (first shown first). */
+  order: TournamentSide[];
+  /** The routing record of the challenger's run (kind "shadow", tournament). */
+  routingId?: string;
+  /** How much the challenger's result counted in its scores. */
+  weight: number;
+  seconds?: number;
+  note?: string;
+}
+/** One task type for one pair of agents, over every night: `first` and `second` are in alphabetical order of agent id. */
+export interface HeadToHeadRow {
+  taskType: string;
+  first: string;
+  second: string;
+  n: number;
+  firstWins: number;
+  secondWins: number;
+  ties: number;
+  firstMean: number;
+  secondMean: number;
+}
+export interface NightShiftNight {
+  night: string;
+  /** Re-runs started that night (the cap `maxRunsPerNight` counts these, judged or not). */
+  runs: number;
+  /** The digest line for the night, once it has been handed to the attention gate. */
+  line?: string;
+  reported: boolean;
+  /** Candidates left alone, with the reason (counts). */
+  skipped: Record<string, number>;
+  startedAt: number;
+  lastRunAt: number;
+}
+/** GET /nightshift. */
+export interface NightShiftState {
+  settings: NightShiftSettings & { timezone: string };
+  now: number;
+  inWindow: boolean;
+  /** The night in progress, when inside the window. */
+  tonight?: string;
+  runsTonight: number;
+  nights: NightShiftNight[];
+  recent: TournamentRun[];
+  headToHead: HeadToHeadRow[];
+}
+/** A routing record of a tournament run (kind "shadow") says so. */
+export interface RoutingRecord { tournament?: boolean }
+/** The scorecard's night-shift section: what ran in the week and how the pairs compare. Left out when nothing ran. */
+export interface ScorecardNightShift { runs: number; lines: string[]; rows: HeadToHeadRow[] }
+export interface Scorecard { nightShift?: ScorecardNightShift }
