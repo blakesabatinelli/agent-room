@@ -6,7 +6,8 @@ import { Approvals } from "./orchestrator/approvals.js";
 import { Orchestrator } from "./orchestrator/orchestrator.js";
 import { buildServer } from "./api/server.js";
 import { seed } from "./seed.js";
-import { tailscaleIp } from "./net.js";
+import { defaultTailscale } from "./remote/tailscale.js";
+import { remoteHost } from "./remote/status.js";
 import { connectTunnel } from "./relay/tunnel.js";
 import { ControlFolder, defaultControlRoot } from "./control/folder.js";
 
@@ -28,7 +29,8 @@ const approvals = new Approvals(store);
 let control: ControlFolder | undefined = new ControlFolder(process.env.AGENT_ROOM_HOME || (demo ? join(dataDir, "Agent Room (demo)") : defaultControlRoot()), store, { ownerName });
 try { await control.init(); control.start(); } catch (e) { console.error(`Control folder unavailable (${(e as Error).message}); running without it.`); control = undefined; }
 const orch = new Orchestrator(store, approvals, { dataDir, mcpUrl: () => `http://127.0.0.1:${port}/mcp`, control });
-const app = await buildServer({ store, orch, approvals, ownerName });
+const tailscale = defaultTailscale();
+const app = await buildServer({ store, orch, approvals, ownerName, tailscale });
 // 1.5: record what the hub found, so a surprising schedule can be explained later.
 const cap = orch.governor.snapshot();
 store.audit("hub", "capacity.detected", `${cap.summary}. ${cap.plan.reason}`);
@@ -39,12 +41,16 @@ await app.listen({ host: "0.0.0.0", port });
 await orch.pruneWorktrees().catch(() => undefined);
 const resumed = orch.recover();
 if (resumed.length) console.log(`Resumed ${resumed.length} goal${resumed.length > 1 ? "s" : ""} after restart.`);
-const ts = await tailscaleIp();
+const tsStatus = await tailscale.status(true);
+const ts = remoteHost(tsStatus);
+// 1.2: report (never change) any difference between Tailscale's Funnel setting and the owner's.
+const remote = await (app as unknown as { remoteCheck: () => Promise<import("@agent-room/shared").RemoteStatus | undefined> }).remoteCheck();
 const code = (app as unknown as { pairingCode: () => string }).pairingCode();
 console.log(`
 Agent Room hub ${demo ? "(demo mode, mock agents)" : ""}
   Local:      http://127.0.0.1:${port}
-  Tailscale:  ${ts ? `http://${ts}:${port}` : "not detected (install Tailscale or set AGENT_ROOM_TAILSCALE_IP)"}
+  Tailscale:  ${ts ? `http://${ts}:${port}` : tsStatus.detail + " Phones and other devices need it."}
+  Funnel:     ${remote?.funnel.on ? `ON, ${remote.funnel.url} (/mcp only)` : "off"}${remote?.funnel.drift ? `   WARNING: ${remote.funnel.drift === "on_in_tailscale" ? "on in Tailscale but off in Agent Room" : "off in Tailscale but on in Agent Room"}` : ""}
   Pair code:  ${code}   (valid 10 minutes, one use; restart for a new one)
   Data:       ${dataDir}
   Control:    ${control?.root ?? "not available"}

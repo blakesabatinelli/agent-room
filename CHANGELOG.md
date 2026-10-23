@@ -3,6 +3,10 @@
 Weekly release notes. Each Friday: bump `VERSION`, add an entry here, update the status column in `PLAN.md` section 11.
 Format: `## <VERSION>` then what shipped, grouped by plan item.
 
+## Unreleased
+
+- **1.2:** remote access over Tailscale. The hub reads Tailscale's state (not installed, off, needs sign-in, connected) with the tailnet IP and MagicDNS name; onboarding gets a Tailscale step and Settings a Remote access card in the Mac app, and the phone web app a read-only Remote access page. Connection snippets and the pairing address use the MagicDNS name, then the IP. Owner-switched Funnel for `/mcp` only (`POST /remote/funnel`), off by default, with drift reporting. Requests that arrive through a proxy reach `POST /mcp` and nothing else; remote `/mcp` calls are audited (`mcp.remote`) and failed auth is rate limited. Notes: `docs/1.2-remote-access.md`.
+
 ## 2026-10-23.1 (Phase 0, week 1)
 
 Tests: 67 to 123 in the hub, plus 12 in the new relay package. `pnpm test` now runs every package.

@@ -6,6 +6,7 @@ import type { SetupInfo } from "../api/client";
 import { useRoom } from "../state/store";
 import { Button, Field, Screen, Section, Toggle } from "../components/ui";
 import { SubscriptionList } from "../components/subscriptions";
+import { RemoteAccess } from "../components/RemoteAccess";
 import { space, type as t, usePalette } from "../theme";
 
 export function SettingsScreen() {
@@ -118,6 +119,11 @@ export function SettingsScreen() {
               onChange={async (v) => { await hub?.saveSetup({ practiceMode: v }); loadSetup(); }} />
           </Section>
         ) : null}
+        {Platform.OS === ("macos" as string) ? (
+          <Section title="Remote access">
+            <RemoteAccess funnel />
+          </Section>
+        ) : null}
         {Platform.OS === ("macos" as string) && setup ? (
           <Section title="Pair your phone">
             <View style={{ padding: space(4), gap: space(1) }}>
@@ -126,10 +132,10 @@ export function SettingsScreen() {
                   <Text selectable style={[t.heading, { color: p.ink }]}>{setup.phone.url}</Text>
                   <Text selectable style={[t.title, { color: p.orchestrator, fontSize: 30, letterSpacing: 6 }]}>{setup.phone.code}</Text>
                   <Text style={[t.small, { color: p.muted }]}>
-                    On your phone, with Tailscale on: open the address above in Safari, tap Share → Add to Home Screen, then open Agent Room from the home screen and enter the code. The code works once and lasts 10 minutes.
+                    On your phone, with Tailscale on: open the address above (the Mac's Tailscale name) in Safari, tap Share → Add to Home Screen, then open Agent Room from the home screen and enter the code. The code works once and lasts 10 minutes.
                   </Text>
                 </>
-              ) : <Text style={[t.small, { color: p.muted }]}>Tailscale isn't running on this Mac yet.</Text>}
+              ) : <Text style={[t.small, { color: p.muted }]}>Tailscale isn't connected on this Mac yet. See Remote access above.</Text>}
               <Button kind="plain" label="Refresh" onPress={loadSetup} />
             </View>
           </Section>

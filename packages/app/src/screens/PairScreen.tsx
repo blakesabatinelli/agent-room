@@ -24,7 +24,7 @@ export function PairScreen() {
       <Text style={[t.title, { color: p.ink, marginBottom: space(2) }]}>Connect to your hub</Text>
       <Text style={[t.body, { color: p.muted, marginBottom: space(6) }]}>
         Start the hub on your Mac, then enter its address and the six-digit code it shows.
-        {Platform.OS === "macos" ? "" : " From your phone, use the Mac's Tailscale address."}
+        {Platform.OS === "macos" ? "" : " From your phone, use the Mac's Tailscale name or address, shown in Settings on the Mac."}
       </Text>
       <Field label="Hub address" value={url} onChangeText={setUrl} autoCapitalize="none" autoCorrect={false} keyboardType="url" />
       <Field label="Pairing code" value={code} onChangeText={setCode} keyboardType="number-pad" maxLength={6} />

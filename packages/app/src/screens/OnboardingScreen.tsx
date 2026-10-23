@@ -5,6 +5,7 @@ import type { SetupInfo } from "../api/client";
 import { launcher } from "../native/hub";
 import { useRoom } from "../state/store";
 import { Avatar, Button, CodeBlock, Section, Toggle } from "../components/ui";
+import { RemoteAccess } from "../components/RemoteAccess";
 import { space, type as t, usePalette } from "../theme";
 
 export function OnboardingScreen() {
@@ -46,7 +47,7 @@ export function OnboardingScreen() {
     <ScrollView style={{ flex: 1, backgroundColor: p.canvas }} contentContainerStyle={{ padding: space(8), maxWidth: 620, width: "100%", alignSelf: "center" }}>
       <Text style={[t.title, { color: p.inkStrong, fontSize: 28, marginBottom: space(2) }]}>Welcome, {ownerName}</Text>
       <Text style={[t.body, { color: p.muted, marginBottom: space(8) }]}>
-        Your hub is running on this Mac. Three quick steps and the room is ready.
+        Your hub is running on this Mac. A few quick steps and the room is ready.
       </Text>
 
       <Section title="1. Sign in your agents">
@@ -75,7 +76,11 @@ export function OnboardingScreen() {
           hint="Stand-in agents that answer instantly, so you can try the room before signing in. Turn off in Settings." />
       </Section>
 
-      <Section title="2. Connect your phone (optional)">
+      <Section title="2. Connect Tailscale">
+        <RemoteAccess />
+      </Section>
+
+      <Section title="3. Connect your phone (optional)">
         <View style={{ padding: space(4), gap: space(2) }}>
           {info.phone.url ? (
             <>
@@ -87,14 +92,14 @@ export function OnboardingScreen() {
             </>
           ) : (
             <Text style={[t.body, { color: p.muted }]}>
-              Install Tailscale on this Mac and your phone and sign both in to the same account, then press Check again. You can skip this and do it later from Settings.
+              Finish step 2 first, then install Tailscale on your phone and sign in to the same account. The address and code appear here once this Mac is connected. You can skip this and do it later from Settings.
             </Text>
           )}
         </View>
       </Section>
 
       {launcher ? (
-        <Section title="3. Keep it running">
+        <Section title="4. Keep it running">
           <Toggle label="Start the hub when I log in" value={atLogin} onChange={loginItem}
             hint={busy ? "Restarting the hub…" : "Lets your phone reach the room even when this app is closed."} />
         </Section>

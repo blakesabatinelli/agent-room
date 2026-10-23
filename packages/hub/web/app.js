@@ -7,8 +7,8 @@
   const st = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
-    view: "rooms",          // rooms | room | approvals | permissions | control | subscriptions | pair
-    tools: [], control: null, quota: [],
+    view: "rooms",          // rooms | room | approvals | permissions | control | subscriptions | remote | pair
+    tools: [], control: null, quota: [], remote: null,
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, working: {}, approvals: [],
     unread: new Set(), readAt: 0, readSent: {}, positioned: "",
     online: false, ws: null, wsDelay: 1000,
@@ -218,7 +218,7 @@
     $("#composer").hidden = st.view !== "room";
     const room = st.rooms.find((r) => r.id === st.roomId);
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : `# ${room.name}`)
-      : st.view === "approvals" ? "Approvals" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : "Agent Room";
+      : st.view === "approvals" ? "Approvals" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : "Agent Room";
     renderDot(); renderBadge();
     if (st.view === "pair") return renderPair();
     if (st.view === "rooms") return renderRooms();
@@ -226,6 +226,7 @@
     if (st.view === "permissions") return renderPermissions();
     if (st.view === "control") return renderControl();
     if (st.view === "subscriptions") return renderSubscriptions();
+    if (st.view === "remote") return renderRemote();
     renderMessages(); renderComposerState();
   }
 
@@ -250,6 +251,7 @@
       : `<div class="empty">No rooms yet. Make one on the Mac.</div>`;
     const nCtl = st.control ? st.control.notices.length : 0;
     $("#view").innerHTML += `<div class="section">Settings</div><button class="row" data-nav="permissions"><span class="hash">⚙︎</span><span class="name">Permissions</span></button>
+      <button class="row" data-nav="remote"><span class="hash">⇄</span><span class="name">Remote access</span></button>
       <button class="row" data-nav="subscriptions"><span class="hash">◔</span><span class="name">Subscriptions</span></button>
       <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>${st.capacity ? `<div class="capline">${esc(st.capacity.summary)}</div>` : ""}`;
     paintColors();
@@ -336,6 +338,32 @@
         ${q.limited && q.limitedUntil ? `<div class="qnote flat">No work goes here until ${esc(at(q.limitedUntil))}.</div>` : ""}
       </div>`).join("") : `<div class="empty">Loading…</div>`;
     for (const el of document.querySelectorAll("[data-pct]")) el.style.width = `${el.dataset.pct}%`;
+  }
+
+  // 1.2: Tailscale status, read-only, plus the Funnel switch. Setup of Tailscale itself happens on the Mac.
+  function renderRemote() {
+    const r = st.remote;
+    if (!r) { $("#view").innerHTML = `<div class="empty">Loading…</div>`; return; }
+    const kv = (k, v) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`;
+    const head = r.state === "running" ? `<div class="what">${esc(r.detail)}</div>`
+      : `<div class="what">${r.state === "not_installed" ? "Tailscale isn't installed on the Mac." : r.state === "needs_login" ? "Tailscale needs a sign-in on the Mac." : "Tailscale is turned off on the Mac."}</div>
+         <div class="detail">Open Agent Room on the Mac to set it up. This page is read-only for that.</div>`;
+    const f = r.funnel;
+    $("#view").innerHTML = `
+      <div class="card">${head}
+        ${r.state === "running" ? `${r.dnsName ? kv("Name", r.dnsName) : ""}${r.ip ? kv("Address", r.ip) : ""}${r.hubUrl ? kv("Hub", r.hubUrl) : ""}` : ""}
+      </div>
+      ${r.state === "running" ? `
+      <div class="section">Cloud agents</div>
+      <label class="perm">
+        <span class="txt"><span class="lbl">Tailscale Funnel</span><span class="hint2">Lets cloud agents like ChatGPT connectors reach this Mac's agent endpoint. Only /mcp is exposed and every call needs a token.</span></span>
+        <input type="checkbox" role="switch" class="switch" aria-label="Tailscale Funnel" data-remote="funnel"${f.on ? " checked" : ""}>
+      </label>
+      <div class="card"><div class="detail">${f.on && f.url ? `On: ${esc(f.url)}` : "Off. Nothing on the Mac is reachable from the internet."}</div>
+        ${f.drift === "on_in_tailscale" ? `<div class="detail warn">Funnel is on in Tailscale, but you haven't turned it on here. Switch it off here to close it.</div>` : ""}
+        ${f.drift === "off_in_tailscale" ? `<div class="detail warn">You switched Funnel on here, but Tailscale has it off now. Switch it off and on again to restore it.</div>` : ""}
+        ${f.extraPaths.length ? `<div class="detail warn">Funnel is also exposing ${esc(f.extraPaths.join(", "))} on the Mac. Close it on the Mac with: tailscale funnel reset</div>` : ""}
+      </div>` : ""}`;
   }
 
   // First render of a room jumps to the first unread message (or the latest); later renders
@@ -427,6 +455,11 @@
         st.quota = await api("/quota/subscriptions"); if (st.view === "subscriptions") renderSubscriptions();
         return;
       }
+      if (t.dataset.nav === "remote") {
+        go("remote");
+        st.remote = await api("/remote/status?fresh=1"); if (st.view === "remote") renderRemote();
+        return;
+      }
       if (t.dataset.plan) {
         const d = t.dataset.decision; let text;
         if (d === "revise") { text = prompt("What should change in the plan?"); if (!text || !text.trim()) return; }
@@ -451,7 +484,7 @@
 
   // Permission switches: tool on/off, or the nested "without asking" setting.
   document.addEventListener("change", async (e) => {
-    const el = e.target; if (!el.matches?.("input.switch")) return;
+    const el = e.target; if (!el.matches?.("input.switch") || el.dataset.remote) return;
     const { agent, kind, tool } = el.dataset;
     el.disabled = true;
     try {
@@ -459,6 +492,15 @@
       if (updated?.id) st.agents[updated.id] = updated;
       renderPermissions();
     } catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
+  });
+
+  // Funnel switch (1.2). Turning it on asks first; the hub does the work and tells us what Tailscale ended up doing.
+  document.addEventListener("change", async (e) => {
+    const el = e.target; if (!el.matches?.("input.switch") || !el.dataset.remote) return;
+    if (el.checked && !confirm("Turn on Funnel? Cloud agents can then reach this Mac's /mcp address. Every call still needs a token. You can turn it off here at any time.")) { el.checked = false; return; }
+    el.disabled = true;
+    try { st.remote = await api("/remote/funnel", { method: "POST", body: { on: el.checked } }); renderRemote(); }
+    catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
   });
 
   $("#back").onclick = () => go("rooms");
