@@ -1271,3 +1271,130 @@ export interface MemoryExportInfo {
   note?: string;
   lastWrittenAt?: number;
 }
+
+// ---- 2.7 Scorecard, return ledger, evening digest
+
+/**
+ * What an alert is about. `decision` and `disagreement` interrupt (a push, up to the daily cap); every other kind waits for the evening digest.
+ * decision: a plan to approve, an approval, an agent that needs input, a question for the owner. disagreement: the judges split.
+ */
+export type AttentionKind = "decision" | "disagreement" | "goal_done" | "goal_failed" | "model_shift" | "retro" | "failure" | "report" | "info";
+
+/** OrchestratorSettings.attention. Anything unset takes the default (cap 6, digest 18:00, quiet 22:00 to 07:00, owner's time zone). */
+export interface AttentionSettings {
+  /** Interruptions (pushes) per local day before decisions and disagreements wait for the digest. Approvals that block running work still go through and are counted. */
+  dailyInterruptCap: number;
+  /** HH:MM, local time. When the evening digest is posted. */
+  digestAt: string;
+  /** IANA time zone. Unset: USER.md's, else America/Chicago. */
+  timezone?: string;
+  /** HH:MM local. Nothing is pushed between quietFrom and quietTo; held items go out as one push when it ends. Same value in both turns it off. */
+  quietFrom: string;
+  quietTo: string;
+}
+export const ATTENTION_DEFAULTS: AttentionSettings = { dailyInterruptCap: 6, digestAt: "18:00", quietFrom: "22:00", quietTo: "07:00" };
+export const ATTENTION_DEFAULT_TIMEZONE = "America/Chicago";
+
+export interface OrchestratorSettings {
+  attention?: Partial<AttentionSettings>;
+  /** Minutes the owner thinks each accepted task saves them. Used only by the kill-criteria review ("costs more attention than it saves"). */
+  minutesSavedPerTask?: number;
+}
+
+/** One item waiting for the evening digest. */
+export interface AttentionItem {
+  id: string;
+  at: number;
+  kind: AttentionKind;
+  title: string;
+  body: string;
+  roomId?: string;
+  goalId?: string;
+  taskId?: string;
+  /** Why it waited: it is not an interruption kind, the daily cap was used up, or quiet hours. */
+  why: "digest" | "cap" | "quiet";
+  /** Waits for quiet hours to end, then goes out as one push instead of in the digest. */
+  held?: boolean;
+  /** Same key twice is one item. */
+  key?: string;
+}
+/** What the gate did with one alert. */
+export interface AttentionResult { action: "pushed" | "queued" | "held" | "duplicate"; reason?: "digest" | "cap" | "quiet"; /** Interruptions used today after this one. */ used?: number; cap?: number }
+/** Counts for one local day. */
+export interface AttentionDay { interrupts: number; /** Blocking approvals that went through after the cap was used up. */ overCap: number; queued: number; held: number; goalsDone: number; digests: number }
+/** GET /attention. */
+export interface AttentionState {
+  settings: AttentionSettings & { timezone: string };
+  today: string;
+  day: AttentionDay;
+  queue: AttentionItem[];
+  lastDigestAt: number | null;
+}
+
+/** One agent on one task type in a week. */
+export interface ScorecardAgentRow { agentId: string; gradedRuns: number; meanQuality: number; /** Of the tasks it started that week, the share accepted on the first attempt (null: none finished). */ firstPass: number | null; firstPassTasks: number }
+export interface ScorecardTaskType {
+  taskType: string;
+  agents: ScorecardAgentRow[];
+  /** The agent with the best mean quality among those with enough graded runs; absent when none has. */
+  best?: string;
+  note?: string;
+}
+export interface ScorecardGoalRework { goalId: string; goal: string; specFailures: number; clarifications: number; revisions: number }
+export interface ScorecardJudgeGroup { n: number; meanDistance: number | null }
+export interface ScorecardGoalCost { goalId: string; goal: string; runs: number; tokens: number; /** Token counts were estimated from text length (the CLI reported none). */ estimated: boolean; costUsd: number | null; accepted: number; costPerAccepted: number | null }
+export interface ScorecardLesson { agentId: string; taskType: string; text: string; goalId: string }
+
+/** GET /reports/scorecard?week=YYYY-Www. Weeks are ISO weeks, Monday to Sunday, UTC (the same as first-pass acceptance). */
+export interface Scorecard {
+  week: string;
+  start: string;
+  end: string;
+  generatedAt: number;
+  totals: { gradedRuns: number; tasks: number; accepted: number; firstPass: number | null; goals: number };
+  bestByTaskType: ScorecardTaskType[];
+  vagueGoals: ScorecardGoalRework[];
+  judges: {
+    /** Judgments the owner rated this week that have a jury record. */
+    rated: number;
+    jury: ScorecardJudgeGroup;
+    single: ScorecardJudgeGroup;
+    /** One judge's score against the owner's, for judges from the worker's own family and from another one. */
+    sameFamily: ScorecardJudgeGroup;
+    crossFamily: ScorecardJudgeGroup;
+    byFamily: { family: string; n: number; meanDistance: number }[];
+  };
+  costPerGoal: ScorecardGoalCost[];
+  cost: { goals: number; tokens: number; costUsd: number | null; accepted: number; costPerAccepted: number | null };
+  interruptions: { total: number; cap: number; overCap: number; queued: number; days: { day: string; interrupts: number }[] };
+  lessons: ScorecardLesson[];
+  markdown: string;
+}
+
+/** One subscription's month in the return ledger. */
+export interface LedgerRow {
+  subscriptionId: string;
+  label: string;
+  kind: SubscriptionKind;
+  plan?: string;
+  accepted: number;
+  /** What it cost this month: the owner's monthly price for a subscription, summed reported cost for an api key, $0 for local. null: price not set. */
+  costUsd: number | null;
+  costBasis: "monthly price" | "reported cost" | "local" | "not set";
+  costPerAccepted: number | null;
+  rateLimitHits: number;
+  advice: "keep" | "watch" | "cancel" | "upgrade" | "set_price" | "free" | "no_data";
+  line: string;
+}
+/** GET /reports/ledger?month=YYYY-MM. */
+export interface ReturnLedger {
+  month: string;
+  generatedAt: number;
+  rows: LedgerRow[];
+  total: { accepted: number; costUsd: number; costPerAccepted: number | null };
+  thresholds: { keepUpToUsd: number; cancelAboveUsd: number; minAccepted: number; upgradeRateLimitHits: number };
+  markdown: string;
+}
+
+/** Subscription.monthlyUsd: what the owner pays for the plan each month (the return ledger divides it by accepted tasks). */
+export interface Subscription { monthlyUsd?: number }

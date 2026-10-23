@@ -9,6 +9,7 @@
     ownerName: "",
     view: "rooms",          // rooms | room | approvals | diff | permissions | folders | control | subscriptions | remote | pair
     tools: [], control: null, quota: [], remote: null, firstPass: null, memExport: [],
+    scorecard: null, scWeek: "this", ledger: null, attention: null, // 2.7
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, working: {}, approvals: [],
     unread: new Set(), readAt: 0, readSent: {}, positioned: "",
     online: false, ws: null, wsDelay: 1000,
@@ -629,7 +630,23 @@
     for (const el of document.querySelectorAll("[data-pct]")) el.style.width = `${el.dataset.pct}%`;
   }
 
-  // 2.1 Scorecard (2.7 extends it): how often work is accepted the first time it is reviewed, by week since retros began.
+  // Scorecard: how often work is accepted the first time (2.1), then this week's scorecard, the monthly return ledger and today's interruptions (2.7).
+  const isoWeekOf = (ms) => {
+    const d = new Date(ms); d.setUTCHours(0, 0, 0, 0);
+    const mon = d.getTime() - ((d.getUTCDay() + 6) % 7) * 86400000;
+    const thu = new Date(mon + 3 * 86400000), year = thu.getUTCFullYear();
+    return `${year}-W${String(Math.floor((thu.getTime() - Date.UTC(year, 0, 1)) / 86400000 / 7) + 1).padStart(2, "0")}`;
+  };
+  async function loadScorecard() {
+    const week = st.scWeek === "last" ? isoWeekOf(Date.now() - 7 * 86400000) : isoWeekOf(Date.now());
+    const month = new Date().toISOString().slice(0, 7);
+    const [fp, sc, lg, at] = await Promise.all([
+      api("/metrics/first-pass?weeks=12"), api(`/reports/scorecard?week=${week}`).catch(() => null),
+      api(`/reports/ledger?month=${month}`).catch(() => null), api("/attention").catch(() => null),
+    ]);
+    st.firstPass = fp; st.scorecard = sc; st.ledger = lg; st.attention = at;
+    if (st.view === "scorecard") renderScorecard();
+  }
   function renderScorecard() {
     const m = st.firstPass;
     if (!m) { $("#view").innerHTML = `<div class="empty">Loading…</div>`; return; }
@@ -638,13 +655,43 @@
     const since = new Date(m.phaseStartedAt).toLocaleDateString();
     const total = m.overall.reduce((n, w) => n + w.tasks, 0);
     const bars = m.overall.map((w) => `<div class="fpcol" title="${esc(`${w.week}: ${pct(w.rate)} of ${w.tasks} tasks`)}"><i class="${w.sincePhase ? "" : "pre"}" data-h="${w.rate === null ? 2 : Math.max(2, Math.round(w.rate * 100))}"></i></div>`).join("");
+    const kv = (k, v) => `<div class="kv wide"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`;
+    const usd = (x) => (x === null || x === undefined ? "n/a" : `$${x < 100 ? x.toFixed(2) : Math.round(x)}`);
+    const sc = st.scorecard, lg = st.ledger, at = st.attention;
+    const week = sc ? `
+      <div class="section">${st.scWeek === "last" ? "Last week" : "This week"}, ${esc(sc.week)}</div>
+      <div class="actions pad"><button class="btn small${st.scWeek === "last" ? " plain" : ""}" data-scweek="this">This week</button><button class="btn small${st.scWeek === "last" ? "" : " plain"}" data-scweek="last">Last week</button></div>
+      <div class="card"><div class="what">${sc.totals.tasks ? `${pct(sc.totals.firstPass)} accepted first time` : "No finished work"}</div>
+        <div class="detail">${sc.totals.goals} goals, ${sc.totals.tasks} tasks, ${sc.totals.gradedRuns} graded runs.</div></div>
+      <div class="section">Best at what</div>
+      ${sc.bestByTaskType.length ? sc.bestByTaskType.map((t) => `<div class="card"><div class="what">${esc(t.taskType)}: ${t.best ? esc(t.best) : "no clear best yet"}</div>
+        <div class="detail">${esc(t.agents.map((a) => `${a.agentId} ${a.meanQuality.toFixed(2)} over ${a.gradedRuns}`).join(", "))}${t.note ? `. ${esc(t.note)}` : ""}</div></div>`).join("") : `<div class="empty">No graded work.</div>`}
+      <div class="section">Where goals were vague</div>
+      ${sc.vagueGoals.length ? sc.vagueGoals.map((g) => `<div class="card"><div class="what">${esc(g.goal)}</div><div class="detail">${g.specFailures} unclear-spec failures, ${g.clarifications} clarifications from you, ${g.revisions} send-backs.</div></div>`).join("") : `<div class="card"><div class="detail">None this week.</div></div>`}
+      <div class="section">How close the judges are to you</div>
+      <div class="card">${sc.judges.rated ? [
+        kv("Jury", sc.judges.jury.n ? `${sc.judges.jury.meanDistance.toFixed(2)} (${sc.judges.jury.n})` : "no ratings"),
+        kv("One judge", sc.judges.single.n ? `${sc.judges.single.meanDistance.toFixed(2)} (${sc.judges.single.n})` : "no ratings"),
+        kv("Same family", sc.judges.sameFamily.n ? `${sc.judges.sameFamily.meanDistance.toFixed(2)} (${sc.judges.sameFamily.n})` : "no ratings"),
+        kv("Other family", sc.judges.crossFamily.n ? `${sc.judges.crossFamily.meanDistance.toFixed(2)} (${sc.judges.crossFamily.n})` : "no ratings"),
+      ].join("") + `<div class="detail">Distance from your rating: 0 is the same, 1 is the opposite.</div>` : `<div class="detail">You rated no judgments this week.</div>`}</div>
+      <div class="section">What each goal cost</div>
+      ${sc.costPerGoal.length ? sc.costPerGoal.map((g) => `<div class="card"><div class="what">${esc(g.goal)}</div><div class="detail">${g.tokens.toLocaleString()} tokens${g.estimated ? " (estimated)" : ""}, ${g.costUsd === null ? "cost not reported" : `${usd(g.costUsd)} at API prices`}, ${g.accepted} accepted${g.costPerAccepted === null ? "" : `, ${usd(g.costPerAccepted)} each`}.</div></div>`).join("") : `<div class="card"><div class="detail">No runs.</div></div>`}
+      <div class="section">Interruptions</div>
+      <div class="card"><div class="what">${sc.interruptions.total} this week</div>
+        <div class="detail">Daily cap ${sc.interruptions.cap}.${at ? ` Today: ${at.day.interrupts} used, ${at.queue.length} waiting for the evening digest.` : ""}</div></div>
+      ${sc.lessons.length ? `<div class="section">What the agents learned</div>${sc.lessons.map((l) => `<div class="card"><div class="what">${esc(l.agentId)}, ${esc(l.taskType)}</div><div class="detail">${esc(l.text)}</div></div>`).join("")}` : ""}` : "";
+    const ledger = lg ? `
+      <div class="section">Return ledger, ${esc(lg.month)}</div>
+      ${lg.rows.map((r) => `<div class="card"><div class="what">${esc(r.label)}</div><div class="detail">${esc(r.line)}</div></div>`).join("")}` : "";
     $("#view").innerHTML = `
       <div class="card">
         <div class="what">${s.tasks ? `${pct(s.rate)} accepted first time` : "No finished work yet"}</div>
         <div class="detail">${s.tasks ? `Since ${esc(since)}: ${s.accepted} of ${s.tasks} tasks, ${s.revisionsPerTask ?? 0} send-backs per task.` : `Counting from ${esc(since)}.`}</div>
       </div>
       ${total ? `<div class="fpbars">${bars}</div><div class="qnote flat fpnote">Last ${m.weeks} weeks, newest on the right. Pale bars are from before this started.</div>` : ""}
-      ${m.overall.filter((w) => w.tasks).slice(-6).reverse().map((w) => `<div class="kv"><span class="k">${esc(w.week)}</span><span class="v">${pct(w.rate)} of ${w.tasks}</span></div>`).join("")}`;
+      ${m.overall.filter((w) => w.tasks).slice(-6).reverse().map((w) => `<div class="kv"><span class="k">${esc(w.week)}</span><span class="v">${pct(w.rate)} of ${w.tasks}</span></div>`).join("")}
+      ${week}${ledger}`;
     for (const el of document.querySelectorAll("[data-h]")) el.style.height = `${el.dataset.h}%`;
   }
 
@@ -834,9 +881,11 @@
       }
       if (t.dataset.nav === "scorecard") {
         go("scorecard");
-        st.firstPass = await api("/metrics/first-pass?weeks=12"); if (st.view === "scorecard") renderScorecard();
+        st.firstPass = null; st.scorecard = null; st.ledger = null; st.attention = null;
+        await loadScorecard().catch(() => {});
         return;
       }
+      if (t.dataset.scweek) { st.scWeek = t.dataset.scweek; st.scorecard = null; renderScorecard(); await loadScorecard().catch(() => {}); return; }
       if (t.dataset.nav === "remote") {
         go("remote");
         st.remote = await api("/remote/status?fresh=1"); if (st.view === "remote") renderRemote();

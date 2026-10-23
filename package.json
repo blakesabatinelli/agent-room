@@ -8,7 +8,8 @@
     "icon:render": "node design/icon/render.mjs",
     "test": "pnpm -r --if-present test",
     "typecheck": "pnpm -r typecheck",
-    "control:lint": "pnpm --filter @agent-room/hub exec tsx src/control/cli.ts lint"
+    "control:lint": "pnpm --filter @agent-room/hub exec tsx src/control/cli.ts lint",
+    "review:kill": "pnpm --filter @agent-room/hub exec tsx src/report/killReview.ts"
   },
   "packageManager": "pnpm@9.15.9",
   "devDependencies": {

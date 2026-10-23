@@ -1,6 +1,7 @@
 import type { ModelShift, Message, VersionScore, VersionScoreRow } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import { id, now as clock } from "../util.js";
+import { attentionFor } from "../attention/index.js"; // 2.7
 
 /**
  * 2.4 Scores per model version. A vendor ships a new model under the same agent name, so an agent's old results stop
@@ -204,7 +205,9 @@ export function detectShift(store: Store, agentId: string, taskType: string, ver
   });
   store.audit("system", "model.shift", `${agentId} ${taskType}: ${from.modelVersion} -> ${version}, ${text}`);
   const room = generalRoom(store);
-  if (room) store.addMessage({ roomId: room.id, author: SYSTEM, text, type: "system", mentions: [] });
+  // 2.7: a shift is not an interruption. It goes in the work log (quiet) and waits for the evening digest.
+  if (room) store.addMessage({ roomId: room.id, author: SYSTEM, text, type: "system", mentions: [], quiet: true });
+  attentionFor(store).notify("model_shift", { title: text, roomId: room?.id, key: `shift:${agentId}:${taskType}:${from.modelVersion}:${version}` });
 }
 
 const round = (x: number) => Math.round(x * 10000) / 10000;

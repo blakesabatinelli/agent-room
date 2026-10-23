@@ -12,6 +12,7 @@ import { connectTunnel } from "./relay/tunnel.js";
 import { ControlFolder, defaultControlRoot } from "./control/folder.js";
 import { DiscoveryService } from "./discovery/service.js"; // 1.3
 import { ensurePhaseStart } from "./retro/index.js"; // 2.1
+import { startScheduled } from "./report/schedule.js"; // 2.7
 
 // Apps launched from Finder get a thin PATH; make sure the agent CLIs are findable.
 const home = homedir();
@@ -35,6 +36,8 @@ const orch = new Orchestrator(store, approvals, { dataDir, mcpUrl: () => `http:/
 // 2.5: put the MEMORY.md files and the opted-in agents' context files in step with shared memory, then check for expired facts every hour.
 await orch.memory.init().catch((e) => console.error(`Memory files not synced: ${(e as Error).message}`));
 orch.memory.startTimer();
+// 2.7: the evening digest (and the one a sleeping hub missed, sent once now), plus the weekly scorecard and monthly ledger saved to the Library.
+startScheduled(store, orch.library);
 const tailscale = defaultTailscale();
 // 1.3: finds the agents, tools and local model servers on this Mac and joins Hermes to the hub.
 const discovery = new DiscoveryService(store, { control: () => orch.control, mcpUrl: () => `http://127.0.0.1:${port}/mcp` });

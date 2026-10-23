@@ -145,6 +145,8 @@ export class ControlFolder {
   // ---------------------------------------------------------------- reading
 
   snapshot(): ControlSnapshot { return this.snap; }
+  /** 2.7: the owner's time zone from USER.md (the evening digest follows it). */
+  timezone(): string | undefined { return this.snap.user?.fm.timezone; }
 
   /** Effective permission of each tool for an agent in a room (strictest layer wins). */
   effectivePermissions(agentId: string, roomSlugOrUndefined?: string): Record<string, Level> {

@@ -6,6 +6,7 @@ import { buildServer } from "../src/api/server.js";
 import { applyOwnerRating, expected, expectedFor, pickAgent, recordOutcome } from "../src/orchestrator/scoring.js";
 import { decide } from "../src/orchestrator/routing.js";
 import { quotaDecide } from "../src/quota/router.js";
+import { attentionFor } from "../src/attention/index.js";
 import { listShifts, normaliseModelVersion, resolveModelVersion, versionRows, welchP } from "../src/orchestrator/versions.js";
 
 const DAY = 86_400_000;
@@ -25,7 +26,8 @@ function seed(store: ReturnType<typeof setup>["store"], agentId: string, taskTyp
   const all = store.listVersionScores(agentId, taskType), runs = sum(all.map((r) => r.runs));
   store.saveScore({ agentId, taskType, runs, quality: sum(all.map((r) => r.runs * r.quality)) / runs, avgSeconds: 0, revisions: 0, failures: sum(all.map((r) => r.failures)) });
 }
-const visible = (store: ReturnType<typeof setup>["store"]) => store.listMessages(store.listRooms()[0].id).filter((m) => !m.quiet);
+// 2.7: a flagged shift is posted quietly (the work log) and waits for the digest, so look for it by what it says.
+const visible = (store: ReturnType<typeof setup>["store"]) => store.listMessages(store.listRooms()[0].id).filter((m) => m.text.includes(" changed models "));
 
 // ---------- identity
 
@@ -201,7 +203,8 @@ test("versions: a significant drop posts exactly one message, audits once, and i
   const msgs = visible(store);
   assert.equal(msgs.length, 1);
   assert.equal(msgs[0].roomId, room.id);
-  assert.ok(!msgs[0].quiet);
+  assert.ok(msgs[0].quiet, "a shift is a quiet post, not an interruption");
+  assert.equal(attentionFor(store).state().queue.filter((i) => i.kind === "model_shift").length, 1, "and it waits for the evening digest");
   assert.match(msgs[0].text, /^Codex changed models this week \(gpt-5\.6-terra → gpt-5\.7-terra\) and is scoring lower on coding: 0\.62 vs 0\.81 over 5 runs\.$/);
   assert.equal(store.listAudit().filter((a) => a.action === "model.shift").length, 1);
   // more runs on the same pair: nothing more
