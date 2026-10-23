@@ -120,7 +120,7 @@ export class OfficeTracker {
     const rooms = roomId ? [roomId] : this.store.listRooms().map((r) => r.id);
     return buildOfficeState({
       agents: this.store.listAgents(),
-      tasks: rooms.flatMap((id) => this.store.listTasks({ roomId: id })),
+      tasks: rooms.flatMap((id) => this.store.listTasks({ roomId: id, subagents: true })),
       goals: rooms.flatMap((id) => this.store.listGoals(id)),
       approvals: this.store.listApprovals("pending"),
       working: this.workingNow(),
