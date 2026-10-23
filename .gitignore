@@ -6,8 +6,8 @@ dist
 Pods/
 build/
 DerivedData/
-*.xcworkspace/xcuserdata
-*.xcodeproj/xcuserdata
+**/*.xcworkspace/xcuserdata/
+**/*.xcodeproj/xcuserdata/
 .xcode.env.local
 *.tgz
 .DS_Store
