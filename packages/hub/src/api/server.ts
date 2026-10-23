@@ -10,7 +10,7 @@ import type { Approvals } from "../orchestrator/approvals.js";
 import { adapters, inbox } from "../adapters/index.js";
 import { handleMcp } from "../mcp/server.js";
 import { isAllowedLocalAddress, pushNotify } from "../net.js";
-import { openSignIn, signInLog } from "../setup.js";
+import { signInLog } from "../setup.js";
 import { pairingCode, token } from "../util.js";
 import { listFiles } from "../orchestrator/workspace.js";
 import { routingJsonl } from "../orchestrator/routing.js";
@@ -20,6 +20,11 @@ import { PathDenied } from "../files/paths.js";
 import { defaultTailscale, type Tailscale } from "../remote/tailscale.js";
 import { AuthLimiter, forwardedIp, isRemoteRequest, rpcSummary } from "../remote/guard.js";
 import { composeRemote, remoteHost } from "../remote/status.js";
+import { SignInManager } from "../install/signin.js";
+import { registerInstallRoutes } from "../install/routes.js";
+import { setupTimer } from "../install/timer.js";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export interface ServerDeps {
   store: Store; orch: Orchestrator; approvals: Approvals; ownerName: string; restrictInterfaces?: boolean;
@@ -27,9 +32,11 @@ export interface ServerDeps {
   tailscale?: Tailscale;
   /** 1.2: failed-auth allowance for proxied (Funnel) /mcp callers. Default 10 failures, one more every 6 s. */
   remoteAuth?: { burst?: number; refillMs?: number };
+  /** 1.7: in-app CLI sign-in (tests inject one with scripted CLIs). */
+  signin?: SignInManager;
 }
 
-export async function buildServer({ store, orch, approvals, ownerName, restrictInterfaces = true, tailscale = defaultTailscale(), remoteAuth }: ServerDeps) {
+export async function buildServer({ store, orch, approvals, ownerName, restrictInterfaces = true, tailscale = defaultTailscale(), remoteAuth, signin }: ServerDeps) {
   const app = Fastify({ logger: false, bodyLimit: 5 * 1024 * 1024 });
   // Accept POSTs that say "JSON" but carry no body (e.g. button actions with nothing to send).
   app.removeContentTypeParser("application/json");
@@ -70,7 +77,8 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   // ---------- phone web app (open the Tailscale address in Safari, pair, Add to Home Screen)
   // A fixed list of files read once at startup; request paths never touch the filesystem.
   // src/api/server.ts when run from source, dist/hub.mjs when run from the prebuilt bundle.
-  const webDir = [new URL("../../web/", import.meta.url), new URL("../web/", import.meta.url)]
+  // 1.7: Hub/hub.mjs inside the app bundle keeps web/ next to it.
+  const webDir = [new URL("../../web/", import.meta.url), new URL("../web/", import.meta.url), new URL("./web/", import.meta.url)]
     .find((u) => existsSync(fileURLToPath(new URL("index.html", u)))) ?? new URL("../../web/", import.meta.url);
   const webFiles = new Map<string, { type: string; body: Buffer }>();
   for (const [name, type] of [
@@ -134,10 +142,13 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     const status = await Promise.all(agents.map(async (a) => ({ id: a.id, name: a.name, enabled: a.enabled, color: a.color, adapter: a.adapter, ...(await adapters[a.adapter].status(a)) })));
     for (const a of agents) orch.forgetStatus(a.id);
     const host = remoteHost(await tailscale.status());
+    const timer = setupTimer(store);
     return {
       agents: status,
       practiceMode: store.getKV("practice_mode", false),
       onboarded: store.getKV("onboarded", false),
+      // 1.7: the setup timer (first launch to first finished goal)
+      timer, elapsedSeconds: timer.elapsedSeconds ?? null,
       phone: { url: host ? `http://${host}:${(app.server.address() as { port: number } | null)?.port ?? 4747}` : null, code: currentCode() },
     };
   });
@@ -147,12 +158,10 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     if (b.onboarded !== undefined) store.setKV("onboarded", b.onboarded);
     return { ok: true };
   });
-  app.post("/setup/signin/:agent", async (req, reply) => {
-    if (!isLoopback(req)) return reply.code(403).send({ error: "Sign in from the Mac app." });
-    const a = store.getAgent((req.params as { agent: string }).agent);
-    if (!a) return reply.code(404).send({ error: "Agent not found." });
-    orch.forgetStatus(a.id);
-    return openSignIn(a.adapter);
+  // 1.7: in-app sign-in (POST/GET /setup/signin/:agent, .../code, .../cancel) and the setup timer hook
+  registerInstallRoutes(app, {
+    store, orch, isLoopback,
+    signin: signin ?? new SignInManager({ logDir: join(homedir(), ".agent-room"), audit: (a, d) => store.audit("owner", a, d), onDone: (a) => orch.forgetStatus(a.id) }),
   });
 
   app.get("/setup/signin/:agent/log", async (req, reply) => {
