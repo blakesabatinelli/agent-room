@@ -3,18 +3,26 @@
 //   https://tailscale.com/docs/reference/tailscale-cli/funnel  (--bg, --https, --set-path, --yes, `off`, `status --json`)
 //   https://tailscale.com/docs/reference/tailscale-cli/serve   (same flags; `off` needs the original flags)
 //   https://tailscale.com/docs/features/tailscale-funnel       (needs MagicDNS, HTTPS certs, the `funnel` node attribute; ports 443/8443/10000)
+import { isAbsolute } from "node:path";
 import { runProc, type ProcResult } from "../adapters/proc.js";
 import type { TailscaleState, TailscaleStatus } from "@agent-room/shared";
+import { defaultIsWritable, pathFallbacks, resolveBin, type IsWritable } from "./bin.js";
 
 export const MAC_APP_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+/** Where the CLI is looked for after $AGENT_ROOM_TAILSCALE_BIN. Fixed absolute paths only; PATH is a guarded fallback (see bin.ts). */
+export const FIXED_CLI_PATHS = [MAC_APP_CLI, "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale"];
 export const FUNNEL_PATH = "/mcp";
 const ALLOWED_FUNNEL_PORTS = [443, 8443, 10000];
 
 type Run = (cmd: string, args: string[], opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv }) => Promise<ProcResult>;
 
 export interface TailscaleOptions {
-  /** Explicit CLI. Defaults to $AGENT_ROOM_TAILSCALE_BIN; when set, no other location is tried. */
+  /** Explicit CLI: when set, no other location is tried. Without it: $AGENT_ROOM_TAILSCALE_BIN, the fixed paths, then PATH (see candidates()). */
   bin?: string;
+  /** Tests: replaces the fixed install locations tried before PATH (defaults to FIXED_CLI_PATHS). */
+  fixedPaths?: string[];
+  /** Tests: stands in for "this user can write this path" when deciding whether a PATH entry is safe to run. */
+  isWritable?: IsWritable;
   /** Extra environment for the CLI (tests point PATH at a fake). */
   env?: NodeJS.ProcessEnv;
   /** How long a status answer is reused. */
@@ -38,28 +46,66 @@ interface ServeConfig {
   Foreground?: Record<string, ServeConfig>;
 }
 
-export interface FunnelReading { on: boolean; url?: string; extraPaths: string[] }
+/** A raw TCP forward in Tailscale's serve config that ends at the hub's own port. */
+export interface HubForward { port: number; target: string; /** also reachable from the internet (Funnel) */ public: boolean }
+
+export interface FunnelReading {
+  /** Funnel exposes /mcp AND that handler proxies to this hub's /mcp. */
+  on: boolean;
+  url?: string;
+  extraPaths: string[];
+  /** A funneled /mcp handler that proxies somewhere other than this hub's /mcp (the target as Tailscale has it). */
+  wrongTarget?: string;
+  /** TCPForward entries aimed at the hub's port. Their traffic reaches the hub from 127.0.0.1 with nothing marking it as remote. */
+  forwards: HubForward[];
+}
 
 const portOf = (hostPort: string) => Number(hostPort.slice(hostPort.lastIndexOf(":") + 1));
 const hostOf = (hostPort: string) => hostPort.slice(0, hostPort.lastIndexOf(":"));
+const LOOPBACK_NAMES = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 
-/** Pure: what Funnel is exposing, from `funnel status --json` / `serve status --json` output. */
-export function readFunnel(raw: unknown): FunnelReading {
+/** True when a serve handler's proxy target is this hub's /mcp over loopback (127.0.0.1, localhost or ::1). */
+export function proxiesToHubMcp(proxy: string, hubPort: number): boolean {
+  let u: URL;
+  try { u = new URL(proxy); } catch { return false; }
+  return u.protocol === "http:" && LOOPBACK_NAMES.has(u.hostname.toLowerCase()) && Number(u.port || 80) === hubPort && u.pathname === FUNNEL_PATH && !u.search;
+}
+
+/** True when a TCPForward target ("127.0.0.1:4747", "localhost:4747", "[::1]:4747", "0.0.0.0:4747") is the hub's port on this Mac. */
+export function forwardsToHub(target: string, hubPort: number): boolean {
+  const i = target.lastIndexOf(":");
+  if (i < 0 || Number(target.slice(i + 1)) !== hubPort) return false;
+  const host = target.slice(0, i).toLowerCase();
+  return host === "" || host === "0.0.0.0" || LOOPBACK_NAMES.has(host);
+}
+
+/**
+ * Pure: what Funnel is exposing, from `funnel status --json` / `serve status --json` output. `hubPort` is the port this hub listens on:
+ * a funneled /mcp handler only counts as "on" when it proxies to that hub, so a hand-made handler aimed at another service can't pass for ours.
+ */
+export function readFunnel(raw: unknown, hubPort: number): FunnelReading {
   const root = (raw && typeof raw === "object" ? raw : {}) as ServeConfig;
   const cfgs = [root, ...Object.values(root.Foreground ?? {})];
-  let on = false; let url: string | undefined; const extra = new Set<string>();
+  let on = false; let url: string | undefined; let wrongTarget: string | undefined; const extra = new Set<string>();
+  const forwards: HubForward[] = [];
   for (const cfg of cfgs) {
+    const funneledPorts = new Set(Object.entries(cfg.AllowFunnel ?? {}).filter(([, v]) => v).map(([hp]) => portOf(hp)));
+    for (const [port, t] of Object.entries(cfg.TCP ?? {})) {
+      if (t?.TCPForward && forwardsToHub(t.TCPForward, hubPort)) forwards.push({ port: Number(port), target: t.TCPForward, public: funneledPorts.has(Number(port)) });
+    }
     for (const [hp, allowed] of Object.entries(cfg.AllowFunnel ?? {})) {
       if (!allowed) continue;
       const port = portOf(hp);
       if (cfg.TCP?.[String(port)]?.TCPForward) extra.add(`tcp:${port}`);
       for (const [path, h] of Object.entries(cfg.Web?.[hp]?.Handlers ?? {})) {
-        if (path === FUNNEL_PATH && h.Proxy) { on = true; url = `https://${hostOf(hp)}${port === 443 ? "" : `:${port}`}${FUNNEL_PATH}`; }
-        else extra.add(path);
+        if (path === FUNNEL_PATH && h.Proxy) {
+          if (proxiesToHubMcp(h.Proxy, hubPort)) { on = true; url = `https://${hostOf(hp)}${port === 443 ? "" : `:${port}`}${FUNNEL_PATH}`; }
+          else wrongTarget = h.Proxy;
+        } else extra.add(path);
       }
     }
   }
-  return { on, url, extraPaths: [...extra].sort() };
+  return { on, url, extraPaths: [...extra].sort(), wrongTarget, forwards };
 }
 
 /** Pure: every path (and raw TCP forward) configured on one port, funneled or not. Funnel is switched per port, not per path. */
@@ -77,35 +123,52 @@ const firstLine = (s: string) => s.split("\n").map((l) => l.trim()).find(Boolean
 
 export class Tailscale {
   private readonly pinned: string | undefined;
+  private readonly envBin: string | undefined;
   private readonly env: NodeJS.ProcessEnv | undefined;
   private readonly ttlMs: number;
   private readonly run: Run;
+  private readonly isWritable: IsWritable;
+  private readonly fixed: string[];
   private readonly openAppImpl: () => Promise<{ ok: boolean; message: string }>;
   readonly funnelPort: number;
   private found: string | undefined;
   private cache: TailscaleStatus | undefined;
+  private cachePort = 0;
   private inflight: Promise<TailscaleStatus> | undefined;
   private generation = 0;
 
   constructor(opts: TailscaleOptions = {}) {
-    this.pinned = opts.bin ?? (process.env.AGENT_ROOM_TAILSCALE_BIN || undefined);
+    this.pinned = opts.bin;
+    const envBin = process.env.AGENT_ROOM_TAILSCALE_BIN;
+    this.envBin = envBin && isAbsolute(envBin) ? envBin : undefined; // a relative override would be a PATH lookup in disguise
     this.env = opts.env;
     this.ttlMs = opts.ttlMs ?? 10_000;
+    this.isWritable = opts.isWritable ?? defaultIsWritable;
+    this.fixed = opts.fixedPaths ?? FIXED_CLI_PATHS;
     const fp = opts.funnelPort ?? Number(process.env.AGENT_ROOM_FUNNEL_PORT ?? 443);
     this.funnelPort = ALLOWED_FUNNEL_PORTS.includes(fp) ? fp : 443;
     this.run = opts.run ?? ((cmd, args, o) => runProc(cmd, args, o));
     this.openAppImpl = opts.openApp ?? (async () => {
       if (process.platform !== "darwin") return { ok: false, message: "Open the Tailscale app on this computer and sign in." };
-      const r = await runProc("/usr/bin/open", ["-a", "Tailscale"], { timeoutMs: 5000 });
+      // Fixed /usr/bin/open first; a PATH entry only when nobody but an administrator can change it.
+      const bin = resolveBin("open", ["/usr/bin/open"], (opts.env?.PATH ?? process.env.PATH), this.isWritable);
+      if (!bin) return { ok: false, message: "Couldn't open Tailscale. Open it from Applications." };
+      const r = await runProc(bin, ["-a", "Tailscale"], { timeoutMs: 5000 });
       return r.code === 0 ? { ok: true, message: "Opened Tailscale. Sign in there, then come back." } : { ok: false, message: "Couldn't open Tailscale. Install it first." };
     });
   }
 
-  /** Where the CLI may live, in order: the explicit override alone, or PATH then the Mac app bundle. */
-  candidates(): string[] { return this.pinned ? [this.pinned] : ["tailscale", MAC_APP_CLI]; }
+  /** Fixed absolute locations, in order: the explicit `bin` alone, or $AGENT_ROOM_TAILSCALE_BIN, the Mac app, /usr/local/bin, /opt/homebrew/bin. */
+  candidates(): string[] { return this.pinned ? [this.pinned] : [...(this.envBin ? [this.envBin] : []), ...this.fixed]; }
+
+  /** After the fixed locations: `tailscale` on PATH, but only an entry that neither its folder nor the file lets this user write. */
+  pathCandidates(): string[] {
+    if (this.pinned) return [];
+    return pathFallbacks("tailscale", (this.env?.PATH ?? process.env.PATH), this.isWritable).filter((p) => !this.candidates().includes(p));
+  }
 
   private async exec(args: string[], timeoutMs = 6000): Promise<{ missing: boolean; r: ProcResult }> {
-    for (const bin of this.found ? [this.found] : this.candidates()) {
+    for (const bin of this.found ? [this.found] : [...this.candidates(), ...this.pathCandidates()]) {
       const r = await this.run(bin, args, { timeoutMs, env: this.env });
       // A binary that can't be started: ENOENT / EACCES. Try the next place.
       if (r.code !== 0 && /ENOENT|EACCES|not found/i.test(r.stderr) && !r.stdout.trim()) continue;
@@ -116,20 +179,24 @@ export class Tailscale {
     return { missing: true, r: { code: -1, stdout: "", stderr: "tailscale not found" } };
   }
 
-  /** Cached 10 s. Pass fresh to re-read now. */
-  async status(fresh = false): Promise<TailscaleStatus> {
+  /**
+   * Cached 10 s. Pass fresh to re-read now. `hubPort` is the port the hub listens on: Funnel only reads as "on" when /mcp proxies to it.
+   * Without it, $AGENT_ROOM_PORT (default 4747) is assumed; there is no "any port" mode.
+   */
+  async status(fresh = false, hubPort: number = Number(process.env.AGENT_ROOM_PORT ?? 4747)): Promise<TailscaleStatus> {
+    if (this.cachePort !== hubPort) { this.cache = undefined; this.inflight = undefined; this.cachePort = hubPort; }
     if (!fresh && this.cache && Date.now() - this.cache.checkedAt < this.ttlMs) return this.cache;
     if (this.inflight && !fresh) return this.inflight;
     const gen = this.generation;
-    const p = this.read().then((s) => { if (gen === this.generation) this.cache = s; return s; }).finally(() => { if (this.inflight === p) this.inflight = undefined; });
+    const p = this.read(hubPort).then((s) => { if (gen === this.generation) this.cache = s; return s; }).finally(() => { if (this.inflight === p) this.inflight = undefined; });
     this.inflight = p;
     return p;
   }
 
   private invalidate() { this.generation++; this.cache = undefined; this.inflight = undefined; }
 
-  private async read(): Promise<TailscaleStatus> {
-    const base = { funnel: { on: false, extraPaths: [] as string[] }, checkedAt: Date.now() };
+  private async read(hubPort: number): Promise<TailscaleStatus> {
+    const base = { funnel: { on: false, extraPaths: [] as string[], forwards: [] as HubForward[] }, checkedAt: Date.now() };
     const { missing, r } = await this.exec(["status", "--json"]);
     if (missing) return { state: "not_installed", detail: "Tailscale isn't installed on this Mac.", ...base };
     let j: Record<string, any> | undefined;
@@ -152,7 +219,7 @@ export class Tailscale {
     const dns = String(self.DNSName ?? "").replace(/\.$/, "");
     const dnsName = magic && dns.includes(".") ? dns : undefined;
     const tailnet = (j.CurrentTailnet as { Name?: string } | undefined)?.Name || (j.MagicDNSSuffix as string | undefined) || undefined;
-    const funnel = await this.readFunnel();
+    const funnel = readFunnel(await this.serveConfig(), hubPort);
     return { state, ip, dnsName, tailnet, funnel, detail: `Connected${tailnet ? ` to ${tailnet}` : ""}.`, checkedAt: Date.now() };
   }
 
@@ -164,11 +231,10 @@ export class Tailscale {
     }
     return {};
   }
-  private async readFunnel(): Promise<FunnelReading> { return readFunnel(await this.serveConfig()); }
 
   /** Expose the hub's /mcp (and nothing else) at https://<magicdns>/mcp. */
   async enableFunnel(hubPort: number): Promise<FunnelResult> {
-    const st = await this.status(true);
+    const st = await this.status(true, hubPort);
     if (st.state === "not_installed") return { ok: false, error: "Install Tailscale first.", status: st };
     if (st.state !== "running") return { ok: false, error: "Sign in to Tailscale first.", status: st };
     if (!st.dnsName) return { ok: false, error: "Funnel needs MagicDNS and HTTPS certificates turned on for your tailnet in the Tailscale admin console.", status: st };
@@ -178,7 +244,7 @@ export class Tailscale {
     const target = `http://127.0.0.1:${hubPort}${FUNNEL_PATH}`;
     const { r } = await this.exec(["funnel", "--bg", "--yes", `--https=${this.funnelPort}`, `--set-path=${FUNNEL_PATH}`, target], 25_000);
     this.invalidate();
-    const after = await this.status(true);
+    const after = await this.status(true, hubPort);
     if (after.funnel.on) return { ok: true, status: after };
     const text = `${r.stdout}\n${r.stderr}`;
     const approvalUrl = text.match(/https:\/\/login\.tailscale\.com\/\S+/)?.[0];
@@ -188,10 +254,10 @@ export class Tailscale {
   }
 
   /** Remove only the /mcp handler. Never `reset`: that would wipe the owner's other serve settings. */
-  async disableFunnel(): Promise<FunnelResult> {
+  async disableFunnel(hubPort: number = Number(process.env.AGENT_ROOM_PORT ?? 4747)): Promise<FunnelResult> {
     const { missing, r } = await this.exec(["funnel", `--https=${this.funnelPort}`, `--set-path=${FUNNEL_PATH}`, "off"], 15_000);
     this.invalidate();
-    const after = await this.status(true);
+    const after = await this.status(true, hubPort);
     if (missing) return { ok: false, error: "Tailscale isn't installed.", status: after };
     if (!after.funnel.on) return { ok: true, status: after };
     return { ok: false, status: after, error: firstLine(r.stderr) || firstLine(r.stdout) || "Tailscale didn't turn Funnel off. Run: tailscale funnel reset" };

@@ -2,8 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { buildServer } from "../src/api/server.js";
-import { setup } from "./helpers.js";
+import { localPairHeaders, setup } from "./helpers.js";
 
 async function boot() {
   const ctx = setup();
@@ -76,21 +78,97 @@ test("MCP server: external app reads the room and needs approval", async () => {
 });
 
 test("Mac app pairs itself locally; browsers can't", async () => {
-  const { app, base } = await boot();
-  const fromBrowser = await fetch(`${base}/pair/local`, { method: "POST", headers: { origin: "https://evil.example", "content-type": "application/json" }, body: "{}" });
+  const { app, base, dir } = await boot();
+  const fromBrowser = await fetch(`${base}/pair/local`, { method: "POST", headers: { ...localPairHeaders(dir), origin: "https://evil.example" }, body: "{}" });
   assert.equal(fromBrowser.status, 403);
   const { request } = await import("node:http");
   const reboundStatus = await new Promise<number>((resolve) => {
-    const r = request(`${base}/pair/local`, { method: "POST", headers: { host: "evil.example", "content-type": "application/json" } }, (res) => { res.resume(); resolve(res.statusCode!); });
+    const r = request(`${base}/pair/local`, { method: "POST", headers: { ...localPairHeaders(dir), host: "evil.example" } }, (res) => { res.resume(); resolve(res.statusCode!); });
     r.end("{}");
   });
   assert.equal(reboundStatus, 403, "DNS-rebinding Host header rejected");
-  const ok = await fetch(`${base}/pair/local`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceName: "Mac" }) });
+  const ok = await fetch(`${base}/pair/local`, { method: "POST", headers: localPairHeaders(dir), body: JSON.stringify({ deviceName: "Mac" }) });
   const { token } = (await ok.json()) as { token: string };
   const setup = (await (await fetch(`${base}/setup`, { headers: { authorization: `Bearer ${token}` } })).json()) as { agents: unknown[]; phone: { code: string }; onboarded: boolean };
   assert.equal(setup.agents.length, 3);
   assert.match(setup.phone.code, /^\d{6}$/);
   assert.equal(setup.onboarded, false);
+  await app.close();
+});
+
+// 1.2 review M1: a loopback source, a localhost Host and no Origin are exactly what a local TCP forwarder (`tailscale funnel --tls-terminated-tcp`,
+// `ssh -L`, `socat`) produces for a remote caller. Only the secret in the data folder tells the Mac app from that caller.
+test("1.2 M1: /pair/local needs the secret from the data folder; a loopback source with a localhost Host is not enough", async () => {
+  const ctx = await boot();
+  const { app, base, dir, store } = ctx;
+  const post = (headers: Record<string, string>) => fetch(`${base}/pair/local`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ deviceName: "Forwarded" }) });
+  // what a forwarder's caller looks like to the hub: 127.0.0.1, Host 127.0.0.1:<port>, no Origin, no proxy headers
+  assert.equal((await post({})).status, 403, "no secret");
+  assert.equal((await post({ "x-agent-room-local-secret": "0".repeat(64) })).status, 403, "wrong secret");
+  assert.equal((await post({ "x-agent-room-local-secret": "" })).status, 403, "empty secret");
+  assert.equal(store.listDevices().length, 0, "no device token was handed out");
+  assert.ok(store.listAudit().some((a) => a.action === "device.pair_local.denied"), "the refusal is audited");
+
+  const file = join(dir, "local-pair.secret");
+  const secret = readFileSync(file, "utf8");
+  assert.match(secret, /^[0-9a-f]{64}$/, "256 random bits");
+  assert.equal(statSync(file).mode & 0o777, 0o600, "private to the owner");
+  assert.equal((await post({ "x-agent-room-local-secret": secret })).status, 200);
+  assert.equal(store.listDevices().length, 1);
+  assert.ok(!JSON.stringify(store.listAudit()).includes(secret), "the secret never reaches the audit log");
+
+  // each hub start makes a new secret; the old one stops working
+  const again = await buildServer({ ...ctx, ownerName: "Blake" });
+  await again.listen({ host: "127.0.0.1", port: 0 });
+  const base2 = `http://127.0.0.1:${(again.server.address() as { port: number }).port}`;
+  const secret2 = readFileSync(file, "utf8");
+  assert.notEqual(secret2, secret);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  const old = await fetch(`${base2}/pair/local`, { method: "POST", headers: { "content-type": "application/json", "x-agent-room-local-secret": secret }, body: "{}" });
+  assert.equal(old.status, 403, "last start's secret is dead");
+  const fresh = await fetch(`${base2}/pair/local`, { method: "POST", headers: { "content-type": "application/json", "x-agent-room-local-secret": secret2 }, body: "{}" });
+  assert.equal(fresh.status, 200);
+  await again.close(); await app.close();
+});
+
+test("1.2 M1: the Mac app reads the secret through HubLauncher and sends it; the native method refuses a file others can read", () => {
+  const src = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
+  const native = src("../../app/macos/AgentRoom-macOS/HubLauncher.m");
+  assert.match(native, /RCT_EXPORT_METHOD\(localPairSecret:/);
+  assert.match(native, /local-pair\.secret/);
+  assert.match(native, /& 0077\) != 0/, "refuses group/other-readable files");
+  assert.match(native, /NSFileOwnerAccountID/);
+  assert.match(src("../../app/src/native/hub.ts"), /localPairSecret\?\(\): Promise<string \| null>/);
+  assert.match(src("../../app/src/api/client.ts"), /pairLocal = \(secret: string\)[\s\S]*x-agent-room-local-secret/);
+  assert.match(src("../../app/src/state/store.ts"), /pairLocal\(await readLocalPairSecret\(\)\)/);
+});
+
+// 1.2 review L5
+test("1.2 L5: the pairing code comes from crypto.randomInt, not Math.random", async () => {
+  const { pairingCode } = await import("../src/util.js");
+  const asked: [number, number][] = [];
+  assert.equal(pairingCode((min, max) => { asked.push([min, max]); return max - 1; }), "999999");
+  assert.deepEqual(asked, [[100000, 1000000]]);
+  assert.match(pairingCode(), /^\d{6}$/);
+  assert.doesNotMatch(readFileSync(new URL("../src/util.ts", import.meta.url), "utf8"), /Math\.random/);
+});
+
+test("1.2 L5: wrong pairing codes are counted per source address and start over when the code changes", async () => {
+  const ctx = setup();
+  const app = await buildServer({ ...ctx, ownerName: "Blake", restrictInterfaces: false });
+  const code = (app as unknown as { pairingCode: () => string }).pairingCode();
+  const pair = (ip: string, c: string, deviceName = "phone") => app.inject({ method: "POST", url: "/pair", remoteAddress: ip, payload: { code: c, deviceName } });
+  for (let i = 0; i < 10; i++) assert.equal((await pair("100.64.0.1", "000000")).statusCode, 403, `guess ${i + 1}`);
+  assert.equal((await pair("100.64.0.1", "000000")).statusCode, 429, "that address is out of guesses");
+  assert.equal((await pair("100.64.0.1", code)).statusCode, 429, "and can't confirm a guess either");
+  // a different device is not locked out by someone else's failures (the old counter was global and only a restart reset it)
+  const ok = await pair("100.64.0.2", code, "my phone");
+  assert.equal(ok.statusCode, 200);
+  // the code rotated on that success: the first address starts over
+  const next = (app as unknown as { pairingCode: () => string }).pairingCode();
+  assert.notEqual(next, code);
+  assert.equal((await pair("100.64.0.1", "000000")).statusCode, 403, "counter was reset by the new code");
+  assert.equal((await pair("100.64.0.1", next, "second phone")).statusCode, 200);
   await app.close();
 });
 

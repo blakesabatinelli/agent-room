@@ -98,6 +98,9 @@ export class Orchestrator {
   /** 1.5: limits for local work, from the hardware and the owner's overrides. */
   governor: CapacityGovernor;
 
+  /** 1.2: the hub's data folder (the API server keeps local-pair.secret there). */
+  get dataDir(): string { return this.opts.dataDir; }
+
   constructor(private store: Store, private approvals: Approvals, private opts: OrchestratorOptions) {
     this.library = new Library(store, opts.libraryDir ?? defaultLibraryRoot());
     // 1.1: the control folder's version history can never be granted to agents (it is read lazily: the control folder may be attached after this).

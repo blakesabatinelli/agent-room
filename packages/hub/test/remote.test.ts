@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { McpConnection, RemoteStatus } from "@agent-room/shared";
@@ -12,7 +12,7 @@ import { buildServer } from "../src/api/server.js";
 import { isAllowedLocalAddress } from "../src/net.js";
 import { Tailscale, MAC_APP_CLI, readFunnel, pathsOnPort } from "../src/remote/tailscale.js";
 import { AuthLimiter, isRemoteRequest } from "../src/remote/guard.js";
-import { setup } from "./helpers.js";
+import { localPairHeaders, setup } from "./helpers.js";
 
 const HOST = "mac.tail1234.ts.net";
 const RUNNING = {
@@ -79,16 +79,20 @@ async function boot(cli = fakeCli(), opts: { burst?: number; openApp?: () => Pro
   await app.listen({ host: "127.0.0.1", port: 0 });
   const port = (app.server.address() as { port: number }).port;
   const base = `http://127.0.0.1:${port}`;
-  const pr = await fetch(`${base}/pair/local`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  const pr = await fetch(`${base}/pair/local`, { method: "POST", headers: localPairHeaders(ctx.dir), body: "{}" });
   const { token } = (await pr.json()) as { token: string };
   const h = { authorization: `Bearer ${token}`, "content-type": "application/json" };
   const tk = await fetch(`${base}/mcp-tokens`, { method: "POST", headers: h, body: JSON.stringify({ agentId: "claude", name: "Claude" }) });
   const mcpToken = ((await tk.json()) as { token: string }).token;
-  return { ...ctx, ...cli, app, base, port, token, h, mcpToken, tailscale };
+  return { ...ctx, ...cli, hubDir: ctx.dir, app, base, port, token, h, mcpToken, tailscale };
 }
 
 const RPC = { jsonrpc: "2.0", id: 1, method: "tools/list" };
 const mcpHeaders = (t: string, extra: Record<string, string> = {}) => ({ authorization: `Bearer ${t}`, "content-type": "application/json", accept: "application/json, text/event-stream", ...extra });
+/** Tailscale's serve config with Funnel on for /mcp, proxying to the hub on `port` (or to `target`). */
+const serveFor = (port: number, target = `http://127.0.0.1:${port}/mcp`) => ({
+  TCP: { "443": { HTTPS: true } }, Web: { [`${HOST}:443`]: { Handlers: { "/mcp": { Proxy: target } } } }, AllowFunnel: { [`${HOST}:443`]: true },
+});
 const PROXY = { "x-forwarded-for": "203.0.113.7", "x-forwarded-host": HOST, "x-forwarded-proto": "https" };
 
 // ---------------------------------------------------------------- AC1: detect and show
@@ -135,15 +139,23 @@ test("1.2 AC1: CLI lookup order and 10 second cache", async () => {
   const saved = process.env.AGENT_ROOM_TAILSCALE_BIN;
   try {
     delete process.env.AGENT_ROOM_TAILSCALE_BIN;
-    assert.deepEqual(new Tailscale().candidates(), ["tailscale", MAC_APP_CLI], "PATH first, then the Mac app");
+    // 1.2 review L4: fixed absolute paths only; a bare "tailscale" is never handed to the OS to look up
+    assert.deepEqual(new Tailscale().candidates(), [MAC_APP_CLI, "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale"], "the Mac app, then the usual install folders");
     process.env.AGENT_ROOM_TAILSCALE_BIN = "/opt/custom/tailscale";
-    assert.deepEqual(new Tailscale().candidates(), ["/opt/custom/tailscale"], "an explicit override is used alone");
+    assert.deepEqual(new Tailscale().candidates(), ["/opt/custom/tailscale", MAC_APP_CLI, "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale"], "the override goes first");
+    process.env.AGENT_ROOM_TAILSCALE_BIN = "tailscale";
+    assert.deepEqual(new Tailscale().candidates()[0], MAC_APP_CLI, "a relative override is a PATH lookup in disguise and is ignored");
+    assert.deepEqual(new Tailscale({ bin: "/x/ts" }).candidates(), ["/x/ts"], "an explicit option is used alone");
   } finally { if (saved === undefined) delete process.env.AGENT_ROOM_TAILSCALE_BIN; else process.env.AGENT_ROOM_TAILSCALE_BIN = saved; }
 
-  // found on PATH
+  // found on PATH, but only when nobody but an administrator can change the file or its folder
   const cli = fakeCli({ status: RUNNING });
-  const onPath = new Tailscale({ env: { FAKE_TS_DIR: cli.dir, PATH: `${cli.dir}:${process.env.PATH}` }, bin: undefined });
-  if (!process.env.AGENT_ROOM_TAILSCALE_BIN) assert.equal((await onPath.status()).state, "running");
+  const env = { FAKE_TS_DIR: cli.dir, PATH: `${cli.dir}:${dirname(process.execPath)}` }; const fixedPaths = ["/nonexistent/tailscale"];
+  assert.equal((await new Tailscale({ env, fixedPaths, isWritable: () => true }).status()).state, "not_installed", "a PATH entry this user can write is never run");
+  assert.equal((await new Tailscale({ env, fixedPaths, isWritable: () => false }).status()).state, "running", "a protected PATH entry is the fallback");
+  assert.equal((await new Tailscale({ fixedPaths, env: { ...env, PATH: `relative/bin:${cli.dir}` }, isWritable: (p) => p === cli.dir }).status()).state, "not_installed", "writable folder, relative entry: refused");
+  assert.equal((await new Tailscale({ env, fixedPaths, isWritable: (p) => p === cli.bin }).status()).state, "not_installed", "a writable file is refused even in a protected folder");
+  assert.ok(!cli.argv().some((a) => a.length === 0));
 
   // cached: two calls, one CLI run
   const cached = new Tailscale({ bin: cli.bin, env: { FAKE_TS_DIR: cli.dir }, ttlMs: 10_000 });
@@ -220,7 +232,7 @@ test("1.2 AC3: non-proxied local requests behave exactly as before", async () =>
   assert.equal((await fetch(`${b.base}/agents`)).status, 401);
   assert.equal((await fetch(`${b.base}/agents`, { headers: b.h })).status, 200);
   assert.equal((await fetch(`${b.base}/pair`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: "000000", deviceName: "x" }) })).status, 403);
-  assert.equal((await fetch(`${b.base}/pair/local`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 200);
+  assert.equal((await fetch(`${b.base}/pair/local`, { method: "POST", headers: localPairHeaders(b.hubDir), body: "{}" })).status, 200);
   assert.equal((await fetch(`${b.base}/mcp`, { method: "GET" })).status, 405);
   assert.equal((await fetch(`${b.base}/mcp`, { method: "POST", headers: mcpHeaders("nope"), body: JSON.stringify(RPC) })).status, 401);
   // a tailnet peer's request has no proxy headers and a Host that is the MagicDNS name or the IP: not remote
@@ -324,11 +336,11 @@ test("1.2 AC5: Funnel refuses to start when the port already serves something el
 
 test("1.2 AC5: Funnel that exposes more than /mcp is reported, and a tailnet that hasn't allowed Funnel gets a link", async () => {
   const wide = { TCP: { "443": { HTTPS: true } }, Web: { [`${HOST}:443`]: { Handlers: { "/mcp": { Proxy: "http://127.0.0.1:4747/mcp" }, "/": { Proxy: "http://127.0.0.1:4747" } } } }, AllowFunnel: { [`${HOST}:443`]: true } };
-  assert.deepEqual(readFunnel(wide), { on: true, url: `https://${HOST}/mcp`, extraPaths: ["/"] });
-  assert.deepEqual(readFunnel({ Foreground: { s1: wide } }).extraPaths, ["/"], "a foreground funnel counts too");
-  assert.deepEqual(readFunnel({ TCP: { "443": { TCPForward: "127.0.0.1:22" } }, AllowFunnel: { [`${HOST}:443`]: true } }).extraPaths, ["tcp:443"]);
-  assert.deepEqual(readFunnel({}), { on: false, url: undefined, extraPaths: [] });
-  assert.deepEqual(readFunnel(null).on, false);
+  assert.deepEqual(readFunnel(wide, 4747), { on: true, url: `https://${HOST}/mcp`, extraPaths: ["/"], wrongTarget: undefined, forwards: [] });
+  assert.deepEqual(readFunnel({ Foreground: { s1: wide } }, 4747).extraPaths, ["/"], "a foreground funnel counts too");
+  assert.deepEqual(readFunnel({ TCP: { "443": { TCPForward: "127.0.0.1:22" } }, AllowFunnel: { [`${HOST}:443`]: true } }, 4747).extraPaths, ["tcp:443"]);
+  assert.deepEqual(readFunnel({}, 4747), { on: false, url: undefined, extraPaths: [], wrongTarget: undefined, forwards: [] });
+  assert.deepEqual(readFunnel(null, 4747).on, false);
   assert.deepEqual(pathsOnPort(wide, 443), ["/", "/mcp"]);
   assert.deepEqual(pathsOnPort(wide, 8443), []);
 
@@ -344,9 +356,10 @@ test("1.2 AC5: Funnel that exposes more than /mcp is reported, and a tailnet tha
 });
 
 test("1.2 AC5: if Tailscale won't turn Funnel off, the owner is told and the drift shows", async () => {
-  const cli = fakeCli({ status: RUNNING, serve: { TCP: { "443": { HTTPS: true } }, Web: { [`${HOST}:443`]: { Handlers: { "/mcp": { Proxy: "http://127.0.0.1:4747/mcp" } } } }, AllowFunnel: { [`${HOST}:443`]: true } } });
+  const cli = fakeCli({ status: RUNNING });
   cli.put("off-fails", "1");
   const b = await boot(cli);
+  b.put("serve.json", serveFor(b.port));
   const r = await fetch(`${b.base}/remote/funnel`, { method: "POST", headers: b.h, body: JSON.stringify({ on: false }) });
   assert.equal(r.status, 409);
   const s = (await (await fetch(`${b.base}/remote/status?fresh=1`, { headers: b.h })).json()) as RemoteStatus;
@@ -356,10 +369,10 @@ test("1.2 AC5: if Tailscale won't turn Funnel off, the owner is told and the dri
 });
 
 test("1.2 AC5: drift between Tailscale and the hub is reported, never silently fixed", async () => {
-  const on = { TCP: { "443": { HTTPS: true } }, Web: { [`${HOST}:443`]: { Handlers: { "/mcp": { Proxy: "http://127.0.0.1:4747/mcp" } } } }, AllowFunnel: { [`${HOST}:443`]: true } };
   // Funnel on in Tailscale, hub never asked for it
-  const cli = fakeCli({ status: RUNNING, serve: on });
+  const cli = fakeCli({ status: RUNNING });
   const b = await boot(cli);
+  b.put("serve.json", serveFor(b.port));
   const check = (b.app as unknown as { remoteCheck: () => Promise<RemoteStatus> }).remoteCheck;
   const s = await check();
   assert.equal(s.funnel.on, true);
@@ -480,5 +493,266 @@ test("1.2 AC5: /pair/local refuses a proxied request even when the Mac app's own
   const r = await fetch(`${b.base}/pair/local`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.7" }, body: JSON.stringify({ deviceName: "Attacker" }) });
   assert.ok([403, 404].includes(r.status));
   assert.equal(b.store.listDevices().length, before);
+  await b.app.close();
+});
+
+// ================================================================ 1.2 independent security review: fixes
+
+const rawRequest = (url: string, method: string, headers: Record<string, string>, body = "{}") => new Promise<number>((resolve, reject) => {
+  const r = request(url, { method, headers, agent: false }, (res) => { res.resume(); resolve(res.statusCode!); }); // no pooled sockets: an upgraded one is closed by the server
+  r.on("error", reject);
+  r.end(body);
+});
+
+// ---- M1
+test("1.2 review M1: a TCP forwarder to the hub gets no device token, and a forward aimed at the hub is a loud warning in status and the audit log", async () => {
+  const cli = fakeCli({ status: RUNNING });
+  const b = await boot(cli);
+  // `tailscale funnel --tls-terminated-tcp`, `ssh -L` and `socat` reach the hub from 127.0.0.1 with the caller's own Host and no proxy header:
+  // indistinguishable from the Mac app, except that the caller can't read the secret file.
+  const before = b.store.listDevices().length;
+  const viaForwarder = await fetch(`${b.base}/pair/local`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceName: "Attacker" }) });
+  assert.equal(viaForwarder.status, 403);
+  assert.equal(b.store.listDevices().length, before);
+
+  // Tailscale's serve config has a raw TCP forward to the hub's port, funneled to the internet
+  b.put("serve.json", { TCP: { "8443": { TCPForward: `127.0.0.1:${b.port}`, TerminateTLS: HOST } }, AllowFunnel: { [`${HOST}:8443`]: true } });
+  const s = (await (await fetch(`${b.base}/remote/status?fresh=1`, { headers: b.h })).json()) as RemoteStatus;
+  assert.equal(s.warnings.length, 1);
+  assert.match(s.warnings[0], /forwards PUBLIC \(Funnel\) port 8443 straight to this hub \(127\.0\.0\.1:\d+\)/);
+  assert.match(s.warnings[0], /treated as local/);
+  assert.deepEqual(s.funnel.extraPaths, ["tcp:8443"]);
+  await fetch(`${b.base}/remote/status?fresh=1`, { headers: b.h });
+  assert.equal(b.store.listAudit().filter((a) => a.action === "remote.tcp_forward").length, 1, "audited once, not on every read");
+
+  // the same for the other spellings of "this Mac", and a forward to something else is none of our business
+  for (const target of [`localhost:${b.port}`, `[::1]:${b.port}`, `0.0.0.0:${b.port}`]) {
+    b.put("serve.json", { TCP: { "9000": { TCPForward: target } } });
+    const w = (await (await fetch(`${b.base}/remote/status?fresh=1`, { headers: b.h })).json()) as RemoteStatus;
+    assert.equal(w.warnings.length, 1, target);
+    assert.doesNotMatch(w.warnings[0], /PUBLIC/, "not funneled: tailnet only");
+  }
+  b.put("serve.json", { TCP: { "9000": { TCPForward: "127.0.0.1:22" }, "9001": { TCPForward: `10.0.0.5:${b.port}` } } });
+  assert.deepEqual(((await (await fetch(`${b.base}/remote/status?fresh=1`, { headers: b.h })).json()) as RemoteStatus).warnings, []);
+  assert.equal(readFunnel({ TCP: { "443": { TCPForward: `127.0.0.1:${b.port}` } } }, b.port).forwards.length, 1);
+  assert.equal(readFunnel({ TCP: { "443": { TCPForward: `127.0.0.1:${b.port}` } } }, b.port + 1).forwards.length, 0);
+  assert.equal(readFunnel({ Foreground: { s: { TCP: { "1": { TCPForward: `127.0.0.1:${b.port}` } } } } }, b.port).forwards.length, 1, "a foreground serve counts too");
+  await b.app.close();
+});
+
+// ---- M2
+test("1.2 review M2: Funnel is 'on' only when /mcp proxies to this hub; any other target is drift wrong_target and no Funnel address is handed out", async () => {
+  const P = 4747;
+  const on = (proxy: string) => ({ TCP: { "443": { HTTPS: true } }, Web: { [`${HOST}:443`]: { Handlers: { "/mcp": { Proxy: proxy } } } }, AllowFunnel: { [`${HOST}:443`]: true } });
+  for (const ok of [`http://127.0.0.1:${P}/mcp`, `http://localhost:${P}/mcp`, `http://[::1]:${P}/mcp`, `http://LOCALHOST:${P}/mcp`]) assert.equal(readFunnel(on(ok), P).on, true, ok);
+  for (const bad of [`http://127.0.0.1:3000/mcp`, `http://127.0.0.1:${P}/`, `http://127.0.0.1:${P}/mcp/x`, `http://127.0.0.1:${P}/other`, `http://10.0.0.9:${P}/mcp`, `http://evil.example:${P}/mcp`,
+    `https://127.0.0.1:${P}/mcp`, `http://127.0.0.1/mcp`, "not a url", `http://127.0.0.1:${P}/mcp?x=1`]) {
+    const r = readFunnel(on(bad), P);
+    assert.equal(r.on, false, bad);
+    assert.equal(r.url, undefined, bad);
+    assert.equal(r.wrongTarget, bad, bad);
+  }
+
+  const cli = fakeCli({ status: RUNNING });
+  const b = await boot(cli);
+  b.put("serve.json", serveFor(b.port, "http://127.0.0.1:3000/mcp")); // someone else's service answers on the public /mcp
+  const s = (await (await fetch(`${b.base}/remote/status?fresh=1`, { headers: b.h })).json()) as RemoteStatus;
+  assert.equal(s.funnel.on, false);
+  assert.equal(s.funnel.url, undefined);
+  assert.equal(s.funnel.drift, "wrong_target");
+  assert.equal(s.funnel.wrongTarget, "http://127.0.0.1:3000/mcp");
+  assert.ok(b.store.listAudit().some((a) => a.action === "remote.funnel.drift" && /wrong_target/.test(a.detail) && /127\.0\.0\.1:3000/.test(a.detail)));
+  // even when the owner asked for Funnel, it never shows as on, and no snippet carries the public address
+  b.store.setKV("remote_funnel", true);
+  const conn = (await (await fetch(`${b.base}/agents/claude/mcp-connection/config`, { headers: b.h })).json()) as McpConnection;
+  assert.equal(conn.funnelUrl, undefined);
+  assert.ok(!conn.snippets!.some((x) => x.id === "funnel"));
+  assert.ok(!JSON.stringify(conn).includes(`https://${HOST}`));
+  assert.equal(((await (await fetch(`${b.base}/remote/status`, { headers: b.h })).json()) as RemoteStatus).funnel.drift, "wrong_target", "not off_in_tailscale");
+
+  // pointed back at this hub, it is on and the address comes back
+  b.put("serve.json", serveFor(b.port));
+  const back = (await (await fetch(`${b.base}/remote/status?fresh=1`, { headers: b.h })).json()) as RemoteStatus;
+  assert.equal(back.funnel.on, true);
+  assert.equal(back.funnel.drift, undefined);
+  assert.equal(back.funnel.wrongTarget, undefined);
+  await b.app.close();
+});
+
+// ---- L1
+test("1.2 review L1: a loopback request that asks for a *.ts.net name is remote, whatever the case, trailing dot or port", async () => {
+  const lo = { remoteAddress: "127.0.0.1" };
+  for (const host of [HOST, `${HOST}:443`, `${HOST}.`, `${HOST}.:443`, HOST.toUpperCase(), `${HOST.toUpperCase()}.:8443`, "x.ts.net", "X.TS.NET.", ` ${HOST} `]) {
+    assert.equal(isRemoteRequest({ headers: { host }, socket: lo }), true, host);
+    assert.equal(isRemoteRequest({ headers: { host }, socket: { remoteAddress: "::ffff:127.0.0.1" } }), true, host);
+  }
+  for (const host of ["127.0.0.1:4747", "localhost", "localhost.:4747", "[::1]:4747", "ts.net.evil.example", "evilts.net", "mac.ts.net.evil.example.", ""]) {
+    assert.equal(isRemoteRequest({ headers: { host }, socket: lo }), false, host);
+  }
+  // a tailnet peer that connects straight to the hub by its MagicDNS name is not proxied
+  assert.equal(isRemoteRequest({ headers: { host: `${HOST}.:4747` }, socket: { remoteAddress: "100.90.80.70" } }), false);
+
+  const b = await boot();
+  const before = b.store.listDevices().length;
+  for (const host of [`${HOST}.`, `${HOST.toUpperCase()}.:443`]) {
+    assert.equal(await rawRequest(`${b.base}/pair/local`, "POST", { host, ...localPairHeaders(b.hubDir) }), 404, host);
+    assert.equal(await rawRequest(`${b.base}/agents`, "GET", { host, authorization: `Bearer ${b.token}` }, ""), 404, host);
+  }
+  assert.equal(b.store.listDevices().length, before);
+  await b.app.close();
+});
+
+test("1.2 review L1: the docs and the guard no longer claim to fail closed, and the real-Mac checklist has the Connection-header probe", () => {
+  const doc = readFileSync(new URL("../../../docs/1.2-remote-access.md", import.meta.url), "utf8");
+  const guard = readFileSync(new URL("../src/remote/guard.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(guard, /fails closed\./i, "the old claim is gone");
+  assert.match(guard, /does NOT fail closed/);
+  assert.doesNotMatch(doc, /fails closed:/i);
+  assert.match(doc, /does not fail closed/i);
+  assert.match(doc, /Connection: X-Forwarded-For/);
+  assert.match(doc, /local-pair\.secret/);
+});
+
+// ---- L2
+test("1.2 review L2: a proxied /mcp call can't use an orchestrator task grant, only an external key", async () => {
+  const b = await boot();
+  b.orch.grants.set("task-grant-token", { agentId: "claude", roomId: b.room.id, expiresAt: Date.now() + 60_000 });
+  const call = (extra: Record<string, string>) => fetch(`${b.base}/mcp`, { method: "POST", headers: mcpHeaders("task-grant-token", extra), body: JSON.stringify(RPC) });
+  assert.equal((await call({})).status, 200, "the agent the hub started on this Mac still uses it, directly");
+  assert.equal((await call(PROXY)).status, 401, "through Funnel it is just a wrong token");
+  assert.equal((await call({ "x-agent-room-via": "relay" })).status, 401, "and so is it through the relay");
+  assert.ok(b.store.listAudit().some((a) => a.action === "mcp.remote.denied"), "the attempt is audited as a denied remote call");
+  assert.equal((await fetch(`${b.base}/mcp`, { method: "POST", headers: mcpHeaders(b.mcpToken, PROXY), body: JSON.stringify(RPC) })).status, 200, "an external key still works remotely");
+  await b.app.close();
+});
+
+// ---- L3
+test("1.2 review L3: a remote lockout is audited once, with the forwarded address and no token", async () => {
+  const b = await boot(fakeCli(), { burst: 3 });
+  const post = (token: string, ip: string) => fetch(`${b.base}/mcp`, { method: "POST", headers: mcpHeaders(token, { "x-forwarded-for": ip }), body: JSON.stringify(RPC) });
+  for (let i = 0; i < 2; i++) await post("secret-guess-aaaa", "198.51.100.9");
+  assert.equal(b.store.listAudit().filter((a) => a.action === "mcp.remote.locked_out").length, 0, "not locked out yet");
+  assert.equal((await post("secret-guess-aaaa", "198.51.100.9")).status, 401);
+  for (let i = 0; i < 5; i++) assert.equal((await post("secret-guess-aaaa", "198.51.100.9")).status, 429);
+  const out = b.store.listAudit().filter((a) => a.action === "mcp.remote.locked_out");
+  assert.equal(out.length, 1, "once per lockout, not once per refused call");
+  assert.match(out[0].detail, /198\.51\.100\.9/);
+  assert.ok(!JSON.stringify(b.store.listAudit()).includes("secret-guess-aaaa"), "no token anywhere in the log");
+  // another caller's lockout is its own
+  for (let i = 0; i < 3; i++) await post("x", "198.51.100.10");
+  assert.equal(b.store.listAudit().filter((a) => a.action === "mcp.remote.locked_out").length, 2);
+  // and the limiter reports the transition exactly once per lockout, including a second one after a refill
+  let t = 0;
+  const l = new AuthLimiter(2, 1000, () => t);
+  assert.equal(l.fail("k"), false); assert.equal(l.fail("k"), true); assert.equal(l.fail("k"), false);
+  t = 5000;
+  assert.equal(l.fail("k"), false); assert.equal(l.fail("k"), true, "a new lockout after the first one ended");
+  await b.app.close();
+});
+
+test("1.2 review L3: drift, extra paths and forwards are detected on every fresh read and after switching Funnel, not only at startup", async () => {
+  const cli = fakeCli({ status: RUNNING });
+  const b = await boot(cli);
+  const count = (action: string) => b.store.listAudit().filter((a) => a.action === action).length;
+  const withExtra = { ...serveFor(b.port), Web: { [`${HOST}:443`]: { Handlers: { "/mcp": { Proxy: `http://127.0.0.1:${b.port}/mcp` }, "/files": { Proxy: "http://127.0.0.1:9000" } } } } };
+  // nothing was checked at startup: the first thing that looks is GET /remote/status?fresh=1
+  b.put("serve.json", withExtra);
+  await fetch(`${b.base}/remote/status?fresh=1`, { headers: b.h });
+  assert.equal(count("remote.funnel.extra_paths"), 1);
+  assert.equal(count("remote.funnel.drift"), 1, "on in Tailscale, off in Agent Room");
+  await fetch(`${b.base}/remote/status?fresh=1`, { headers: b.h });
+  assert.equal(count("remote.funnel.extra_paths"), 1, "once per change");
+  // it goes away and comes back: recorded again
+  b.put("serve.json", {});
+  await fetch(`${b.base}/remote/status?fresh=1`, { headers: b.h });
+  b.put("serve.json", serveFor(b.port, "http://127.0.0.1:3000/mcp"));
+  await fetch(`${b.base}/remote/status?fresh=1`, { headers: b.h });
+  assert.equal(count("remote.funnel.drift"), 2);
+
+  // after POST /remote/funnel: a forward to the hub that was added behind the owner's back shows up in the answer and the audit log
+  b.put("serve.json", { TCP: { "8443": { TCPForward: `127.0.0.1:${b.port}` } } });
+  const on = await fetch(`${b.base}/remote/funnel`, { method: "POST", headers: b.h, body: JSON.stringify({ on: true }) });
+  assert.equal(on.status, 200);
+  assert.equal(((await on.json()) as RemoteStatus).warnings.length, 1);
+  assert.equal(count("remote.tcp_forward"), 1);
+  // and after a switch that fails
+  b.put("off-fails", "1");
+  b.put("serve.json", withExtra);
+  const before = count("remote.funnel.extra_paths");
+  const off = await fetch(`${b.base}/remote/funnel`, { method: "POST", headers: b.h, body: JSON.stringify({ on: false }) });
+  assert.equal(off.status, 409);
+  assert.equal(count("remote.funnel.extra_paths"), before + 1);
+
+  const doc = readFileSync(new URL("../../../docs/1.2-remote-access.md", import.meta.url), "utf8");
+  assert.match(doc, /GET \/remote\/status\?fresh=1/);
+  assert.match(doc, /mcp\.remote\.locked_out/);
+  await b.app.close();
+});
+
+// ---- L4
+test("1.2 review L4: fixed install paths come first; PATH is used only for entries nobody but an administrator can change", async () => {
+  const { resolveBin, pathFallbacks, defaultIsWritable } = await import("../src/remote/bin.js");
+  const dir = mkdtempSync(join(tmpdir(), "ar-bin-"));
+  const exe = join(dir, "thing"); writeFileSync(exe, "#!/bin/sh\n"); chmodSync(exe, 0o755);
+  const fixed = join(mkdtempSync(join(tmpdir(), "ar-fix-")), "thing"); writeFileSync(fixed, "#!/bin/sh\n"); chmodSync(fixed, 0o755);
+  assert.equal(resolveBin("thing", [fixed], dir, () => false), fixed, "a fixed path beats PATH");
+  assert.equal(resolveBin("thing", ["/nonexistent/thing", fixed], dir, () => false), fixed, "a missing fixed path is skipped");
+  assert.equal(resolveBin("thing", ["/nonexistent/thing"], dir, () => false), exe, "PATH fallback when the entry is protected");
+  assert.equal(resolveBin("thing", ["/nonexistent/thing"], dir, (p) => p === dir), undefined, "a writable folder is refused");
+  assert.equal(resolveBin("thing", ["/nonexistent/thing"], dir, (p) => p === exe), undefined, "a writable file is refused");
+  assert.equal(resolveBin("thing", ["relative/thing"], dir, () => true), undefined, "a relative 'fixed' path is not a fixed path");
+  assert.deepEqual(pathFallbacks("thing", `:relative:${dir}`, () => false), [exe], "empty and relative PATH entries never count");
+  // with the real check, a folder this user can write is never trusted
+  assert.equal(defaultIsWritable(dir), true);
+  assert.equal(pathFallbacks("thing", dir).length, 0);
+
+  // the hub never asks the OS to search PATH for "tailscale" or "open": every candidate it runs is an absolute path
+  const ts = new Tailscale({ env: { PATH: dir } });
+  assert.ok(ts.candidates().every((c) => c.startsWith("/")));
+  assert.ok(ts.pathCandidates().every((c) => c.startsWith("/")));
+  const src = readFileSync(new URL("../src/remote/tailscale.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /runProc\("open"|\["tailscale"/);
+  assert.match(src, /resolveBin\("open", \["\/usr\/bin\/open"\]/);
+});
+
+// ---- L6
+test("1.2 review L6: a proxied request that carries an Upgrade header is 404 before anything handles it", async () => {
+  const b = await boot();
+  const auth = { authorization: `Bearer ${b.mcpToken}`, "content-type": "application/json", accept: "application/json, text/event-stream" };
+  const before = b.store.listAudit().filter((a) => a.action === "mcp.remote").length;
+  for (const upgrade of [{ upgrade: "websocket", connection: "Upgrade" }, { upgrade: "h2c" }, { upgrade: "websocket" }] as Record<string, string>[]) {
+    assert.equal(await rawRequest(`${b.base}/mcp`, "POST", { ...auth, ...PROXY, ...upgrade }, JSON.stringify(RPC)), 404, JSON.stringify(upgrade));
+    assert.equal(await rawRequest(`${b.base}/mcp`, "GET", { ...PROXY, ...upgrade }, ""), 404, JSON.stringify(upgrade));
+    assert.equal(await rawRequest(`${b.base}/ws?token=${b.token}`, "GET", { ...PROXY, ...upgrade }, ""), 404, JSON.stringify(upgrade));
+  }
+  assert.equal(b.store.listAudit().filter((a) => a.action === "mcp.remote").length, before, "the MCP handler never ran");
+  // the same request without the Upgrade header is the ordinary 200, and a local upgrade still works
+  assert.equal(await rawRequest(`${b.base}/mcp`, "POST", { ...auth, ...PROXY }, JSON.stringify(RPC)), 200);
+  const okWs = await new Promise<string>((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${b.port}/ws?token=${b.token}`);
+    ws.on("open", () => { ws.close(); resolve("open"); });
+    ws.on("error", () => resolve("error"));
+  });
+  assert.equal(okWs, "open");
+  await b.app.close();
+});
+
+// ---- Info
+test("1.2 review info: control characters in JSON-RPC names can't forge audit lines, and the relay's own header marks a request remote", async () => {
+  const { rpcSummary, PROXY_HEADERS, forwardedIp } = await import("../src/remote/guard.js");
+  const evil = "tools/call\r\n2026-10-23 owner device.paired Attacker";
+  const sum = rpcSummary({ jsonrpc: "2.0", id: 1, method: evil, params: { name: "read_room\n\tremote.funnel.on\u0085\u2028x" } });
+  assert.doesNotMatch(sum, /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/);
+  assert.equal(rpcSummary({ method: "tools/call", params: { name: "a\r\nb" } }), "tools/call:ab");
+  assert.equal(forwardedIp({ headers: { "x-forwarded-for": "203.0.113.7\r\nowner x" }, socket: {} }), "203.0.113.7owner x");
+
+  assert.ok(PROXY_HEADERS.includes("x-agent-room-via"));
+  assert.equal(isRemoteRequest({ headers: { "x-agent-room-via": "relay" }, socket: { remoteAddress: "127.0.0.1" } }), true);
+  const b = await boot();
+  assert.equal((await fetch(`${b.base}/agents`, { headers: { ...b.h, "x-agent-room-via": "relay" } })).status, 404);
+  const call = await fetch(`${b.base}/mcp`, { method: "POST", headers: mcpHeaders(b.mcpToken, { "x-forwarded-for": "203.0.113.7" }), body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "read_room\r\nFAKE", arguments: {} } }) });
+  assert.equal(call.status, 200);
+  const line = b.store.listAudit().find((a) => a.action === "mcp.remote" && /tools\/call/.test(a.detail))!;
+  assert.ok(!/[\r\n]/.test(line.detail));
   await b.app.close();
 });

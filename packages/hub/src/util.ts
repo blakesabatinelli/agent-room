@@ -1,5 +1,6 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomInt, randomUUID } from "node:crypto";
 export const id = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
 export const now = () => Date.now();
 export const token = () => randomBytes(32).toString("hex");
-export const pairingCode = () => String(Math.floor(100000 + Math.random() * 900000));
+/** Six digits from the system CSPRNG (not a seeded PRNG). `pick` is injectable for tests. */
+export const pairingCode = (pick: (min: number, max: number) => number = randomInt) => String(pick(100000, 1000000));

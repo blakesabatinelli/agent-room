@@ -592,7 +592,9 @@
       <div class="card"><div class="detail">${f.on && f.url ? `On: ${esc(f.url)}` : "Off. Nothing on the Mac is reachable from the internet."}</div>
         ${f.drift === "on_in_tailscale" ? `<div class="detail warn">Funnel is on in Tailscale, but you haven't turned it on here. Switch it off here to close it.</div>` : ""}
         ${f.drift === "off_in_tailscale" ? `<div class="detail warn">You switched Funnel on here, but Tailscale has it off now. Switch it off and on again to restore it.</div>` : ""}
+        ${f.drift === "wrong_target" ? `<div class="detail warn">Tailscale serves /mcp, but it points at ${esc(f.wrongTarget || "something else")}, not Agent Room. Funnel is shown as off here. Fix it in Tailscale.</div>` : ""}
         ${f.extraPaths.length ? `<div class="detail warn">Funnel is also exposing ${esc(f.extraPaths.join(", "))} on the Mac. Close it on the Mac with: tailscale funnel reset</div>` : ""}
+        ${(r.warnings || []).map((w) => `<div class="detail warn">WARNING: ${esc(w)}</div>`).join("")}
       </div>` : ""}`;
   }
 

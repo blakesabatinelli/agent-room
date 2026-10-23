@@ -29,7 +29,7 @@ import { needsGate, needsMessage } from "../src/discovery/routing.js";
 import { DiscoveryService } from "../src/discovery/service.js";
 import { ensureMcpToken } from "../src/discovery/tokens.js";
 import { localModelsFor, normalizeMcpReport, sameModel } from "../src/discovery/usage.js";
-import { HW, setup } from "./helpers.js";
+import { HW, localPairHeaders, setup } from "./helpers.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until(fn: () => boolean, what: string, ms = 4000) {
@@ -644,7 +644,7 @@ async function bootApi(tailscaleState: "running" | "stopped" = "running") {
   const app = await buildServer({ ...ctx, ownerName: "Blake", tailscale, discovery: svc });
   await app.listen({ host: "127.0.0.1", port: 0 });
   const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
-  const { token } = (await (await fetch(`${base}/pair/local`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json()) as { token: string };
+  const { token } = (await (await fetch(`${base}/pair/local`, { method: "POST", headers: localPairHeaders(ctx.dir), body: "{}" })).json()) as { token: string };
   const h = { authorization: `Bearer ${token}`, "content-type": "application/json" };
   const call = async (method: string, path: string, body?: unknown) => {
     const r = await fetch(`${base}${path}`, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) });

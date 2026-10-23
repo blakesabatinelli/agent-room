@@ -2,7 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { create } from "zustand";
 import type { AgentConfig, AgentStatus, Approval, Goal, MemoryProposal, Message, Room, ServerEvent, Task } from "@agent-room/shared";
 import { Hub } from "../api/client";
-import { launcher, LOCAL_HUB } from "../native/hub";
+import { launcher, LOCAL_HUB, readLocalPairSecret } from "../native/hub";
 
 const KEY = "agent-room.connection";
 
@@ -66,7 +66,7 @@ export const useRoom = create<State>((set, get) => ({
       if (hub) { try { await hub.setup(); } catch { hub = undefined; } } // token no longer valid
       if (!hub) {
         try {
-          const res = await new Hub(LOCAL_HUB).pairLocal();
+          const res = await new Hub(LOCAL_HUB).pairLocal(await readLocalPairSecret()); // 1.2: the hub's secret, read from ~/.agent-room
           await AsyncStorage.setItem(KEY, JSON.stringify({ baseUrl: LOCAL_HUB, token: res.token, ownerName: res.ownerName }));
           hub = new Hub(LOCAL_HUB, res.token);
           set({ ownerName: res.ownerName });
