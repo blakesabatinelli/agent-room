@@ -12,10 +12,12 @@ import { codexConfinementArgs } from "../files/confine.js";
  * Codex exec cannot pause mid-run for approvals, so sensitive connectors are
  * only exposed through the hub's request_approval MCP tool.
  */
-export function codexSandboxArgs(tools: Record<string, boolean>): string[] {
-  const writable = tools.filesystem || tools.shell;
+export function codexSandboxArgs(tools: Record<string, boolean>, ask: string[] = []): string[] {
+  // 4.3: Codex can't stop to ask, so a tool the room says to ask about is off for it.
+  const on = (t: string) => tools[t] && !ask.includes(t);
+  const writable = on("filesystem") || on("shell");
   const args = ["--sandbox", writable ? "workspace-write" : "read-only"];
-  if (writable) args.push("-c", `sandbox_workspace_write.network_access=${tools.web ? "true" : "false"}`);
+  if (writable) args.push("-c", `sandbox_workspace_write.network_access=${on("web") ? "true" : "false"}`);
   return args;
 }
 
@@ -23,7 +25,7 @@ export function codexSandboxArgs(tools: Record<string, boolean>): string[] {
  * Everything before the prompt for `codex exec`. 1.1 confinement: `-C <task folder>` and the workspace-write sandbox with no extra
  * writable roots (no --add-dir, writable_roots empty, /tmp excluded), so writes stay inside the task's worktree.
  */
-export function codexBaseArgs(req: Pick<RunRequest, "agent" | "cwd" | "model" | "effort" | "jsonOnly">, outFile: string): string[] {
+export function codexBaseArgs(req: Pick<RunRequest, "agent" | "cwd" | "model" | "effort" | "jsonOnly" | "ask">, outFile: string): string[] {
   const s = req.agent.settings as { model?: string };
   const args = ["exec", "--json", "--skip-git-repo-check", "-C", req.cwd, "--output-last-message", outFile];
   const model = req.model ?? s.model;
@@ -32,7 +34,7 @@ export function codexBaseArgs(req: Pick<RunRequest, "agent" | "cwd" | "model" | 
   if (req.effort) args.push("-c", `model_reasoning_effort="${req.effort === "max" ? "xhigh" : req.effort}"`);
   if (req.jsonOnly) args.push("--sandbox", "read-only");
   else {
-    const sandbox = codexSandboxArgs(req.agent.tools);
+    const sandbox = codexSandboxArgs(req.agent.tools, req.ask);
     args.push(...sandbox);
     if (sandbox.includes("workspace-write")) args.push(...codexConfinementArgs());
   }

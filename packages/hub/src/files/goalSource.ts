@@ -27,6 +27,7 @@ export class GoalSources {
     const g = this.files.grant(grantId);
     if (!g) return { ok: false, reason: "That folder grant doesn't exist." };
     if (g.roomId && g.roomId !== roomId) return { ok: false, reason: "That folder is granted to a different room." };
+    if (!this.files.roomAllows(grantId, roomId)) return { ok: false, reason: "That folder isn't open to this room's goals. Add it to the room's folders in ROOM.md." }; // 4.3
     // A goal's tasks go to whichever agent suits them, so the folder must be open to every agent. A grant for one agent stays that agent's.
     if (g.agentId !== "*") return { ok: false, reason: "That folder is granted to one agent only. Grant it to every agent to start a goal on it." };
     if (!g.read) return { ok: false, reason: "That folder isn't readable, so a goal can't work on it." };

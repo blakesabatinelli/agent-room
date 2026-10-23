@@ -1521,3 +1521,65 @@ export interface ReturnLedger {
 
 /** Subscription.monthlyUsd: what the owner pays for the plan each month (the return ledger divides it by accepted tasks). */
 export interface Subscription { monthlyUsd?: number }
+
+// ---- 4.3 Standing rooms
+
+/** Set on a goal the calendar trigger started. `slot` is the scheduled time (epoch ms) it ran for. */
+export interface Goal { scheduled?: { slot: number; catchUp?: boolean } }
+/** Set when a judge outside the room's roster had to be used because a jury (or a second judge) could not be formed inside it. */
+export interface Judgment { outsideRoster?: string[] }
+/** OrchestratorSettings.standingCatchUpHours: a scheduled run the hub slept through is still run, once, within this many hours (default 12). */
+export interface OrchestratorSettings { standingCatchUpHours?: number }
+
+/** One narrowed tool in a room: what ROOM.md says it comes to. */
+export interface RoomToolView { tool: string; label: string; level: "on" | "ask" | "off" }
+
+/** GET /rooms/:id/definition: what ROOM.md says about a room, read live from the control folder. */
+export interface RoomDefinition {
+  roomId: string;
+  slug: string;
+  name: string;
+  topic?: string;
+  /** False for a direct-message room, or when the hub runs without a control folder. Everything below is then the open default. */
+  hasFile: boolean;
+  /** Absolute path of ROOM.md and of the room's MEMORY.md, for "Edit ROOM.md". */
+  path?: string;
+  memoryPath?: string;
+  /** Who works here. `open`: ROOM.md lists nobody, so every agent does. */
+  open: boolean;
+  roster: { id: string; name: string; color: string; avatar?: string; enabled: boolean }[];
+  /** ROOM.md `tools` entries: what this room narrows. Every other tool is as each agent has it. */
+  tools: RoomToolView[];
+  /** ROOM.md `folders`: the only folder grants this room's goals and file tools may use. Empty: every grant that applies. */
+  folders: { id: string; label?: string; path?: string; missing?: boolean }[];
+  inScope: string[];
+  outOfScope: string[];
+  /** The calendar trigger. Absent when the room has no `schedule`. */
+  schedule?: {
+    cron: string;
+    timezone: string;
+    standingGoal?: string;
+    catchUpHours: number;
+    /** False: the cron is malformed or the room has nothing to run; the trigger is off and `problem` says why. */
+    active: boolean;
+    problem?: string;
+    nextRun?: number;
+    lastRun?: number;
+    /** The goal the last run started, and whether it is still going (the next run is skipped while it is). */
+    lastGoalId?: string;
+    running?: boolean;
+    /** The last thing the trigger did that the owner may want to know: skipped, caught up, missed. */
+    lastNote?: string;
+  };
+  /** The linter's notes about this file. */
+  notices: ControlNotice[];
+}
+
+/** PUT /rooms/:id/definition. Only what is sent changes; `null` clears. The hub writes ROOM.md and commits it as the owner. */
+export interface RoomDefinitionInput {
+  roster?: string[];
+  schedule?: string | null;
+  timezone?: string | null;
+  standingGoal?: string | null;
+  catchUpHours?: number | null;
+}

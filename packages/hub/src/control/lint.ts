@@ -5,6 +5,8 @@ import { contradicts, expired, parseFacts } from "./facts.js";
 import { checkFrontMatter, parseDoc, type ParsedDoc } from "./parse.js";
 import { agentLevel, looser, platformLevel, policyLevel, scopesOverlap } from "./permissions.js";
 import { CAPS, KNOWN_NAMES, classify, todayString, type Fm, type FileMeta, type Kind } from "./schema.js";
+import { parseCron } from "../rooms/cron.js"; // 4.3
+import { validZone } from "../rooms/zone.js"; // 4.3
 
 /**
  * The linter (CONTROL.md section 7). Blocks: the file is not loaded and the last good version stays.
@@ -151,6 +153,13 @@ export function analyzeFolder(root: string, opts: LintOptions = {}): Analysis {
         }
         if (cap) r.flags.push(flag(r.rel, `tools sets ${tool}: ${v}, but ${cap.from} says ${cap.l}; a room can only tighten, so the stricter setting applies`, r.parsed?.lineOf(["tools", tool])));
       }
+      // 4.3: the calendar trigger. A schedule the hub can't read, or has nothing to run, stays off; the rest of the file still loads.
+      if (room.schedule !== undefined) {
+        const c = parseCron(room.schedule);
+        if (!c.ok) r.flags.push(flag(r.rel, `schedule "${room.schedule}" isn't a valid cron: ${c.error}. The room won't run on a schedule until it is fixed`, r.parsed?.lineOf(["schedule"])));
+        else if (!room.standing_goal?.trim()) r.flags.push(flag(r.rel, `schedule is set but standing_goal is empty, so there is nothing to run. Add standing_goal: <what to run>`, r.parsed?.lineOf(["schedule"])));
+      }
+      if (room.timezone !== undefined && !validZone(room.timezone)) r.flags.push(flag(r.rel, `timezone "${room.timezone}" isn't a time zone (use a name like America/Chicago). The owner's time zone from USER.md is used instead`, r.parsed?.lineOf(["timezone"])));
     }
     if (r.meta.kind === "room-memory") {
       const facts = parseFacts(r.body, r.bodyLine);

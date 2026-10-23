@@ -18,6 +18,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 #bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--bg); }
 #title { flex: 1; font-family: var(--display); font-weight: 600; font-size: 17px; color: var(--strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .icon { font-size: 30px; line-height: 1; padding: 0 6px 4px 0; color: var(--strong); }
+.icon.info { font-size: 22px; padding: 0 4px; }
 .pill { font-size: 13px; font-weight: 600; padding: 5px 10px; border-radius: 99px; background: var(--accent); color: var(--on-accent); }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--warn); flex: none; }
 .dot.on { background: var(--ok); }
@@ -117,7 +118,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
 
 /* permissions */
-.section .av.mini { display: inline-flex; width: 20px; height: 20px; border-radius: 5px; font-size: 11px; vertical-align: -1px; margin-right: 8px; }
+.section .av.mini, .card .av.mini { display: inline-flex; width: 20px; height: 20px; border-radius: 5px; font-size: 11px; vertical-align: -1px; margin-right: 8px; }
 .kv { display: flex; gap: 10px; margin-top: 6px; font-size: 14px; }
 .kv .k { flex: none; width: 70px; color: var(--muted); }
 .kv .v { color: var(--strong); overflow-wrap: anywhere; user-select: text; }

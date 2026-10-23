@@ -34,7 +34,7 @@ async function mk(t: TestContext, o: { control?: boolean } = {}) {
 }
 
 const git = (root: string, ...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" });
-const commits = (root: string) => git(root, "log", "--format=%an|%s").trim().split("\n").filter(Boolean).filter((l) => !l.includes("|Résumé: ")); // 2.3: the résumé writer's commits are its own
+const commits = (root: string) => git(root, "log", "--format=%an|%s").trim().split("\n").filter(Boolean).filter((l) => !l.includes("|Résumé: ") && !l.includes("|Memory: ")); // 2.3, 2.5: the résumé writer's and the memory keeper's commits are their own (they land a moment after a goal, so they race the count)
 const read = (root: string, rel: string) => readFileSync(join(root, rel), "utf8");
 const write = (root: string, rel: string, text: string) => { mkdirSync(dirname(join(root, rel)), { recursive: true }); writeFileSync(join(root, rel), text); };
 const bullets = (text: string, type: string) => {

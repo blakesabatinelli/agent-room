@@ -15,6 +15,8 @@ export interface RunRequest {
   /** room/task the run belongs to, when known */
   roomId?: string;
   taskId?: string;
+  /** 4.3: tools the room's ROOM.md says to ask about. They are never pre-allowed, so every use goes to the owner's approval prompt. */
+  ask?: string[];
   /** Profile overrides; fall back to agent.settings.model. */
   model?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";

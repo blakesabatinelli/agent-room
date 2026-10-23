@@ -22,6 +22,8 @@
     roomGrants: [], folderId: "", folderOpen: false,
     // 3.2 personas: the starter templates, the agent being edited and its form
     personas: { templates: [], id: "", form: null, err: "", busy: false },
+    // 4.3 standing rooms: the read-only room info (what ROOM.md says)
+    info: { roomId: "", def: null, err: "" },
   };
 
   // ---------- helpers
@@ -235,6 +237,8 @@
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : `# ${room.name}`)
       : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : st.view === "scorecard" ? "Scorecard" : st.view === "personas" ? "Personas" : st.view === "persona" ? (st.agents[st.personas.id]?.name || "Persona") : "Agent Room";
     renderDot(); renderBadge();
+    $("#infoBtn").hidden = !(st.view === "room" && room && !room.dmAgentId); // 4.3
+    if (st.view === "roominfo") $("#title").textContent = "Room info"; // 4.3
     if (st.view === "resumes") $("#title").textContent = "Résumés"; // 2.3
     if (st.view === "pair") return renderPair();
     if (st.view === "rooms") return renderRooms();
@@ -249,6 +253,7 @@
     if (st.view === "scorecard") return renderScorecard();
     if (st.view === "personas") return renderPersonas();
     if (st.view === "persona") return renderPersona();
+    if (st.view === "roominfo") return renderRoomInfo();
     renderMessages(); renderComposerState();
   }
 
@@ -335,6 +340,51 @@
       f.template = v.template || ""; toast("Saved");
     } catch (e) { if (e.message === "unpaired") return; p.err = e.message; }
     finally { p.busy = false; if (st.view === "persona") renderPersona(); }
+  }
+
+  // 4.3 Room info: what the room's ROOM.md says. Read only here; the roster and schedule are edited on the Mac.
+  async function openRoomInfo() {
+    const roomId = st.roomId; if (!roomId) return;
+    Object.assign(st.info, { roomId, def: null, err: "" });
+    go("roominfo");
+    try {
+      const def = await api(`/rooms/${encodeURIComponent(roomId)}/definition`);
+      if (st.info.roomId !== roomId) return;
+      st.info.def = def;
+    } catch (e) { if (e.message === "unpaired") return; st.info.err = e.message; }
+    if (st.view === "roominfo") renderRoomInfo();
+  }
+
+  function renderRoomInfo() {
+    const { def, err } = st.info;
+    if (!def) { $("#view").replaceChildren(h("div", { class: "empty", text: err || "Loading…" })); return; }
+    const zoned = (ms) => { try { return new Date(ms).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: def.schedule?.timezone }); } catch { return new Date(ms).toLocaleString(); } };
+    const card = (title, ...kids) => h("div", { class: "card" }, h("div", { class: "what", text: title }), ...kids);
+    const line = (text, cls) => h("div", { class: `detail${cls ? ` ${cls}` : ""}`, text });
+    const sc = def.schedule;
+    $("#view").replaceChildren(
+      card(`# ${def.name}`,
+        line(def.hasFile ? "This is what the room's ROOM.md says. Change it on your Mac." : "This room has no ROOM.md yet, so every agent works here with its usual tools."),
+        def.path ? line(def.path) : null),
+      card("Who works here",
+        line(def.open ? "Everyone." : "Only these agents are planned, routed, judged and @mentioned here."),
+        ...def.roster.map((a) => h("div", { class: "detail" }, h("span", { class: "av mini", "data-color": safeColor(a.color), text: glyph(a, a.name) }), `${a.name}${a.enabled ? "" : " (off)"}`))),
+      card("Tools in this room",
+        ...(def.tools.length ? def.tools.map((x) => line(`${x.label}: ${x.level === "off" ? "off" : "asks first"}`, x.level === "off" ? "warn" : "")) : [line("Nothing narrowed. Each agent has the tools it usually has.")])),
+      card("Folders",
+        ...(def.folders.length ? def.folders.map((f) => line(`${f.label || f.id}${f.missing ? " (not granted)" : ""}${f.path ? `\n${f.path}` : ""}`, f.missing ? "warn" : "")) : [line("Any folder you have granted for this room.")])),
+      card("Schedule",
+        ...(sc ? [
+          line(sc.active ? (sc.nextRun ? `Next run ${zoned(sc.nextRun)}` : "No run coming up") : `Off: ${sc.problem || "check the schedule"}`, sc.active ? "" : "warn"),
+          line(`${sc.cron}, ${sc.timezone}`),
+          sc.standingGoal ? line(sc.standingGoal) : null,
+          sc.lastRun ? line(`Last run ${zoned(sc.lastRun)}${sc.running ? ", still going" : ""}`) : null,
+          sc.lastNote ? line(sc.lastNote) : null,
+        ] : [line("Nothing scheduled.")])),
+      ...(def.inScope.length || def.outOfScope.length ? [card("Scope", ...def.inScope.map((x) => line(`• ${x}`)), def.outOfScope.length ? line(`Out of scope: ${def.outOfScope.join("; ")}`) : null)] : []),
+      ...(def.notices.length ? [card("Notes on the file", ...def.notices.map((n) => line(n.message, "warn")))] : []),
+    );
+    paintColors();
   }
 
   // The control folder (CONTROL.md): where the rules, personas and permissions live as plain files on the Mac.
@@ -1088,7 +1138,8 @@
     catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
   });
 
-  $("#back").onclick = () => go(st.view === "diff" ? "approvals" : st.view === "persona" ? "personas" : "rooms");
+  $("#back").onclick = () => (st.view === "roominfo" ? go("room", st.info.roomId) : go(st.view === "diff" ? "approvals" : st.view === "persona" ? "personas" : "rooms"));
+  $("#infoBtn").onclick = () => void openRoomInfo(); // 4.3
   $("#jumpNew").onclick = () => {
     const line = $("#newLine"), view = $("#view");
     if (line) view.scrollTo({ top: Math.max(0, line.offsetTop - view.offsetTop - 8), behavior: "smooth" });
