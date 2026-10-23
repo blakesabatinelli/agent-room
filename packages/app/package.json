@@ -1,0 +1,28 @@
+{
+  "name": "@agent-room/app",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "react-native start",
+    "ios": "react-native run-ios",
+    "macos": "react-native run-macos",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agent-room/shared": "workspace:*",
+    "@react-native-async-storage/async-storage": "^2.1.0",
+    "react": "19.0.0",
+    "react-native": "0.79.6",
+    "react-native-macos": "0.79.1",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "typescript": "^5.6.0",
+    "@react-native-community/cli": "18.0.0",
+    "@react-native-community/cli-platform-ios": "18.0.0",
+    "@react-native/babel-preset": "0.79.6",
+    "@react-native/metro-config": "0.79.6"
+  }
+}

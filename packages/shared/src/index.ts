@@ -1,0 +1,392 @@
+// Shared types between the hub and the apps.
+
+export type AdapterKind = "claude-code" | "codex" | "mcp" | "command" | "openai-api" | "mock";
+
+/** Live connection state of an agent, as shown in the sidebar. */
+export type AgentState = "ready" | "signed_out" | "not_installed" | "offline" | "error";
+export interface AgentStatus { id: string; ready: boolean; state: AgentState; detail: string; checkedAt: number }
+
+/** Everything an external agent needs to join over MCP. */
+export interface McpConnection {
+  agentId: string;
+  token: string;
+  localUrl: string;
+  tailscaleUrl?: string;
+  /** mcpServers JSON block for clients that take one */
+  config: string;
+  /** standing instructions to paste into the agent's system prompt */
+  instructions: string;
+  /** Ready-to-paste config blocks for specific clients (Hermes, Claude Desktop, ...). */
+  snippets?: { id: string; label: string; where: string; text: string }[];
+}
+
+/** Delegation-policy roles: what kind of work a profile is for. */
+export type Role = "explorer" | "worker" | "researcher" | "reviewer";
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+export const ROLES: { id: Role; label: string; hint: string }[] = [
+  { id: "explorer", label: "Explorer", hint: "Sweeps many files to answer one question. Cheap, read-only." },
+  { id: "researcher", label: "Researcher", hint: "Finds one precise outside fact." },
+  { id: "worker", label: "Worker", hint: "Builds a well-specified piece of work." },
+  { id: "reviewer", label: "Reviewer", hint: "Independent check. Strongest model; used sparingly." },
+];
+
+/** One way of running an agent: a role, a model, an effort, a cost tier. */
+export interface Profile {
+  id: string;
+  label: string;
+  role: Role;
+  model?: string;
+  effort?: Effort;
+  /** 1 cheap, 2 standard, 3 strongest. Failed work escalates up a tier. */
+  tier: 1 | 2 | 3;
+}
+
+export interface AgentConfig {
+  id: string;
+  name: string;
+  provider: string;            // "anthropic" | "openai" | "hermes" | "muse" | ...
+  adapter: AdapterKind;
+  enabled: boolean;
+  color: string;
+  /** adapter-specific settings, e.g. command template, model, base URL */
+  settings: Record<string, unknown>;
+  /** connector/tool id -> enabled */
+  tools: Record<string, boolean>;
+  canBeOrchestrator?: boolean;
+  /** Ways to run this agent. Empty means one default profile from settings.model. */
+  profiles?: Profile[];
+  /** Sensitive tools this agent may use without asking first (tool id -> true). Only applies while the tool is on. */
+  autoApprove?: Record<string, boolean>;
+}
+
+export type Author =
+  | { kind: "human"; id: "owner"; name: string }
+  | { kind: "agent"; id: string; name: string }
+  | { kind: "orchestrator"; id: "orchestrator"; name: string }
+  | { kind: "system"; id: "system"; name: string };
+
+export type MessageType =
+  | "human" | "agent" | "directive" | "task_update" | "tool_call" | "system";
+
+export interface Message {
+  id: string;
+  roomId: string;
+  type: MessageType;
+  author: Author;
+  text: string;
+  mentions: string[];
+  taskId?: string;
+  /** Plan shown to the owner for approval (renders Approve / Change buttons). */
+  planGoalId?: string;
+  /** For agent-to-agent tags: how many agent hops deep this exchange is. */
+  hop?: number;
+  /** Behind-the-scenes coordination (routing, judging). Shown only in the work log. */
+  quiet?: boolean;
+  createdAt: number;
+}
+
+export type TaskStatus =
+  | "pending" | "assigned" | "running" | "review" | "revising" | "waiting" | "done" | "failed" | "cancelled";
+
+/** One acceptance criterion in a work contract. */
+export interface Criterion {
+  id: string;
+  text: string;
+  /** A shell command run in the goal's shared folder. Exit 0 = PASS. Runs only on an approved plan. */
+  check?: string;
+}
+
+/** Result of a runnable check. */
+export interface CheckRun { criterionId: string; command: string; ok: boolean; exitCode: number | null; output: string; at: number }
+
+export type Verdict = "PASS" | "FAIL" | "UNSURE";
+
+/** The structured block an agent must end its work with. */
+export interface TaskReport {
+  status: "done" | "blocked" | "needs_input" | "missing";
+  criteria: Record<string, { verdict: Verdict; evidence: string }>;
+  outOfScope: string;
+  reason?: string;
+  /** Choices the agent made that other tasks must stay consistent with (names, formats, assumptions). */
+  decisions?: string[];
+}
+
+/** One line of a task's attempt log (work-contract "Attempts"). */
+export interface AttemptLog {
+  at: number;
+  agentId: string;
+  outcome: "ok" | "fail" | "drift" | "blocked" | "needs_input" | "replan" | "redirect";
+  note: string;
+}
+
+export interface Task {
+  id: string;
+  roomId: string;
+  goalId: string;
+  title: string;
+  description: string;
+  taskType: string;            // writing | research | coding | analysis | data | other
+  acceptance: string;
+  dependsOn: string[];
+  /** Who the plan named as owner. Only the orchestrator sets assignee. */
+  owner?: string;
+  assignee?: string;
+  /** What this task may touch, and what belongs to someone else. */
+  scope?: string;
+  outOfScope?: string[];
+  criteria?: Criterion[];
+  report?: TaskReport;
+  /** Drift flags raised on this task, newest last. */
+  drift?: string[];
+  replans?: number;
+  triedBy?: string[];
+  history?: AttemptLog[];
+  claimedAt?: number;
+  role?: Role;
+  /** Profile actually used on the last run. */
+  profileId?: string;
+  /** Lowest tier allowed after an escalation. */
+  minTier?: 1 | 2 | 3;
+  /** Files in the shared folder this task may change (paths or globs). Empty = any. */
+  files?: string[];
+  checks?: CheckRun[];
+  /** What this task hands back: the file(s) or format. Part of every delegation, with objective and boundaries. */
+  output?: string;
+  /** Goal requirements (G1…) this task delivers. Every requirement is covered by at least one task. */
+  covers?: string[];
+  /** Criteria the judge couldn't verify after escalation; the owner sees them instead of the task looping. */
+  flagged?: string[];
+  /** Consecutive reviews where the only blockers were UNSURE verdicts. */
+  unsureRounds?: number;
+  /** A failure the goal already recovered from (so it isn't handled twice). */
+  recovered?: boolean;
+  /** Added to close a gap found by goal verification or recovery. */
+  origin?: "plan" | "recovery" | "verify";
+  status: TaskStatus;
+  attempts: number;
+  result?: string;
+  judgment?: Judgment;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface Judgment {
+  score: number;               // 0..1
+  verdict: "accept" | "revise" | "reassign";
+  feedback: string;
+  judgeAgentId: string;
+  /** Per-criterion verdicts. */
+  criteria?: Record<string, { verdict: Verdict; evidence: string }>;
+  onTask?: boolean;
+  drift?: string;
+}
+
+/** How an owner message sent while work is running was taken. */
+export type SteerKind = "aside" | "amend" | "redirect" | "replan" | "stop";
+
+/** Written contract for a multi-step goal. Frozen after planning; only the owner amends it. */
+export interface Contract {
+  objective: string;
+  constraints: string[];
+  deliverables: string[];
+  outOfScope: string[];
+  version: number;
+  lockedAt: number;
+  amendments: { at: number; text: string }[];
+  /** The request expanded into every concrete thing "done" must include. Checked at the end, against the files. */
+  requirements?: Requirement[];
+  /** Choices made up front so parallel tasks don't make conflicting ones (names, formats, tone, structure). */
+  decisions?: string[];
+}
+
+/** One thing the whole goal must deliver. Status is set by goal verification, not by any single task. */
+export interface Requirement { id: string; text: string; status?: "open" | "met" | "unmet"; evidence?: string }
+
+export interface GateLine { taskId: string; task: string; criterion: string; verdict: Verdict; evidence: string; flagged?: boolean }
+export interface GateReport { passed: boolean; at: number; lines: GateLine[] }
+
+/** Running state of a goal (work-contract STATE.md). */
+export interface GoalState {
+  decisions: { at: number; text: string }[];
+  nextAction: string;
+  gate?: GateReport;
+  /** Choices agents reported while working; every later task is told to stay consistent with them. */
+  shared?: { at: number; agentId: string; taskTitle: string; text: string }[];
+  /** Progress ledger: how the goal is moving, for stall detection and bounded recovery. */
+  progress?: GoalProgress;
+  /** The orchestrator stopped and asked the owner this. The next owner message answers it and resumes the goal. */
+  waitingOnOwner?: string;
+}
+
+export interface GoalProgress {
+  /** Task runs so far (every attempt, any agent). */
+  runs: number;
+  /** Reviews in a row that accepted nothing. Reset by an accepted task. */
+  stall: number;
+  /** Goal-level replans used (after a task failed for good, or the goal stalled). */
+  goalReplans: number;
+  /** Goal verification rounds used. */
+  verifyRounds: number;
+  lastAcceptAt?: number;
+  /** Task-run cap for this goal; starts at maxTaskRuns and grows when the owner says to keep going. */
+  budget?: number;
+}
+
+export interface Goal {
+  id: string;
+  roomId: string;
+  text: string;
+  status: "planning" | "awaiting_approval" | "running" | "done" | "failed" | "paused" | "superseded";
+  /** Set when the owner approved the plan; runnable checks only run on approved plans. */
+  approvedAt?: number;
+  /** The folder every task in this goal works in. */
+  folder?: string;
+  summary?: string;
+  contract?: Contract;
+  state?: GoalState;
+  createdAt: number;
+}
+
+export interface Room {
+  id: string;
+  name: string;
+  /** Set for a direct-message room with one agent: every message goes straight to it. */
+  dmAgentId?: string;
+  topic?: string;
+  paused: boolean;
+  createdAt: number;
+}
+
+export type MemoryScope = "shared" | "private";
+
+export interface MemoryEntry {
+  id: string;
+  scope: MemoryScope;
+  ownerAgentId?: string;       // set for private memory
+  roomId?: string;             // null = global shared memory
+  text: string;
+  sourceAgentId: string;
+  confidence: number;
+  createdAt: number;
+}
+
+export interface MemoryProposal {
+  id: string;
+  roomId?: string;
+  text: string;
+  sourceAgentId: string;
+  confidence: number;
+  status: "pending" | "accepted" | "rejected" | "merged";
+  decidedBy?: "orchestrator" | "owner";
+  createdAt: number;
+}
+
+export interface AgentScore {
+  agentId: string;
+  taskType: string;
+  runs: number;
+  quality: number;             // running mean 0..1
+  avgSeconds: number;
+  revisions: number;
+  failures: number;
+}
+
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
+
+export interface Approval {
+  id: string;
+  /** Approved by the agent's "run without asking" setting rather than by the owner. */
+  auto?: boolean;
+  roomId?: string;
+  agentId: string;
+  tool: string;
+  action: string;
+  detail: string;
+  status: ApprovalStatus;
+  createdAt: number;
+  decidedAt?: number;
+}
+
+export interface AuditEntry {
+  id: string;
+  at: number;
+  actor: string;
+  action: string;
+  detail: string;
+}
+
+export interface OrchestratorSettings {
+  orchestratorAgentId: string;
+  judgeRotation: string[];     // agent ids used as judges, round-robin
+  explorationRate: number;     // 0..1 epsilon
+  maxAttempts: number;
+  calibrationSampleRate: number; // share of judgments surfaced to owner
+  /** Max back-and-forth agent-to-agent tags before the owner has to step in. */
+  maxAgentHops?: number;
+  /** An MCP agent that hasn't picked up its assignment within this loses it. */
+  claimTimeoutMinutes?: number;
+  /** Drift flags on one task before it is taken away from that agent. */
+  driftStrikes?: number;
+  /** When to show the plan for approval before work starts. */
+  planApproval?: "always" | "big" | "never";
+  /** Run plan checks (shell commands) without approval. Off: checks need an approved plan. */
+  autoRunChecks?: boolean;
+  /** Pick up running work after the hub restarts. */
+  autoResume?: boolean;
+  /** Reviews in a row with nothing accepted before the goal is replanned. */
+  stallLimit?: number;
+  /** Goal-level replans before the owner is asked how to proceed. */
+  maxGoalReplans?: number;
+  /** Rounds of "verify the whole goal, then fix gaps" before finishing. */
+  maxVerifyRounds?: number;
+  /** Hard cap on task runs per goal; the goal pauses and asks the owner past this. */
+  maxTaskRuns?: number;
+}
+
+export const SETTING_DEFAULTS = {
+  maxAgentHops: 4, claimTimeoutMinutes: 3, driftStrikes: 2,
+  planApproval: "big" as "always" | "big" | "never", autoRunChecks: false, autoResume: true,
+  stallLimit: 4, maxGoalReplans: 2, maxVerifyRounds: 2, maxTaskRuns: 40,
+};
+
+/** Suggested profiles per provider, following the delegation policy's routing table. */
+export const SUGGESTED_PROFILES: Record<string, Profile[]> = {
+  anthropic: [
+    { id: "explorer", label: "Haiku · explorer", role: "explorer", model: "claude-haiku-5-5", tier: 1 },
+    { id: "worker", label: "Sonnet · high", role: "worker", model: "claude-sonnet-5-5", effort: "high", tier: 2 },
+    { id: "lead", label: "Opus 5.5 · medium", role: "worker", model: "claude-opus-5-5", effort: "medium", tier: 3 },
+    { id: "reviewer", label: "Opus 5.5 · high", role: "reviewer", model: "claude-opus-5-5", effort: "high", tier: 3 },
+  ],
+  openai: [
+    { id: "explorer", label: "Luna · explorer", role: "explorer", model: "gpt-5.6-luna", effort: "low", tier: 1 },
+    { id: "worker", label: "Terra · medium", role: "worker", model: "gpt-5.6-terra", effort: "medium", tier: 2 },
+    { id: "reviewer", label: "Sol · high", role: "reviewer", model: "gpt-5.6-sol", effort: "high", tier: 3 },
+  ],
+};
+
+/** Known connectors; sensitive ones need owner approval per action. */
+export const TOOLS: { id: string; label: string; sensitive: boolean }[] = [
+  { id: "web", label: "Web browsing", sensitive: false },
+  { id: "filesystem", label: "Files in its workspace", sensitive: false },
+  { id: "shell", label: "Shell commands", sensitive: true },
+  { id: "gmail", label: "Gmail", sensitive: true },
+  { id: "slack", label: "Slack", sensitive: true },
+  { id: "drive", label: "Google Drive", sensitive: false },
+  { id: "salesforce", label: "Salesforce", sensitive: true },
+];
+
+export type ServerEvent =
+  | { type: "message"; message: Message }
+  | { type: "task"; task: Task }
+  | { type: "goal"; goal: Goal }
+  | { type: "approval"; approval: Approval }
+  | { type: "proposal"; proposal: MemoryProposal }
+  | { type: "agent"; agent: AgentConfig }
+  | { type: "room"; room: Room }
+  | { type: "room_deleted"; roomId: string }
+  | { type: "calibration"; task: Task }
+  | { type: "agent_status"; status: AgentStatus }
+  /** An agent started or stopped working in a room (drives the "is working" line). */
+  | { type: "working"; roomId: string; agentId: string; label?: string; active: boolean }
+  /** The owner has read a room up to this time (synced across the Mac and phone). */
+  | { type: "read"; roomId: string; at: number };

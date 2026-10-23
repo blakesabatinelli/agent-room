@@ -1,0 +1,103 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { TOOLS } from "@agent-room/shared";
+import type { Adapter, RunRequest, RunResult } from "./types.js";
+import { runProc, which } from "./proc.js";
+
+/**
+ * Drives the Claude Code CLI, signed in with the owner's Claude subscription.
+ * Permissions are enforced by Claude Code itself:
+ *  - enabled, non-sensitive tools -> --allowedTools
+ *  - disabled tools               -> --disallowedTools
+ *  - enabled, sensitive tools     -> left out of both, so Claude Code asks our
+ *    MCP permission-prompt tool, which creates an owner approval and waits.
+ */
+export const CLAUDE_TOOL_MAP: Record<string, string[]> = {
+  web: ["WebFetch", "WebSearch"],
+  filesystem: ["Read", "Write", "Edit", "Glob", "Grep", "LS"],
+  shell: ["Bash"],
+  gmail: ["mcp__gmail"],
+  slack: ["mcp__slack"],
+  drive: ["mcp__google-drive"],
+  salesforce: ["mcp__salesforce"],
+};
+
+export function claudePermissionArgs(tools: Record<string, boolean>, map = CLAUDE_TOOL_MAP, autoApprove: Record<string, boolean> = {}) {
+  const allowed = ["mcp__agent-room"];
+  const disallowed: string[] = [];
+  for (const t of TOOLS) {
+    const names = map[t.id] ?? [];
+    if (!tools[t.id]) disallowed.push(...names);
+    else if (!t.sensitive || autoApprove[t.id]) allowed.push(...names);
+    // enabled + sensitive, not auto-approved: routed to the approval prompt tool
+  }
+  return { allowed, disallowed };
+}
+
+export class ClaudeCodeAdapter implements Adapter {
+  async status() {
+    const p = await which("claude");
+    if (!p) return { ready: false, state: "not_installed" as const, detail: "Claude Code isn't installed." };
+    // Claude Code records the signed-in account in ~/.claude.json after /login.
+    try {
+      const cfg = JSON.parse(readFileSync(join(homedir(), ".claude.json"), "utf8"));
+      const email = cfg?.oauthAccount?.emailAddress;
+      if (email) return { ready: true, state: "ready" as const, detail: `Signed in as ${email}` };
+      if (process.env.ANTHROPIC_API_KEY) return { ready: true, state: "ready" as const, detail: "Using ANTHROPIC_API_KEY" };
+      return { ready: false, state: "signed_out" as const, detail: "Installed, but not signed in." };
+    } catch {
+      return { ready: true, state: "ready" as const, detail: "Installed. Sign-in couldn't be confirmed." };
+    }
+  }
+
+  buildArgs(req: RunRequest): string[] {
+    const s = req.agent.settings as { model?: string; toolMap?: Record<string, string[]> };
+    const args = ["-p", req.prompt, "--output-format", "stream-json", "--verbose"];
+    const model = req.model ?? s.model;
+    if (model) args.push("--model", model);
+    if (req.effort && !req.jsonOnly) args.push("--effort", req.effort);
+    if (req.systemPrompt) args.push("--append-system-prompt", req.systemPrompt);
+    if (req.jsonOnly) {
+      args.push("--disallowedTools", "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch", "--max-turns", "1");
+      return args;
+    }
+    if (req.mcp) {
+      args.push("--mcp-config", JSON.stringify({
+        mcpServers: { "agent-room": { type: "http", url: req.mcp.url, headers: { Authorization: `Bearer ${req.mcp.token}` } } },
+      }));
+      args.push("--permission-prompt-tool", "mcp__agent-room__approval_prompt");
+    }
+    const { allowed, disallowed } = claudePermissionArgs(req.agent.tools, s.toolMap, req.agent.autoApprove);
+    args.push("--allowedTools", allowed.join(","));
+    if (disallowed.length) args.push("--disallowedTools", disallowed.join(","));
+    return args;
+  }
+
+  async run(req: RunRequest): Promise<RunResult> {
+    const t0 = Date.now();
+    let finalText = "", streamed = "", isError = false;
+    const bin = (req.agent.settings.binary as string) || "claude";
+    const r = await runProc(bin, this.buildArgs(req), {
+      cwd: req.cwd, signal: req.signal, timeoutMs: 30 * 60_000,
+      onLine: (line) => {
+        if (!line.trim()) return;
+        try {
+          const ev = JSON.parse(line);
+          if (ev.type === "assistant") {
+            for (const c of ev.message?.content ?? []) {
+              if (c.type === "text") { streamed += c.text; req.onChunk?.(c.text); }
+              if (c.type === "tool_use") req.onChunk?.(`\n[tool: ${c.name}]\n`);
+            }
+          } else if (ev.type === "result") {
+            finalText = typeof ev.result === "string" ? ev.result : finalText;
+            isError = !!ev.is_error;
+          }
+        } catch { /* non-JSON noise */ }
+      },
+    });
+    const text = finalText || streamed;
+    const ok = r.code === 0 && !isError && !!text;
+    return { ok, text, durationMs: Date.now() - t0, error: ok ? undefined : (r.stderr || text || `exit ${r.code}`).slice(0, 2000) };
+  }
+}
