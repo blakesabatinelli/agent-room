@@ -69,7 +69,7 @@ export function buildTaskContextDetailed(input: TaskContextInput): TaskContextRe
   // ---- pieces that may be trimmed (and in what order)
   const roomMem = parseFacts(room?.memory?.body ?? "", 1).filter((f) => !expired(f, today))
     .map((f) => `- ${f.text}${f.source ? ` (source: ${f.source})` : ""}`);
-  const agentMem = bullets(agent?.memory?.body ?? "");
+  const agentMem = bullets(agent?.memory?.body ?? "").filter((l) => { const f = parseFacts(l, 1)[0]; return !(f && expired(f, today)); }); // 2.5: expired notes drop out too
   const lessons = lessonBullets(agent?.lessons?.body ?? "", taskType);
   const pb = Object.values(c.playbooks).find((p) => p.fm.task_type === taskType && (p.fm.applies_to === "*" || p.fm.applies_to.includes(agentId)));
   const playbook = lines(pb?.body ?? "");

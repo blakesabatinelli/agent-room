@@ -1,5 +1,5 @@
 import type {
-  AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
+  AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryExportInfo, MemoryProposal,
   Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal,
 } from "@agent-room/shared";
 
@@ -95,6 +95,11 @@ export class Hub {
   saveQuota = (subs: Subscription[]) => this.send<SubscriptionStatus[]>("PUT", "/quota/subscriptions", subs);
 
   memory = (roomId?: string) => this.req<MemoryEntry[]>(`/memory${roomId ? `?roomId=${roomId}` : ""}`);
+  // 2.5: expired facts (kept 30 days), "still true", the export switch's file and cap, and the answer to a question card
+  expiredMemory = (roomId?: string) => this.req<MemoryEntry[]>(`/memory?expired=1${roomId ? `&roomId=${roomId}` : ""}`);
+  renewMemory = (id: string) => this.send<MemoryEntry>("POST", `/memory/${id}/renew`);
+  memoryExport = () => this.req<MemoryExportInfo[]>("/memory/export");
+  answer = (id: string, choice: string) => this.send("POST", `/approvals/${id}`, { choice });
   editMemory = (id: string, text: string) => this.send("PUT", `/memory/${id}`, { text });
   deleteMemory = (id: string) => this.send("DELETE", `/memory/${id}`);
   proposals = () => this.req<MemoryProposal[]>("/memory/proposals?status=pending");

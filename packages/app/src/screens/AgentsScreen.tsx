@@ -1,7 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
 import React, { useEffect, useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, Text, View } from "react-native";
-import type { AgentConfig, AgentScore, McpConnection } from "@agent-room/shared";
+import type { AgentConfig, AgentScore, McpConnection, MemoryExportInfo } from "@agent-room/shared";
 import type { SetupInfo } from "../api/client";
 import { presence, useRoom } from "../state/store";
 import { Avatar, Button, CodeBlock, Field, Pill, Screen, Toggle } from "../components/ui";
@@ -15,6 +15,7 @@ const PROVIDER: Record<string, string> = { "claude-code": "Claude Code · your C
 // Strong enough to carry white initials on a light background.
 const COLORS = ["#D9822B", "#D6336C", "#1C7ED6", "#2F9E44", "#B08800", "#7048E8", "#5C6B7A"];
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const capLabel = (n?: number) => (n && n >= 1024 ? `${Number((n / 1024).toFixed(1))} KB` : `${n ?? 4096} bytes`);
 
 export function AgentsScreen({ onBack }: { onBack?: () => void }) {
   const p = usePalette();
@@ -62,6 +63,9 @@ function AgentCard({ a, scores }: { a: AgentConfig; scores: AgentScore[] }) {
   const [note, setNote] = useState<string>();
   const [log, setLog] = useState<string | null>();
   const [advanced, setAdvanced] = useState(false);
+  // 2.5: which file this agent's memory export writes, and how big the block may be
+  const [exp, setExp] = useState<MemoryExportInfo>();
+  useEffect(() => { hub?.memoryExport().then((l) => setExp(l.find((x) => x.agentId === a.id))).catch(() => {}); }, [hub, a.id, a.settings.memoryExport]);
   useEffect(() => { if (st?.ready) setNote(undefined); }, [st?.ready]);
 
   const label = !a.enabled ? "Off" : st?.ready ? (pres === "busy" ? "Working" : "Connected")
@@ -118,6 +122,11 @@ function AgentCard({ a, scores }: { a: AgentConfig; scores: AgentScore[] }) {
           <View style={{ borderWidth: 1, borderColor: p.line, borderRadius: radius.lg, overflow: "hidden" }}>
             <Toggle label="Available in the room" accent={p.ok} value={a.enabled}
               hint="When off, it won't be picked for work or reviews." onChange={(v) => hub?.updateAgent(a.id, { enabled: v })} />
+            {exp?.supported && exp.file ? (
+              <Toggle label={`Share room memory with ${a.name} outside the room`} value={a.settings.memoryExport === true}
+                hint={`Off by default. When on, it writes what the room knows into ${exp.file}, in one block between two marker lines, up to ${capLabel(exp.capBytes)}. The rest of that file is never touched, and your original is saved once first.${exp.note ? ` ${exp.note}` : ""}`}
+                onChange={(v) => hub?.updateAgent(a.id, { settings: { ...a.settings, memoryExport: v } })} />
+            ) : null}
             <View style={{ paddingHorizontal: space(4), paddingVertical: space(3) }}>
               <Text style={[t.small, { color: p.muted }]}>
                 {scores.length ? `Track record: ${scores.map((x) => `${x.taskType} ${Math.round(x.quality * 100)} over ${x.runs}`).join(" · ")}`

@@ -321,6 +321,34 @@ export class ControlFolder {
     if (o.emit || before !== JSON.stringify(notices)) {
       if (!o.initial) this.emitControl(o.changed ?? [], notices);
     }
+    // 2.5: tell the memory keeper what was just loaded (undefined: everything, at start up).
+    for (const fn of this.loadListeners) { try { fn(o.initial ? undefined : (o.changed ?? [])); } catch (e) { this.log(`load listener failed: ${(e as Error).message}`); } }
+  }
+
+  // ---------------------------------------------------------------- 2.5 memory files
+
+  private loadListeners = new Set<(changed: string[] | undefined) => void>();
+  /** 2.5: be told after every load which files changed (`undefined` after start up, `[]` after a reload that may not have changed any). */
+  onLoad(fn: (changed: string[] | undefined) => void): () => void { this.loadListeners.add(fn); return () => { this.loadListeners.delete(fn); }; }
+
+  /**
+   * 2.5: change one control file on behalf of the module that owns its content (memory). `build` gets the file's text, or
+   * undefined when there is none, and returns the new text, or undefined for no change. A file the linter blocks is left
+   * alone (the owner is told by the linter). One commit by `writer`, then the new file is loaded like any other change.
+   */
+  writeManaged(rel: string, build: (current: string | undefined) => string | undefined, message: string, writer: string): Promise<"written" | "unchanged" | "skipped"> {
+    return this.enqueue(async () => {
+      const c = classify(rel);
+      if (!("meta" in c)) return "skipped";
+      const cur = this.exists(rel) ? this.read(rel) : undefined;
+      if (cur !== undefined && checkFile(rel, c.meta, cur).blocks.length) return "skipped";
+      const next = build(cur);
+      if (next === undefined || next === cur) return "unchanged";
+      this.write(rel, next);
+      await this.commit([rel], message, writer);
+      await this.loadNow({ emit: true, changed: [rel] });
+      return "written";
+    });
   }
 
   private emitControl(changed: string[], notices: ControlNotice[]) {

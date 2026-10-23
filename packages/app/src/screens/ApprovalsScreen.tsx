@@ -48,6 +48,11 @@ export function ApprovalsScreen() {
     catch (e) { setError((e as Error).message); }
   };
 
+  const answer = async (a: Approval, choice: string) => {
+    try { await hub?.answer(a.id, choice); }
+    catch (e) { setError((e as Error).message); }
+  };
+
   const open = reviewing ? approvals.find((a) => a.id === reviewing) : undefined;
   const openProposal = open ? proposals[open.id] : undefined;
   if (open && openProposal) {
@@ -79,7 +84,17 @@ export function ApprovalsScreen() {
             <View key={a.id} style={{ flexDirection: "row", gap: space(3), padding: space(4), borderRadius: 12, backgroundColor: p.surface, borderWidth: 1, borderColor: p.line }}>
               <Strip color={agent?.color ?? p.muted} />
               <View style={{ flex: 1, gap: space(2) }}>
-                {file ? (
+                {a.question ? (
+                  // 2.5: a memory question has three answers, not approve or reject
+                  <>
+                    <Text style={[t.heading, { color: p.ink }]}>The room remembers two different things</Text>
+                    <Text style={[t.body, { color: p.ink }]}>{a.action}</Text>
+                    <Text selectable style={[t.small, { color: p.muted }]} numberOfLines={6}>{a.detail}</Text>
+                    <View style={{ flexDirection: "row", gap: space(2), flexWrap: "wrap" }}>
+                      {a.question.choices.map((c, i) => <Button key={c.id} kind={i === 0 ? "primary" : "plain"} label={c.label} onPress={() => answer(a, c.id)} />)}
+                    </View>
+                  </>
+                ) : file ? (
                   <>
                     <Text style={[t.heading, { color: p.ink }]}>{agent?.name ?? a.agentId} wants to {proposal ? verb(proposal) : "write"} {proposal ? what(proposal) : a.action.replace(/^write /, "")}</Text>
                     {parsed && proposal ? (

@@ -6,11 +6,19 @@ import { useRoom } from "../state/store";
 import { Button, Empty, Screen, Section } from "../components/ui";
 import { space, type as t, usePalette } from "../theme";
 
+/** "From goal g_12 on Oct 20. Expires Nov 19." (2.5: every fact shows where it came from and when it lapses.) */
+function provenance(e: MemoryEntry, name: (id: string) => string) {
+  const day = (ms: number) => new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+  const from = !e.source ? `From ${name(e.sourceAgentId)}` : e.source.kind === "goal" ? `From goal ${e.source.id}` : e.source.kind === "owner" ? "From you" : `From ${name(e.source.agentId ?? e.sourceAgentId)}`;
+  return `${from}${e.source ? ` on ${day(e.source.at)}` : ""}. ${e.expiresAt < Date.now() ? "Expired" : "Expires"} ${day(e.expiresAt)}.`;
+}
+
 export function MemoryScreen() {
   const p = usePalette();
   const { hub, roomId, proposals, agents } = useRoom(useShallow((s) => ({ hub: s.hub, roomId: s.roomId, proposals: s.proposals, agents: s.agents })));
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
-  const refresh = () => { hub?.memory(roomId).then(setEntries).catch(() => {}); };
+  const [expired, setExpired] = useState<MemoryEntry[]>([]);
+  const refresh = () => { hub?.memory(roomId).then(setEntries).catch(() => {}); hub?.expiredMemory(roomId).then(setExpired).catch(() => {}); };
   useEffect(refresh, [hub, roomId, proposals.length]);
   const name = (id: string) => agents.find((a) => a.id === id)?.name ?? id;
 
@@ -37,12 +45,26 @@ export function MemoryScreen() {
               <TextInput defaultValue={e.text} multiline style={[t.body, { color: p.ink }]}
                 onEndEditing={(ev) => ev.nativeEvent.text !== e.text && hub?.editMemory(e.id, ev.nativeEvent.text)} accessibilityLabel="Memory entry" />
               <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                <Text style={[t.small, { color: p.muted }]}>From {name(e.sourceAgentId)}{e.roomId ? "" : ", all rooms"}</Text>
+                <Text style={[t.small, { color: p.muted, flex: 1 }]}>{provenance(e, name)}{e.roomId ? "" : ", all rooms"}</Text>
+                <Button kind="plain" label="Still true" onPress={async () => { await hub?.renewMemory(e.id); refresh(); }} />
                 <Button kind="plain" label="Delete" onPress={async () => { await hub?.deleteMemory(e.id); refresh(); }} />
               </View>
             </View>
           ))}
         </Section>
+        {expired.length ? (
+          <Section title="Expired, kept for 30 days">
+            {expired.map((e) => (
+              <View key={e.id} style={{ padding: space(4), gap: space(1), borderBottomWidth: 1, borderColor: p.line }}>
+                <Text style={[t.body, { color: p.muted }]}>{e.text}</Text>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <Text style={[t.small, { color: p.faint, flex: 1 }]}>{provenance(e, name)}</Text>
+                  <Button kind="plain" label="Still true" onPress={async () => { await hub?.renewMemory(e.id); refresh(); }} />
+                </View>
+              </View>
+            ))}
+          </Section>
+        ) : null}
       </ScrollView>
     </Screen>
   );

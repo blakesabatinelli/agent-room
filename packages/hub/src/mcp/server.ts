@@ -8,6 +8,7 @@ import { inbox } from "../adapters/mcp.js";
 import type { McpGrant, Orchestrator } from "../orchestrator/orchestrator.js";
 import { checkFileToolRequest } from "../files/confine.js";
 import { localModelsFor, mcpReportShape, normalizeMcpReport } from "../discovery/usage.js"; // 1.3
+import { annotate } from "../memory/model.js"; // 2.5
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
@@ -46,19 +47,23 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
   }, async ({ agent: target, question, roomId: r }) => text(await orch.askAgent(grant, target, question, scoped(r) ?? grant.roomId)));
 
   server.registerTool("read_memory", {
-    description: "Read the room's shared memory and your own private notes.",
+    description: "Read the room's shared memory and your own private notes. Each entry shows where it came from and when it expires; expired entries are not shown.",
     inputSchema: { roomId: z.string().optional() },
   }, async ({ roomId: r }) => {
-    const shared = store.listShared(roomId(r)).map((m) => `- ${m.text}`).join("\n") || "- (none)";
-    const priv = store.listPrivate(grant.agentId).map((m) => `- ${m.text}`).join("\n") || "- (none)";
+    const shared = store.listShared(roomId(r)).map((m) => `- ${annotate(m)}`).join("\n") || "- (none)"; // 2.5: source and expiry
+    const priv = store.listPrivate(grant.agentId).map((m) => `- ${annotate(m)}`).join("\n") || "- (none)";
     return text(`Shared memory:\n${shared}\n\nYour private notes:\n${priv}`);
   });
 
   server.registerTool("propose_memory", {
-    description: "Suggest an entry for shared memory. The orchestrator decides whether to keep it.",
-    inputSchema: { text: z.string().min(3).max(2000), confidence: z.number().min(0).max(1).optional() },
-  }, async ({ text: t, confidence }) => {
-    void orch.proposeMemory(grant.agentId, grant.roomId, t, confidence ?? 0.6);
+    description: "Suggest an entry for shared memory. The orchestrator decides whether to keep it, and every entry expires. Say how long it stays true (expiresInDays) and where you learned it (source), if you know. Something that contradicts what the room already knows goes to the owner as a question.",
+    inputSchema: {
+      text: z.string().min(3).max(2000), confidence: z.number().min(0).max(1).optional(),
+      expiresInDays: z.number().int().min(1).max(3650).optional().describe("How long this stays true. A status is days, a preference a year. The orchestrator can overrule it."),
+      source: z.string().max(200).optional().describe("Where you learned it: a goal id, a file, a person, a page."),
+    },
+  }, async ({ text: t, confidence, expiresInDays, source }) => {
+    void orch.proposeMemory(grant.agentId, grant.roomId, t, confidence ?? 0.6, { taskId: grant.taskId, expiresInDays, sourceHint: source });
     return text("Proposal sent to the orchestrator.");
   });
 
