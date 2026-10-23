@@ -27,6 +27,7 @@ import { CapacityGovernor } from "../capacity/governor.js";
 import { detectHardware } from "../capacity/hardware.js";
 import { cleanNeeds } from "../discovery/connectors.js"; // 1.3
 import { needsGate, needsMessage, type NeedsGate } from "../discovery/routing.js"; // 1.3
+import { juryLine, jurySummary, recordOwnerRating, review as juryReview, type JuryHost } from "../jury/index.js"; // 2.2
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -1392,11 +1393,11 @@ export class Orchestrator {
     if (drift.length) task.drift = [...(task.drift ?? []), ...drift].slice(-10);
     recordOutcome(this.store, agent.id, task.taskType, { judgment, seconds: res.durationMs / 1000, failed: false, revision: isRevision }, ranModel ?? profile.model /* 2.4 */);
     const crit = Object.entries(judgment.criteria ?? {}).map(([k, v]) => `${k} ${v.verdict}`).join(", ");
-    this.log(goal.roomId, `Checked "${task.title}": ${Math.round(judgment.score * 100)}/100, ${judgment.verdict}${crit ? ` (${crit})` : ""}.${drift.length ? ` Drift: ${drift.join(" ")}` : ""} ${judgment.feedback}`, task.id, "task_update");
+    this.log(goal.roomId, `Checked "${task.title}": ${Math.round(judgment.score * 100)}/100, ${judgment.verdict}${crit ? ` (${crit})` : ""}.${drift.length ? ` Drift: ${drift.join(" ")}` : ""} ${judgment.feedback}${juryLine(judgment) ? `\n${juryLine(judgment)}` : ""}`, task.id, "task_update"); // 2.2: jury chips line
     if ((this.opts.rand ?? Math.random)() < s.calibrationSampleRate) this.store.emit("event", { type: "calibration", task });
 
     this.progress(goal.id, (p) => { if (judgment.verdict === "accept") { p.stall = 0; p.lastAcceptAt = now(); } else p.stall += 1; });
-    const judged = { judgment: { score: judgment.score, verdict: judgment.verdict, judgeAgentId: judgment.judgeAgentId } };
+    const judged = { judgment: { score: judgment.score, verdict: judgment.verdict, judgeAgentId: judgment.judgeAgentId }, ...(judgment.jury ? { juryId: judgment.jury.id } : {}) }; // 2.2: the routing record points at its jury
     if (judgment.verdict === "accept") {
       // 1.4: accepted work merges into the goal folder. A conflict with another task's accepted work is a send-back, never "done".
       await this.workspaceHook("beforeMerge", ws, agent.id); // 1.9 HOOK: restore the agent's context file in `work` before it is committed
@@ -1494,7 +1495,19 @@ export class Orchestrator {
     return { failureTag: tag, failureNote: `${why}: ${firstLine(note)}`.slice(0, 300) };
   }
 
+  /**
+   * 2.2 HOOK: blind cross-vendor jury. The reply is neutralised and three judges from other model families grade it;
+   * with too few families ready (or the jury switched off) this is the single rotating judge it always was (judgeOne).
+   */
   private async judge(task: Task, worker: AgentConfig, contract: Contract | undefined, notes: string[], signal: AbortSignal, changed: string[] = [], files = "", previousFeedback?: string, notJudge?: string): Promise<Judgment> {
+    const host: JuryHost = { store: this.store, readyAgents: () => this.readyAgents(), call: (a, p, o) => this.call(a, p, o), callJson: (p, a, sig, r) => this.callJson(p, a, sig, r), governor: this.governor, quotaLimited: (aid) => quotaLimited(this.store, aid) };
+    const r = await juryReview(host, { task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge });
+    if ("judgment" in r) return r.judgment;
+    if ("off" in r) return this.judgeOne(task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge);
+    return r.finish(await this.judgeOne(r.task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge?.split(",")[0]));
+  }
+
+  private async judgeOne(task: Task, worker: AgentConfig, contract: Contract | undefined, notes: string[], signal: AbortSignal, changed: string[] = [], files = "", previousFeedback?: string, notJudge?: string): Promise<Judgment> {
     const s = this.store.getSettings();
     const ready = new Set((await this.readyAgents()).map((a) => a.id));
     const pool = s.judgeRotation.map((j) => this.store.getAgent(j)).filter((a): a is AgentConfig => !!a && a.enabled && ready.has(a.id) && !quotaLimited(this.store, a.id)); // 1.6: not a judge that is out of quota
@@ -1542,7 +1555,7 @@ export class Orchestrator {
     const orch = (await this.readyAgents()).find((a) => a.id === this.store.getSettings().orchestratorAgentId) ?? this.orchestratorAgent()!;
     this.writeLedger(g);
     const text = await this.call(orch, summaryPrompt(g.text, g.contract, live, report), { jsonOnly: true });
-    const checks = report.passed ? `✓ ${gateText(report)}` : `⚠︎ ${gateText(report)}`;
+    const checks = (report.passed ? `✓ ${gateText(report)}` : `⚠︎ ${gateText(report)}`) + jurySummary(this.store, g.id); // 2.2: how it was judged
     const reqLine = g.contract?.requirements?.length
       ? `\n${g.contract.requirements.map((r) => `${r.status === "met" ? "✓" : r.status === "unmet" ? "✗" : "·"} ${r.id} ${r.text}`).join("\n")}` : "";
     g.summary = text.ok ? `${text.text.trim()}\n\n${checks}${reqLine}` : `${live.filter((t) => t.status === "done").length}/${live.length} tasks done.\n${checks}${reqLine}`;
@@ -1587,6 +1600,7 @@ export class Orchestrator {
     const t = this.store.getTask(taskId);
     if (!t?.judgment || !t.assignee) return;
     applyOwnerRating(this.store, t.assignee, t.taskType, t.judgment.score, ownerScore, (t.routingId ? this.store.getRouting(t.routingId) : undefined)?.modelVersion /* 2.4 */);
+    recordOwnerRating(this.store, t.judgment, ownerScore); // 2.2: per-judge and jury distance from the owner's rating
     this.store.audit("owner", "judgment.rated", `${t.title}: judge ${t.judgment.score} owner ${ownerScore}`);
   }
 

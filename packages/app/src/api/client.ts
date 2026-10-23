@@ -1,6 +1,6 @@
 import type {
   AgentConfig, AgentScore, VersionScoreRow, ModelShift, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
-  Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal,
+  Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal, JuryCalibration,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -92,6 +92,8 @@ export class Hub {
   settings = () => this.req<OrchestratorSettings & { calibration: { n: number; absErr: number } }>("/settings");
   saveSettings = (s: Partial<OrchestratorSettings>) => this.send<OrchestratorSettings>("PUT", "/settings", s);
   capacity = () => this.req<CapacitySnapshot>("/capacity");
+  /** 2.2: how far juries and single judges are from your spot ratings. */
+  juryStats = () => this.req<{ calibration: JuryCalibration; juries: number; splits: number }>("/jury/stats");
 
   quota = () => this.req<SubscriptionStatus[]>("/quota/subscriptions");
   saveQuota = (subs: Subscription[]) => this.send<SubscriptionStatus[]>("PUT", "/quota/subscriptions", subs);
