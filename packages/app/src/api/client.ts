@@ -1,5 +1,5 @@
 import type {
-  AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
+  AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FirstPassMetrics, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
   Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal,
 } from "@agent-room/shared";
 
@@ -85,6 +85,7 @@ export class Hub {
   mcpConfig = (id: string) => this.req<McpConnection>(`/agents/${id}/mcp-connection/config`);
   mcpRevoke = (id: string) => this.send("DELETE", `/agents/${id}/mcp-connection`);
   scores = () => this.req<AgentScore[]>("/scores");
+  firstPass = (weeks = 12) => this.req<FirstPassMetrics>(`/metrics/first-pass?weeks=${weeks}`); // 2.1
   tools = () => this.req<{ id: string; label: string; sensitive: boolean }[]>("/tools");
 
   settings = () => this.req<OrchestratorSettings & { calibration: { n: number; absErr: number } }>("/settings");

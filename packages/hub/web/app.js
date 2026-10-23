@@ -8,7 +8,7 @@
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
     view: "rooms",          // rooms | room | approvals | diff | permissions | folders | control | subscriptions | remote | pair
-    tools: [], control: null, quota: [], remote: null,
+    tools: [], control: null, quota: [], remote: null, firstPass: null,
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, working: {}, approvals: [],
     unread: new Set(), readAt: 0, readSent: {}, positioned: "",
     online: false, ws: null, wsDelay: 1000,
@@ -227,7 +227,7 @@
     $("#composer").hidden = st.view !== "room";
     const room = st.rooms.find((r) => r.id === st.roomId);
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : `# ${room.name}`)
-      : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : "Agent Room";
+      : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : st.view === "scorecard" ? "Scorecard" : "Agent Room";
     renderDot(); renderBadge();
     if (st.view === "pair") return renderPair();
     if (st.view === "rooms") return renderRooms();
@@ -238,6 +238,7 @@
     if (st.view === "control") return renderControl();
     if (st.view === "subscriptions") return renderSubscriptions();
     if (st.view === "remote") return renderRemote();
+    if (st.view === "scorecard") return renderScorecard();
     renderMessages(); renderComposerState();
   }
 
@@ -265,6 +266,7 @@
       <button class="row" data-nav="folders"><span class="hash">▤</span><span class="name">Folders</span></button>
       <button class="row" data-nav="remote"><span class="hash">⇄</span><span class="name">Remote access</span></button>
       <button class="row" data-nav="subscriptions"><span class="hash">◔</span><span class="name">Subscriptions</span></button>
+      <button class="row" data-nav="scorecard"><span class="hash">▥</span><span class="name">Scorecard</span></button>
       <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>${st.capacity ? `<div class="capline">${esc(st.capacity.summary)}</div>` : ""}`;
     paintColors();
   }
@@ -608,6 +610,25 @@
     for (const el of document.querySelectorAll("[data-pct]")) el.style.width = `${el.dataset.pct}%`;
   }
 
+  // 2.1 Scorecard (2.7 extends it): how often work is accepted the first time it is reviewed, by week since retros began.
+  function renderScorecard() {
+    const m = st.firstPass;
+    if (!m) { $("#view").innerHTML = `<div class="empty">Loading…</div>`; return; }
+    const pct = (r) => (r === null ? "no work" : `${Math.round(r * 100)}%`);
+    const s = m.sincePhase;
+    const since = new Date(m.phaseStartedAt).toLocaleDateString();
+    const total = m.overall.reduce((n, w) => n + w.tasks, 0);
+    const bars = m.overall.map((w) => `<div class="fpcol" title="${esc(`${w.week}: ${pct(w.rate)} of ${w.tasks} tasks`)}"><i class="${w.sincePhase ? "" : "pre"}" data-h="${w.rate === null ? 2 : Math.max(2, Math.round(w.rate * 100))}"></i></div>`).join("");
+    $("#view").innerHTML = `
+      <div class="card">
+        <div class="what">${s.tasks ? `${pct(s.rate)} accepted first time` : "No finished work yet"}</div>
+        <div class="detail">${s.tasks ? `Since ${esc(since)}: ${s.accepted} of ${s.tasks} tasks, ${s.revisionsPerTask ?? 0} send-backs per task.` : `Counting from ${esc(since)}.`}</div>
+      </div>
+      ${total ? `<div class="fpbars">${bars}</div><div class="qnote flat fpnote">Last ${m.weeks} weeks, newest on the right. Pale bars are from before this started.</div>` : ""}
+      ${m.overall.filter((w) => w.tasks).slice(-6).reverse().map((w) => `<div class="kv"><span class="k">${esc(w.week)}</span><span class="v">${pct(w.rate)} of ${w.tasks}</span></div>`).join("")}`;
+    for (const el of document.querySelectorAll("[data-h]")) el.style.height = `${el.dataset.h}%`;
+  }
+
   // 1.2: Tailscale status, read-only, plus the Funnel switch. Setup of Tailscale itself happens on the Mac.
   function renderRemote() {
     const r = st.remote;
@@ -755,6 +776,11 @@
       if (t.dataset.nav === "subscriptions") {
         go("subscriptions");
         st.quota = await api("/quota/subscriptions"); if (st.view === "subscriptions") renderSubscriptions();
+        return;
+      }
+      if (t.dataset.nav === "scorecard") {
+        go("scorecard");
+        st.firstPass = await api("/metrics/first-pass?weeks=12"); if (st.view === "scorecard") renderScorecard();
         return;
       }
       if (t.dataset.nav === "remote") {

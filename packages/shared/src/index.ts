@@ -980,3 +980,50 @@ export type WriteProposalSummary = Omit<WriteProposal, "diff"> & { diffBytes: nu
 export type FolderCheck =
   | { ok: true; root: string; protected: boolean; because?: string }
   | { ok: false; error: string; canForce: boolean };
+
+// ---- 2.1 Retros and playbooks
+/** A lesson the orchestrator wrote after a goal (the `lessons` table; the same text is a bullet in agents/<id>/LESSONS.md). */
+export interface Lesson {
+  id: string;
+  agentId: string;
+  taskType: string;
+  text: string;
+  goalId: string;
+  /** When it was written. */
+  at: number;
+  /** In use: shown to the agent on later tasks of this type. */
+  active: boolean;
+  /** Taken out by condensing (merged into another lesson, or too old). Owner deletions are inactive but not retired. */
+  retired: boolean;
+}
+
+/** One calendar week (ISO, Monday to Sunday, UTC) of first-pass acceptance. */
+export interface FirstPassWeek {
+  /** ISO week, e.g. "2026-W43". */
+  week: string;
+  /** The Monday it starts on, YYYY-MM-DD. */
+  start: string;
+  /** Tasks whose first attempt finished this week. */
+  tasks: number;
+  /** Of those, how many were accepted on the first attempt. */
+  accepted: number;
+  /** accepted / tasks, or null when there were no tasks. */
+  rate: number | null;
+  /** Send-back revisions on those tasks, per task (null when there were no tasks). */
+  revisionsPerTask: number | null;
+  /** The week is the phase start week or later. */
+  sincePhase: boolean;
+}
+
+/** GET /metrics/first-pass */
+export interface FirstPassMetrics {
+  weeks: number;
+  /** KV `phase2_started_at`: the first time the hub ran with retros. The trend is measured from here. */
+  phaseStartedAt: number;
+  phaseStartWeek: string;
+  overall: FirstPassWeek[];
+  byAgent: Record<string, FirstPassWeek[]>;
+  byTaskType: Record<string, FirstPassWeek[]>;
+  /** Everything from the phase start on. */
+  sincePhase: { tasks: number; accepted: number; rate: number | null; revisionsPerTask: number | null };
+}

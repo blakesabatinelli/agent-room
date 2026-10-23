@@ -26,6 +26,7 @@ function readContext(cwd: string): string | undefined {
  * the file is not written again by the usual scope-file loop).
  * Every call also records the cwd it ran in (MockAdapter.calls[].cwd), so tests can see which worktree a task used.
  * wide (the plan is N independent tasks), needs (1.3: every planned task lists these data sources in its `needs`).
+ * retro (2.1: how a `[[RETRO]]` call is answered: "invalid" | "empty" | "ghost" | "positive"; see the branch below).
  */
 export class MockAdapter implements Adapter {
   /** Every run, for tests: which profile reached the agent. */
@@ -42,7 +43,27 @@ export class MockAdapter implements Adapter {
     const quality = Number(st.quality ?? 0.8);
     const ids = [...new Set([...p.matchAll(/^(AC\d+):/gm)].map((m) => m[1]))];
     let text: string;
-    if (p.includes("[[PLAN]]") && /^Goal: .*\?\s*$/m.test(p)) {
+    if (p.startsWith("[[RETRO]]")) {
+      // 2.1: a retro that reads the INPUT json. For every (agent, task type) pair that had a send-back it writes one lesson from the first
+      // reviewer feedback, and one playbook line per task type; clean pairs get nothing. settings.retro = "invalid" answers with prose (the mechanical floor takes over),
+      // "empty" answers with no lessons, "ghost" names an agent that wasn't in the goal (must be dropped), "positive" also writes a lesson for pairs that passed first time.
+      const mode = (st as { retro?: string }).retro;
+      if (mode === "invalid") text = "I could not produce JSON for this retro, sorry.";
+      else {
+        type T = { title: string; agentId: string; taskType: string; firstPass: boolean; feedback: { agentId: string; text: string }[]; failures: { agentId: string }[] };
+        const input = JSON.parse(p.split("\nINPUT:\n")[1] ?? "{}") as { pairs?: { agentId: string; taskType: string }[]; tasks?: T[] };
+        const lessons: unknown[] = []; const playbook: unknown[] = [];
+        for (const pair of mode === "empty" ? [] : input.pairs ?? []) {
+          const mine = (input.tasks ?? []).filter((t) => t.taskType === pair.taskType);
+          const back = mine.flatMap((t) => t.feedback.filter((f) => f.agentId === pair.agentId).map((f) => ({ t, f })));
+          if (back.length) lessons.push({ agentId: pair.agentId, taskType: pair.taskType, lesson: `Address review feedback before reporting done: ${back[0].f.text}`, evidence: `${back.length} send-back(s), first on "${back[0].t.title}"` });
+          else if (mode === "positive" && mine.some((t) => t.firstPass && t.agentId === pair.agentId)) lessons.push({ agentId: pair.agentId, taskType: pair.taskType, lesson: "Keep stating each criterion's evidence in the reply; it passed first time.", evidence: `accepted first time on "${mine[0].title}"` });
+        }
+        if (mode !== "empty") for (const type of new Set((input.tasks ?? []).filter((t) => t.feedback.length).map((t) => t.taskType))) playbook.push({ taskType: type, add: [`For ${type} tasks, check every criterion against the files before reporting done.`], remove: [] });
+        if (mode === "ghost") lessons.push({ agentId: "nobody", taskType: "coding", lesson: "This names an agent that was not in the goal.", evidence: "none" });
+        text = JSON.stringify({ lessons, playbook });
+      }
+    } else if (p.includes("[[PLAN]]") && /^Goal: .*\?\s*$/m.test(p)) {
       text = JSON.stringify({ mode: "direct", agent: req.agent.id });
     } else if (p.includes("[[PLAN]]")) {
       const agents = [...p.matchAll(/^- ([\w-]+): /gm)].map((m) => m[1]);

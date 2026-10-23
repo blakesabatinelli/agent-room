@@ -11,6 +11,7 @@ import { remoteHost } from "./remote/status.js";
 import { connectTunnel } from "./relay/tunnel.js";
 import { ControlFolder, defaultControlRoot } from "./control/folder.js";
 import { DiscoveryService } from "./discovery/service.js"; // 1.3
+import { ensurePhaseStart } from "./retro/index.js"; // 2.1
 
 // Apps launched from Finder get a thin PATH; make sure the agent CLIs are findable.
 const home = homedir();
@@ -25,6 +26,7 @@ mkdirSync(dataDir, { recursive: true });
 
 const store = new Store(join(dataDir, demo ? "demo.db" : "agent-room.db"));
 seed(store, demo);
+ensurePhaseStart(store); // 2.1: first-pass acceptance is measured from the first run with retros
 const approvals = new Approvals(store);
 // 1.9: the control folder (~/Agent Room, or $AGENT_ROOM_HOME). Demo mode keeps its own so mock agents never write to the real one.
 let control: ControlFolder | undefined = new ControlFolder(process.env.AGENT_ROOM_HOME || (demo ? join(dataDir, "Agent Room (demo)") : defaultControlRoot()), store, { ownerName });

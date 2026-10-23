@@ -31,6 +31,7 @@ import { platformBlock } from "../discovery/apply.js"; // 1.3
 import { SignInManager } from "../install/signin.js";
 import { registerInstallRoutes } from "../install/routes.js";
 import { setupTimer } from "../install/timer.js";
+import { firstPassMetrics, retroDb } from "../retro/index.js"; // 2.1
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -624,6 +625,12 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     return store.getAgent(cur.id);
   });
   app.get("/scores", async () => store.listScores());
+  // 2.1: first-pass acceptance per ISO week (routing log), measured from the phase start; and the lessons retros wrote
+  app.get("/metrics/first-pass", async (req) => firstPassMetrics(store, { weeks: z.coerce.number().int().min(1).max(104).default(12).parse((req.query as { weeks?: string }).weeks) }));
+  app.get("/lessons", async (req) => {
+    const q = z.object({ agentId: z.string().optional(), taskType: z.string().optional(), all: z.enum(["1"]).optional() }).parse(req.query ?? {});
+    return retroDb(store).list({ agentId: q.agentId, taskType: q.taskType, includeInactive: q.all === "1" }).map(({ id, agentId, taskType, text, goalId, at, active, retired }) => ({ id, agentId, taskType, text, goalId, at, active, retired }));
+  });
   // 0.2 routing decision log (+ 0.5 failure tags on each record)
   const routingQuery = z.object({ goalId: z.string().optional(), since: z.coerce.number().optional(), limit: z.coerce.number().int().min(1).max(100_000).optional() });
   app.get("/routing", async (req) => store.listRouting(routingQuery.parse(req.query ?? {})));
