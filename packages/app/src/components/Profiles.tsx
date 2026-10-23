@@ -19,7 +19,7 @@ function Chips<T>({ options, value, label, onPick }: { options: T[]; value: T; l
         return (
           <Pressable key={i} onPress={() => onPick(o)} accessibilityRole="button" accessibilityState={{ selected: on }}
             style={{ paddingHorizontal: space(2), paddingVertical: 3, borderRadius: radius.sm, borderWidth: 1, borderColor: on ? p.accent : p.line, backgroundColor: on ? p.accent : "transparent" }}>
-            <Text style={[t.tiny, { color: on ? "#FFF" : p.muted, fontWeight: on ? "700" : "400" }]}>{label(o)}</Text>
+            <Text style={[t.tiny, { color: on ? p.onAccent : p.muted, fontWeight: on ? "700" : "400" }]}>{label(o)}</Text>
           </Pressable>
         );
       })}

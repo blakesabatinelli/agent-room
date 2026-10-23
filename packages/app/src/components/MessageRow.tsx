@@ -55,11 +55,11 @@ function MessageRowImpl({ m, color, glyph, grouped, mentionNames, onAuthor }: {
   const p = usePalette();
   const [hover, setHover] = useState(false);
 
-  // System notices (pause, errors): a quiet centred line, like Slack's channel events.
+  // System notices (pause, errors): a quiet line with a small marker.
   if (m.type === "system" || m.author.kind === "system") {
     return (
       <View style={{ flexDirection: "row", alignItems: "center", gap: space(3), paddingHorizontal: space(5), paddingVertical: space(2) }}>
-        <View style={{ width: 36, alignItems: "center" }}><Text style={{ color: p.warn }}>●</Text></View>
+        <View style={{ width: 28, alignItems: "center" }}><Text style={{ color: p.warn }}>●</Text></View>
         <Text selectable style={[t.small, { color: p.muted, flex: 1 }]}>{m.text}</Text>
         <Text style={[t.tiny, { color: p.faint }]}>{time(m.createdAt)}</Text>
       </View>
@@ -70,11 +70,11 @@ function MessageRowImpl({ m, color, glyph, grouped, mentionNames, onAuthor }: {
   const c = isOwner ? p.owner : color ?? p.muted;
   return (
     <View {...({ onMouseEnter: () => setHover(true), onMouseLeave: () => setHover(false) } as object)}
-      style={{ flexDirection: "row", gap: space(2.5), paddingHorizontal: space(5), paddingTop: grouped ? 2 : space(2), paddingBottom: 2, backgroundColor: hover ? p.sunken : "transparent" }}>
-      <View style={{ width: 36, alignItems: "center", paddingTop: grouped ? 3 : 2 }}>
+      style={{ flexDirection: "row", gap: space(2.5), paddingHorizontal: space(5), paddingTop: grouped ? 2 : space(3.5), paddingBottom: 2 }}>
+      <View style={{ width: 28, alignItems: "center", paddingTop: grouped ? 3 : 1 }}>
         {grouped
           ? (hover ? <Text style={[t.tiny, { color: p.faint, fontSize: 10 }]}>{time(m.createdAt).replace(/\s?[AP]M/i, "")}</Text> : null)
-          : <Avatar name={m.author.name} color={c} glyph={glyph} />}
+          : <Avatar name={m.author.name} color={c} glyph={glyph} size={28} />}
       </View>
       <View style={{ flex: 1, minWidth: 0 }}>
         {!grouped ? (
@@ -82,7 +82,6 @@ function MessageRowImpl({ m, color, glyph, grouped, mentionNames, onAuthor }: {
             <Pressable disabled={isOwner || !onAuthor} onPress={() => onAuthor?.(m.author.id)}>
               <Text style={[t.body, t.name, { color: p.inkStrong }]}>{m.author.name}</Text>
             </Pressable>
-            {!isOwner ? <Text style={[t.tiny, { color: p.faint }]}>agent</Text> : null}
             <Text style={[t.tiny, { color: p.faint }]}>{time(m.createdAt)}</Text>
           </View>
         ) : null}
@@ -92,7 +91,7 @@ function MessageRowImpl({ m, color, glyph, grouped, mentionNames, onAuthor }: {
   );
 }
 
-/** Day separator, Slack style. */
+/** Day separator: the day in small type with a hairline after it. */
 export function DayDivider({ at }: { at: number }) {
   const p = usePalette();
   const d = new Date(at);
@@ -100,11 +99,8 @@ export function DayDivider({ at }: { at: number }) {
   const label = d.toDateString() === today.toDateString() ? "Today" : d.toDateString() === y.toDateString() ? "Yesterday"
     : d.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
   return (
-    <View style={{ flexDirection: "row", alignItems: "center", marginVertical: space(3), paddingHorizontal: space(5) }}>
-      <View style={{ flex: 1, height: 1, backgroundColor: p.line }} />
-      <View style={{ paddingHorizontal: space(3), paddingVertical: 3, borderRadius: 99, borderWidth: 1, borderColor: p.line, backgroundColor: p.canvas }}>
-        <Text style={[t.tiny, { color: p.ink, fontWeight: "700" }]}>{label}</Text>
-      </View>
+    <View style={{ flexDirection: "row", alignItems: "center", gap: space(3), marginTop: space(5), marginBottom: space(1), paddingHorizontal: space(5) }}>
+      <Text accessibilityRole="header" style={[t.small, t.name, { color: p.muted }]}>{label}</Text>
       <View style={{ flex: 1, height: 1, backgroundColor: p.line }} />
     </View>
   );

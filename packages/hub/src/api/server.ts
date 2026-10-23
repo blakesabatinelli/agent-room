@@ -120,6 +120,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     ["manifest.webmanifest", "application/manifest+json"], ["icon-180.png", "image/png"], ["icon-512.png", "image/png"],
     ["favicon-32.png", "image/png"],
     ["diff.js", "text/javascript; charset=utf-8"], // 1.1: reads the full diff of a file write
+    ["goalview.js", "text/javascript; charset=utf-8"], ["theme.js", "text/javascript; charset=utf-8"], // 3.1: goal card, verdict chips, jump sheet; Appearance
   ] as const) {
     try { webFiles.set(name, { type, body: readFileSync(new URL(name, webDir)) }); } catch { /* missing asset: that route 404s */ }
   }

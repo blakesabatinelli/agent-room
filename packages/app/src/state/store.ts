@@ -6,8 +6,8 @@ import { launcher, LOCAL_HUB, readLocalPairSecret } from "../native/hub";
 
 const KEY = "agent-room.connection";
 
-export type Page = "agents" | "approvals" | "memory" | "permissions" | "folders" | "settings";
-/** What the main pane shows: a channel/DM, or one of the workspace pages. */
+export type Page = "agents" | "approvals" | "memory" | "permissions" | "folders" | "settings" | "scorecard" | "resumes"; // 3.1: scorecard and resumes are screens of their own (3.4 adds "office")
+/** What the main pane shows: a room or direct message, or one of the workspace pages. */
 export type View = { kind: "room" } | { kind: "page"; page: Page };
 
 interface State {
@@ -33,6 +33,8 @@ interface State {
   calibration: Task[];
   /** Bumped when a control file changes on disk or in the app, so Settings can reload its notices. */
   controlStamp: number;
+  /** 3.1: bumped to put the cursor in the composer (the palette's "Start a goal"). */
+  composerStamp: number;
   error?: string;
   onboarded: boolean;
   startupError?: string;
@@ -44,6 +46,7 @@ interface State {
   selectRoom(id: string): Promise<void>;
   openDm(agentId: string): Promise<void>;
   openPage(page: Page): void;
+  focusComposer(): void;
   apply(e: ServerEvent | { type: "room_deleted"; roomId: string }): void;
   setError(e?: string): void;
 }
@@ -52,7 +55,7 @@ let stopLive: (() => void) | undefined;
 
 export const useRoom = create<State>((set, get) => ({
   ownerName: "Owner", online: false, rooms: [], messages: [], tasks: {}, goals: {}, agents: [], statuses: {},
-  working: {}, unread: {}, approvals: [], proposals: [], calibration: [], controlStamp: 0, onboarded: true, view: { kind: "room" },
+  working: {}, unread: {}, approvals: [], proposals: [], calibration: [], controlStamp: 0, composerStamp: 0, onboarded: true, view: { kind: "room" },
 
   async restore() {
     set({ startupError: undefined });
@@ -137,6 +140,7 @@ export const useRoom = create<State>((set, get) => ({
   },
 
   openPage(page) { set({ view: { kind: "page", page } }); },
+  focusComposer() { set({ composerStamp: Date.now() }); },
 
   apply(e) {
     const s = get();

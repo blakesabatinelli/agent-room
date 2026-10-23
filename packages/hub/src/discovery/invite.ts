@@ -2,7 +2,7 @@ import type { AgentConfig, McpConnection, McpInvite } from "@agent-room/shared";
 
 /** Agents that exist only as a connection from somewhere else. Asking for an invite makes them if they aren't there yet. */
 export const INVITE_PRESETS: Record<string, { name: string; provider: string; color: string }> = {
-  muse: { name: "Muse", provider: "muse", color: "#E01E5A" },
+  muse: { name: "Muse", provider: "muse", color: "#A63A86" },
   hermes: { name: "Hermes", provider: "hermes", color: "#E8912D" },
 };
 

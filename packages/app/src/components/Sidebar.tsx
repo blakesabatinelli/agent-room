@@ -3,6 +3,9 @@ import React, { useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { presence, useRoom, type Page } from "../state/store";
 import { Dot } from "./ui";
+import { agentTone } from "@agent-room/shared/src/colors";
+import { SidebarSurface } from "./SidebarSurface"; // 3.1: translucent on the Mac
+import { useCommandPalette } from "../state/commandPalette";
 import { radius, space, type as t, usePalette } from "../theme";
 
 function Row({ label, prefix, active, bold, badge, onPress, right }: {
@@ -22,6 +25,27 @@ function Row({ label, prefix, active, bold, badge, onPress, right }: {
           <Text style={[t.tiny, { color: p.onAccent, fontWeight: "700" }]}>{badge}</Text>
         </View>
       ) : null}
+    </Pressable>
+  );
+}
+
+/** A room's marker: a small ring, filled when there is something new in it. */
+function RoomMark({ unread }: { unread: boolean }) {
+  const p = usePalette();
+  return <View style={{ width: 8, height: 8, borderRadius: 4, borderWidth: 1.5, borderColor: unread ? p.accent : p.sidebarMuted, backgroundColor: unread ? p.accent : "transparent" }} />;
+}
+
+/** The way into ⌘K, in the sidebar for anyone who hasn't learned the shortcut yet. */
+function GoToRow() {
+  const p = usePalette();
+  const [hover, setHover] = useState(false);
+  const show = useCommandPalette((s) => s.show);
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel="Go to, Command K" onPress={show} onHoverIn={() => setHover(true)} onHoverOut={() => setHover(false)}
+      style={{ flexDirection: "row", alignItems: "center", gap: space(2), height: 28, marginHorizontal: space(3), marginTop: space(2.5), marginBottom: space(1), paddingHorizontal: space(2.5), borderRadius: radius.md, borderWidth: 1, borderColor: p.line, backgroundColor: hover ? p.sidebarHover : "transparent" }}>
+      <Text style={[t.small, { color: p.sidebarMuted }]}>⌕</Text>
+      <Text style={[t.small, { color: p.sidebarMuted, flex: 1 }]}>Go to…</Text>
+      <Text style={[t.tiny, { color: p.sidebarMuted }]}>⌘K</Text>
     </Pressable>
   );
 }
@@ -63,7 +87,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   };
 
   return (
-    <View style={{ flex: 1, backgroundColor: p.sidebar }}>
+    <SidebarSurface>
       <View style={{ height: 58, flexDirection: "row", alignItems: "center", paddingHorizontal: space(4), borderBottomWidth: 1, borderColor: p.line, gap: space(2) }}>
         <View style={{ flex: 1 }}>
           <Text style={[t.heading, { color: p.inkStrong, fontSize: 17 }]}>Agent Room</Text>
@@ -74,20 +98,21 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         </View>
       </View>
 
+      <GoToRow />
       <ScrollView contentContainerStyle={{ paddingVertical: space(2) }}>
         <Row label="Approvals" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>✓</Text>} active={isPage("approvals")} bold={approvals.length > 0} badge={approvals.length || undefined} onPress={() => page("approvals")} />
         <Row label="Memory" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>◇</Text>} active={isPage("memory")} badge={s.proposals.length || undefined} onPress={() => page("memory")} />
 
-        <Heading label="Channels" open={openCh} toggle={() => setOpenCh(!openCh)} onAdd={() => { setOpenCh(true); setCreating(true); }} />
+        <Heading label="Rooms" open={openCh} toggle={() => setOpenCh(!openCh)} onAdd={() => { setOpenCh(true); setCreating(true); }} />
         {openCh ? channels.map((r) => (
-          <Row key={r.id} label={r.name} prefix={<Text style={[t.body, { color: p.sidebarMuted }]}>#</Text>}
+          <Row key={r.id} label={r.name} prefix={<RoomMark unread={!!unread[r.id]} />}
             active={view.kind === "room" && roomId === r.id} bold={!!unread[r.id]} badge={undefined}
             onPress={() => go(() => void s.selectRoom(r.id))} />
         )) : null}
         {creating ? (
           <View style={{ marginHorizontal: space(3), marginTop: space(1) }}>
             <TextInput autoFocus value={name} onChangeText={setName} onSubmitEditing={create} onBlur={() => !name && setCreating(false)}
-              placeholder="new-channel" placeholderTextColor={p.sidebarMuted}
+              placeholder="new-room" placeholderTextColor={p.sidebarMuted}
               style={[t.small, { color: p.inkStrong, backgroundColor: p.canvas, borderWidth: 1, borderColor: p.accent, borderRadius: radius.md, paddingHorizontal: space(2), paddingVertical: space(1.5) }]} />
           </View>
         ) : null}
@@ -98,8 +123,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           const pres = presence(s, a.id);
           return (
             <Row key={a.id} label={a.name}
-              prefix={<View style={{ width: 16, height: 16, borderRadius: 4, backgroundColor: a.color, alignItems: "center", justifyContent: "center" }}>
-                <Text style={{ color: "#FFFFFF", fontSize: 10, fontWeight: "700" }}>{a.name[0]}</Text>
+              prefix={<View style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: agentTone(a.color, p.sidebar).bg, alignItems: "center", justifyContent: "center" }}>
+                <Text style={{ color: agentTone(a.color, p.sidebar).ink, fontSize: 10, fontWeight: "700" }}>{a.avatar || a.name[0]}</Text>
                 <View style={{ position: "absolute", right: -3, bottom: -3 }}><Dot state={pres} size={8} ring={p.sidebar} /></View>
               </View>}
               active={view.kind === "room" && !!dm && roomId === dm.id} bold={!!dm && !!unread[dm.id]} badge={dm ? unread[dm.id] || undefined : undefined}
@@ -111,11 +136,13 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       </ScrollView>
 
       <View style={{ borderTopWidth: 1, borderColor: p.line, paddingVertical: space(2) }}>
+        <Row label="Scorecard" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>▥</Text>} active={isPage("scorecard")} onPress={() => page("scorecard")} />
+        <Row label="Résumés" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>☰</Text>} active={isPage("resumes")} onPress={() => page("resumes")} />
         <Row label="Agents & connections" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚇</Text>} active={isPage("agents")} onPress={() => page("agents")} />
         <Row label="Permissions" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚿</Text>} active={isPage("permissions")} onPress={() => page("permissions")} />
         <Row label="Folders" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>▤</Text>} active={isPage("folders")} onPress={() => page("folders")} />
         <Row label="Settings" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚙</Text>} active={isPage("settings")} onPress={() => page("settings")} />
       </View>
-    </View>
+    </SidebarSurface>
   );
 }

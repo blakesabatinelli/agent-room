@@ -6,6 +6,9 @@ import { presence, useRoom } from "../state/store";
 import { DayDivider, MessageRow } from "../components/MessageRow";
 import { Avatar, Button, Dot, IconButton } from "../components/ui";
 import { JuryChips } from "../components/JuryChips"; // 2.2
+import { GoalCard } from "../components/GoalCard"; // 3.1
+import { TaskVerdict } from "../components/TaskVerdict"; // 3.1
+import { chipMessageIds } from "@agent-room/shared/src/goalview";
 import { lift, radius, space, type as t, usePalette } from "../theme";
 
 type Row = { kind: "day"; id: string; at: number } | { kind: "new"; id: string } | { kind: "msg"; id: string; m: Message; grouped: boolean };
@@ -18,7 +21,7 @@ const STATUS: Record<Task["status"], string> = {
 export function RoomScreen({ onBack }: { onBack?: () => void }) {
   const p = usePalette();
   const { width } = useWindowDimensions();
-  const s = useRoom(useShallow((s) => ({ hub: s.hub, roomId: s.roomId, rooms: s.rooms, messages: s.messages, agents: s.agents, calibration: s.calibration, working: s.working, ownerName: s.ownerName, goals: s.goals, loaded: s.loaded, openDm: s.openDm, openPage: s.openPage, setError: s.setError, statuses: s.statuses })));
+  const s = useRoom(useShallow((s) => ({ composerStamp: s.composerStamp, hub: s.hub, roomId: s.roomId, rooms: s.rooms, messages: s.messages, agents: s.agents, calibration: s.calibration, working: s.working, ownerName: s.ownerName, goals: s.goals, loaded: s.loaded, openDm: s.openDm, openPage: s.openPage, setError: s.setError, statuses: s.statuses })));
   const { hub, roomId, rooms, messages, agents, calibration, working, ownerName, goals } = s;
   const room = rooms.find((r) => r.id === roomId);
   const dmAgent = room?.dmAgentId ? agents.find((a) => a.id === room.dmAgentId) : undefined;
@@ -31,6 +34,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
 
   const mentionNames = useMemo(() => new Set(agents.flatMap((a) => [a.id.toLowerCase(), a.name.toLowerCase().replace(/\s+/g, "")])), [agents]);
   const visible = messages.filter((m) => !m.quiet && m.author.kind !== "orchestrator" && m.type !== "directive");
+  const chipIds = useMemo(() => chipMessageIds(visible), [visible.length, visible.at(-1)?.id]); // 3.1: the verdict chip sits on the last message of each task
   const log = messages.filter((m) => m.quiet || m.author.kind === "orchestrator" || m.type === "directive" || m.type === "task_update");
 
   // Where the owner had read up to when this room opened. Frozen for the visit so the "New" line stays put.
@@ -84,6 +88,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
   const newest = messages.at(-1)?.createdAt ?? 0;
   useEffect(() => { if (ready && roomId && newest) void hub?.markRead(roomId, newest).catch(() => {}); }, [ready, roomId, newest]);
   useEffect(() => { setText(""); setDetails(false); setFolderId(""); setPickOpen(false); }, [roomId]);
+  useEffect(() => { if (s.composerStamp) input.current?.focus(); }, [s.composerStamp]); // 3.1: "Start a goal" in the ⌘K palette
 
   // 1.1: a goal can work in a folder the owner granted. Only grants that can carry a goal are offered: open to every
   // agent, readable, and for this room (or every room). The hub checks again and says why if it refuses.
@@ -159,14 +164,14 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
   const steering = !dmAgent && !!activeGoal && !reviewing;
   const placeholder = dmAgent ? `Message ${dmAgent.name}`
     : reviewing ? "Say what to change in the plan, or \"approve\"…"
-    : steering ? "Steer the work, ask how it's going, or @tag an agent…" : `Message #${room?.name ?? "room"}`;
+    : steering ? "Steer the work, ask how it's going, or @tag an agent…" : `Message ${room?.name ?? "the room"}`;
 
   const header = (
     <View style={{ height: 58, flexDirection: "row", alignItems: "center", gap: space(2), paddingHorizontal: space(4), borderBottomWidth: 1, borderColor: p.line }}>
       {onBack ? <IconButton glyph="‹" label="Back" onPress={onBack} /> : null}
       {dmAgent ? <Avatar name={dmAgent.name} color={dmAgent.color} glyph={dmAgent.avatar} size={24} /> : null}
       <View style={{ flex: 1, minWidth: 0 }}>
-        <Text numberOfLines={1} style={[t.heading, { color: p.inkStrong, fontSize: 17 }]}>{dmAgent ? dmAgent.name : `# ${room?.name ?? ""}`}</Text>
+        <Text numberOfLines={1} style={[t.heading, { color: p.inkStrong, fontSize: 17 }]}>{dmAgent ? dmAgent.name : room?.name ?? ""}</Text>
         <Text numberOfLines={1} style={[t.tiny, { color: p.muted }]}>
           {dmAgent ? (s.statuses[dmAgent.id]?.detail ?? "") : room?.topic ?? "Give the room a goal, or @mention an agent"}
         </Text>
@@ -189,17 +194,18 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
   const intro = (
     <View style={{ paddingHorizontal: space(5), paddingTop: space(8), paddingBottom: space(4), gap: space(2) }}>
       {dmAgent ? <Avatar name={dmAgent.name} color={dmAgent.color} glyph={dmAgent.avatar} size={64} /> : null}
-      <Text style={[t.title, { color: p.inkStrong }]}>{dmAgent ? dmAgent.name : `# ${room?.name ?? ""}`}</Text>
+      <Text style={[t.title, { color: p.inkStrong }]}>{dmAgent ? dmAgent.name : room?.name ?? ""}</Text>
       <Text style={[t.body, { color: p.muted, maxWidth: 560 }]}>
         {dmAgent
           ? `This is your direct line to ${dmAgent.name}. Messages here go straight to it, with no routing.`
-          : `This is the start of #${room?.name}. Describe a goal and the right agents pick it up; bigger jobs get split up behind the scenes. Type @ to talk to one agent directly.`}
+          : `This is the start of ${room?.name}. Describe a goal and the right agents pick it up; bigger jobs get split up behind the scenes. Type @ to talk to one agent directly.`}
       </Text>
     </View>
   );
 
   const chat = (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <GoalCard />
       {showJump ? (
         <Pressable onPress={jumpToNew} style={{ position: "absolute", top: space(2), alignSelf: "center", zIndex: 5, flexDirection: "row", gap: space(1.5),
           paddingHorizontal: space(3), paddingVertical: space(1.5), borderRadius: 99, backgroundColor: p.accent, ...lift(0.12, 6, 2) }}>
@@ -224,8 +230,9 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
               color={item.m.author.kind === "human" ? undefined : agents.find((a) => a.id === item.m.author.id)?.color}
               glyph={item.m.author.kind === "human" ? undefined : agents.find((a) => a.id === item.m.author.id)?.avatar}
               onAuthor={(id) => void s.openDm(id)} />
+            {chipIds.has(item.m.id) ? <TaskVerdict taskId={chipIds.get(item.m.id)!} /> : null}
             {item.m.planGoalId && goals[item.m.planGoalId]?.status === "awaiting_approval" ? (
-              <View style={{ flexDirection: "row", gap: space(2), paddingLeft: space(5) + 36 + space(2), paddingBottom: space(2) }}>
+              <View style={{ flexDirection: "row", gap: space(2), paddingLeft: space(5) + 28 + space(2.5), paddingBottom: space(2) }}>
                 <Button small label="Approve and start" onPress={() => void hub?.decidePlan(item.m.planGoalId!, "approve").catch((e) => s.setError((e as Error).message))} />
                 <Button small kind="plain" label="Change it…" onPress={() => { setText(""); input.current?.focus(); }} />
                 <Button small kind="ghost" label="Cancel" onPress={() => void hub?.decidePlan(item.m.planGoalId!, "cancel").catch((e) => s.setError((e as Error).message))} />
@@ -323,7 +330,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
             )}
             <Pressable onPress={send} disabled={!text.trim()} accessibilityLabel="Send"
               style={{ width: 32, height: 28, borderRadius: radius.md, alignItems: "center", justifyContent: "center", backgroundColor: text.trim() ? p.accent : "transparent" }}>
-              <Text style={{ color: text.trim() ? p.onAccent : p.faint, fontSize: 14, fontWeight: "700" }}>➤</Text>
+              <Text style={{ color: text.trim() ? p.onAccent : p.faint, fontSize: 15, fontWeight: "700" }}>↑</Text>
             </Pressable>
           </View>
         </View>
@@ -466,8 +473,8 @@ function NewDivider() {
   const p = usePalette();
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: space(2), paddingHorizontal: space(5), paddingVertical: space(2) }}>
-      <View style={{ flex: 1, height: 1, backgroundColor: p.danger }} />
-      <Text style={[t.tiny, { color: p.danger, fontWeight: "800" }]}>New</Text>
+      <View style={{ flex: 1, height: 1, backgroundColor: p.accent }} />
+      <Text style={[t.tiny, { color: p.accent, fontWeight: "700" }]}>New</Text>
     </View>
   );
 }

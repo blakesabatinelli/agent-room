@@ -7,8 +7,8 @@
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
 {
-  // The app is designed light; keep native controls (fields, switches, scroll bars) light in system dark mode too.
-  NSApp.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+  // 3.1: the app has a dark mode, so the window follows the system. The Appearance setting (System, Light, Dark) is applied from JS
+  // through the ARShell module once the app has read it.
   self.moduleName = @"AgentRoom";
   // You can add your custom initial props in the dictionary below.
   // They will be passed down to the ViewController used by React Native.

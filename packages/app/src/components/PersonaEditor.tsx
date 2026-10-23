@@ -76,7 +76,7 @@ export function PersonaEditor({ a }: { a: AgentConfig }) {
                 <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space(1) }}>
                   {templates.map((tpl) => (
                     <Pressable key={tpl.id} accessibilityRole="button" accessibilityState={{ selected: form.template === tpl.id }} onPress={() => pick(tpl)} style={chip(form.template === tpl.id)}>
-                      <Text style={[t.tiny, { color: form.template === tpl.id ? "#FFF" : p.muted, fontWeight: form.template === tpl.id ? "700" : "400" }]}>{tpl.label}</Text>
+                      <Text style={[t.tiny, { color: form.template === tpl.id ? p.onAccent : p.muted, fontWeight: form.template === tpl.id ? "700" : "400" }]}>{tpl.label}</Text>
                     </Pressable>
                   ))}
                 </View>

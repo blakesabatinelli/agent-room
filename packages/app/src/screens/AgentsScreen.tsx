@@ -282,7 +282,7 @@ function AddAgent({ existing, onDone }: { existing: AgentConfig[]; onDone: () =>
   const has = (id: string) => existing.some((a) => a.id === id);
   const presets = [
     { id: "hermes", name: "Hermes", color: "#E8912D", blurb: "Your Hermes agent, over MCP" },
-    { id: "muse", name: "Muse", color: "#E01E5A", blurb: "Muse, over MCP" },
+    { id: "muse", name: "Muse", color: "#A63A86", blurb: "Muse, over MCP" },
   ].filter((x) => !has(x.id));
 
   const add = async (id: string, nm: string, adapter: "mcp" | "command", color?: string) => {

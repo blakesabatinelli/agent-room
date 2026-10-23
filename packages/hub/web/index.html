@@ -7,20 +7,24 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Agent Room">
-<meta name="theme-color" content="#ffffff">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" id="themeColor" content="#ffffff">
 <link rel="manifest" href="/web/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/web/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="/web/favicon-32.png">
 <link rel="stylesheet" href="/web/app.css">
+<script src="/web/theme.js"></script>
 <title>Agent Room</title>
 </head>
 <body>
 <header id="bar">
   <button id="back" class="icon" aria-label="Back" hidden>‹</button>
   <div id="title">Agent Room</div>
+  <button id="jumpBtn" class="tool" aria-label="Go to a room, agent or screen" aria-haspopup="dialog" hidden>⌕</button>
   <button id="approvalsBtn" class="pill" hidden>Approvals <span id="approvalsCount"></span></button>
   <span id="dot" class="dot" title="Connection"></span>
 </header>
+<section id="goal" aria-label="Goal" hidden></section>
 <main id="view"></main>
 <button id="jumpNew" hidden>↑ New messages</button>
 <footer id="composer" hidden>
@@ -37,8 +41,17 @@
     <button id="sendBtn" type="submit" aria-label="Send">↑</button>
   </form>
 </footer>
+<div id="jump" role="dialog" aria-modal="true" aria-label="Go to" hidden>
+  <div class="scrim" data-jump-close="1"></div>
+  <div class="sheet">
+    <input id="jumpInput" type="text" placeholder="Go to a room, agent or screen" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Go to">
+    <div id="jumpList" role="listbox" aria-label="Results"></div>
+    <div class="jfoot"><span>↑↓ move</span><span>↵ open</span><span>esc close</span></div>
+  </div>
+</div>
 <div id="toast" hidden></div>
 <script src="/web/diff.js"></script>
+<script src="/web/goalview.js"></script>
 <script src="/web/app.js"></script>
 </body>
 </html>

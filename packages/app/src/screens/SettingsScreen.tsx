@@ -7,8 +7,7 @@ import { useRoom } from "../state/store";
 import { Button, Field, Screen, Section, Toggle } from "../components/ui";
 import { SubscriptionList } from "../components/subscriptions";
 import { RemoteAccess } from "../components/RemoteAccess";
-import { FirstPass } from "../components/FirstPass"; // 2.1
-import { ReturnLedgerView, WeeklyScorecard } from "../components/Scorecard"; // 2.7
+import { Appearance } from "../components/Appearance"; // 3.1
 import { space, type as t, usePalette } from "../theme";
 
 export function SettingsScreen() {
@@ -50,6 +49,7 @@ export function SettingsScreen() {
   return (
     <Screen title="Settings">
       <ScrollView contentContainerStyle={{ padding: space(4) }}>
+        <Appearance />
         {s ? (
           <>
             <Section title="Orchestrator">
@@ -116,14 +116,6 @@ export function SettingsScreen() {
             </Section>
           </>
         ) : null}
-        {/* 2.1: the start of the Scorecard (2.7 extends it): how often work is accepted first time, by week */}
-        <Section title="Scorecard" hint="How often agents' work is accepted the first time it is reviewed. Retros after each goal feed what they learn into later tasks.">
-          <FirstPass hub={hub} />
-          <WeeklyScorecard hub={hub} />
-        </Section>
-        <Section title="Return ledger" hint="What each plan cost this month against the tasks you accepted from it.">
-          <ReturnLedgerView hub={hub} />
-        </Section>
         {s ? (
           <Section title="Interruptions and digest" hint="During the day the room only interrupts you for a disagreement between judges or a decision it needs. Everything else waits for the evening digest.">
             <View style={{ padding: space(4) }}>

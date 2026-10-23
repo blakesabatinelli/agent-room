@@ -7,10 +7,12 @@
   const st = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
-    view: "rooms",          // rooms | room | approvals | diff | permissions | folders | control | subscriptions | remote | personas | persona | resumes | pair
+    view: "rooms",          // rooms | room | approvals | diff | permissions | folders | control | subscriptions | remote | personas | persona | resumes | scorecard | appearance | pair
     tools: [], control: null, quota: [], remote: null, firstPass: null, memExport: [], resumes: null, probationCount: 0,
     scorecard: null, scWeek: "this", ledger: null, attention: null, // 2.7
-    rooms: [], agents: {}, roomId: "", messages: [], goals: {}, working: {}, approvals: [],
+    rooms: [], agents: {}, roomId: "", messages: [], goals: {}, tasks: {}, goalOpen: {}, working: {}, approvals: [],
+    // 3.1: the jump sheet (the Mac's Command-K): the query, the highlighted row and the rows on show
+    jump: { open: false, q: "", idx: 0, rows: [] },
     unread: new Set(), readAt: 0, readSent: {}, positioned: "",
     online: false, ws: null, wsDelay: 1000,
     capacity: null,
@@ -27,6 +29,9 @@
   // ---------- helpers
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const safeColor = (c) => (/^#[0-9a-f]{3,8}$/i.test(c || "") ? c : "#5e6875");
+  // 3.1: an agent's own colour, nudged until it shows on this mode's canvas, with an ink that reads on it
+  const tile = (color) => ARView.agentTone(safeColor(color), window.ARTheme.canvas());
+  const avatar = (a, name, cls) => `<span class="av${cls ? ` ${cls}` : ""}"${cls ? "" : ` data-color="${esc(safeColor(a && a.color))}"`}>${esc(glyph(a, name))}</span>`;
   // 3.2: the avatar is the persona's letter or emoji; without one, the first letter of the name
   const glyph = (a, name) => (a && a.avatar) || (name || (a && a.name) || "?")[0].toUpperCase();
   const time = (t) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -144,6 +149,7 @@
         break;
       }
       case "goal": st.goals[e.goal.id] = e.goal; if (e.goal.roomId === st.roomId) { renderMessages(); renderComposerState(); } break;
+      case "task": if (e.task.roomId === st.roomId) { st.tasks[e.task.id] = e.task; if (st.view === "room") renderMessages(); } break; // 3.1: the verdict chips and the goal card
       case "working": {
         const w = (st.working[e.roomId] ||= {});
         if (e.active) w[e.agentId] = e.label || ""; else delete w[e.agentId];
@@ -207,10 +213,10 @@
   }
 
   async function loadRoom(id, keepScroll) {
-    const [msgs, goals, mark] = await Promise.all([api(`/rooms/${id}/messages?limit=200`), api(`/rooms/${id}/goals`), api(`/rooms/${id}/read`).catch(() => ({ at: 0 }))]);
+    const [msgs, goals, mark, tasks] = await Promise.all([api(`/rooms/${id}/messages?limit=200`), api(`/rooms/${id}/goals`), api(`/rooms/${id}/read`).catch(() => ({ at: 0 })), api(`/rooms/${id}/tasks`).catch(() => [])]);
     if (st.roomId !== id) return;
     if (!keepScroll) st.readAt = mark.at; // frozen for this visit so the "New" line stays put
-    st.messages = msgs; for (const g of goals) st.goals[g.id] = g;
+    st.messages = msgs; for (const g of goals) st.goals[g.id] = g; for (const t of tasks) st.tasks[t.id] = t;
     renderMessages(); renderComposerState();
     // 1.1: folders this room's goals can work in (open to every agent and readable). The hub checks again when the message is sent.
     api(`/folder-grants?roomId=${encodeURIComponent(id)}`).then((gs) => { if (st.roomId === id) { st.roomGrants = gs.filter((g) => g.agentId === "*" && g.read); renderFolderPick(); } }).catch(() => {});
@@ -221,7 +227,7 @@
   function go(view, roomId) {
     st.view = view;
     $("#jumpNew").hidden = true;
-    if (view === "room") { st.roomId = roomId; st.messages = []; st.readAt = 0; st.positioned = ""; st.unread.delete(roomId); st.roomGrants = []; st.folderId = ""; st.folderOpen = false; }
+    if (view === "room") { st.roomId = roomId; st.messages = []; st.goals = {}; st.tasks = {}; st.readAt = 0; st.positioned = ""; st.unread.delete(roomId); st.roomGrants = []; st.folderId = ""; st.folderOpen = false; }
     else st.roomId = "";
     render();
     if (view === "room") loadRoom(roomId).catch((e) => { if (e.message !== "unpaired") toast(e.message); });
@@ -232,10 +238,13 @@
     $("#back").hidden = st.view === "rooms" || st.view === "pair";
     $("#composer").hidden = st.view !== "room";
     const room = st.rooms.find((r) => r.id === st.roomId);
-    $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : `# ${room.name}`)
+    $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : room.name)
       : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : st.view === "scorecard" ? "Scorecard" : st.view === "personas" ? "Personas" : st.view === "persona" ? (st.agents[st.personas.id]?.name || "Persona") : "Agent Room";
     renderDot(); renderBadge();
     if (st.view === "resumes") $("#title").textContent = "Résumés"; // 2.3
+    if (st.view === "appearance") $("#title").textContent = "Appearance"; // 3.1
+    $("#jumpBtn").hidden = st.view === "pair";
+    renderGoal();
     if (st.view === "pair") return renderPair();
     if (st.view === "rooms") return renderRooms();
     if (st.view === "approvals") return renderApprovals();
@@ -247,6 +256,7 @@
     if (st.view === "remote") return renderRemote();
     if (st.view === "resumes") return renderResumes(); // 2.3
     if (st.view === "scorecard") return renderScorecard();
+    if (st.view === "appearance") return renderAppearance();
     if (st.view === "personas") return renderPersonas();
     if (st.view === "persona") return renderPersona();
     renderMessages(); renderComposerState();
@@ -264,23 +274,34 @@
     const dms = st.rooms.filter((r) => r.dmAgentId).sort((a, b) => roomName(a).localeCompare(roomName(b)));
     const row = (r) => {
       const a = r.dmAgentId ? st.agents[r.dmAgentId] : null;
-      const lead = a ? `<span class="av" data-color="${esc(safeColor(a.color))}">${esc(glyph(a))}</span>` : `<span class="hash">#</span>`;
+      const lead = a ? `<span class="lead">${avatar(a)}</span>` : `<span class="lead"><span class="mark${st.unread.has(r.id) ? " new" : ""}"></span></span>`;
       return `<button class="row" data-room="${esc(r.id)}">${lead}<span class="name">${esc(roomName(r))}</span>${r.paused ? '<span class="sub">paused</span>' : ""}${st.unread.has(r.id) ? '<span class="unread"></span>' : ""}</button>`;
     };
     $("#view").innerHTML = st.rooms.length
-      ? `${channels.length ? `<div class="section">Channels</div>${channels.map(row).join("")}` : ""}
-         ${dms.length ? `<div class="section">Direct messages</div>${dms.map(row).join("")}` : ""}`
+      ? `${channels.length ? `<div class="section">Rooms</div>${channels.map(row).join("")}` : ""}
+         ${dms.length ? `<div class="section">Agents</div>${dms.map(row).join("")}` : ""}`
       : `<div class="empty">No rooms yet. Make one on the Mac.</div>`;
     const nCtl = st.control ? st.control.notices.length : 0;
     $("#view").innerHTML += `<div class="section">Settings</div><button class="row" data-nav="permissions"><span class="hash">⚙︎</span><span class="name">Permissions</span></button>
       <button class="row" data-nav="folders"><span class="hash">▤</span><span class="name">Folders</span></button>
       <button class="row" data-nav="resumes"><span class="hash">☰</span><span class="name">Résumés</span>${st.probationCount ? `<span class="sub">${st.probationCount} on probation</span>` : ""}</button>
       <button class="row" data-nav="remote"><span class="hash">⇄</span><span class="name">Remote access</span></button>
-      <button class="row" data-nav="subscriptions"><span class="hash">◔</span><span class="name">Subscriptions</span></button>
+      <button class="row" data-nav="subscriptions"><span class="hash">☷</span><span class="name">Subscriptions</span></button>
       <button class="row" data-nav="personas"><span class="hash">☺</span><span class="name">Personas</span></button>
       <button class="row" data-nav="scorecard"><span class="hash">▥</span><span class="name">Scorecard</span></button>
+      <button class="row" data-nav="appearance"><span class="hash">☾</span><span class="name">Appearance</span></button>
       <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>${st.capacity ? `<div class="capline">${esc(st.capacity.summary)}</div>` : ""}`;
     paintColors();
+  }
+
+  // 3.1 Appearance: System follows the phone; Light and Dark stay as chosen. Kept on this phone only.
+  function renderAppearance() {
+    const cur = window.ARTheme.mode();
+    $("#view").replaceChildren(
+      h("div", { class: "section", text: "Appearance" }),
+      h("div", { class: "seg", role: "radiogroup", "aria-label": "Appearance" },
+        ["system", "light", "dark"].map((m) => h("button", { type: "button", role: "radio", "aria-checked": cur === m ? "true" : "false", "data-theme-mode": m, text: m === "system" ? "System" : m === "light" ? "Light" : "Dark" }))),
+      h("div", { class: "capline", text: "System follows your phone. Light and Dark stay as you choose." }));
   }
 
   // 3.2 Personas: how each agent sounds. The hub keeps it in the agent's SOUL.md (or in the agent's record when there is no control folder).
@@ -288,7 +309,7 @@
   function renderPersonas() {
     const agents = Object.values(st.agents).sort((a, b) => a.name.localeCompare(b.name));
     $("#view").innerHTML = `<div class="card"><div class="what">How each agent sounds</div><div class="detail">A persona shapes how an agent writes in the room. It is left out when its work is judged, so it never changes a score.</div></div>`
-      + (agents.length ? agents.map((a) => `<button class="row" data-persona="${esc(a.id)}"><span class="av" data-color="${esc(safeColor(a.color))}">${esc(glyph(a))}</span><span class="name">${esc(a.name)}</span></button>`).join("") : `<div class="empty">No agents yet.</div>`);
+      + (agents.length ? agents.map((a) => `<button class="row" data-persona="${esc(a.id)}"><span class="lead">${avatar(a)}</span><span class="name">${esc(a.name)}</span></button>`).join("") : `<div class="empty">No agents yet.</div>`);
     paintColors();
   }
 
@@ -816,6 +837,45 @@
       </div>` : ""}`;
   }
 
+  // 3.1 Verdict chips: accepted, sent back or disputed, with the score and a chip per judge. The judge's long line stays in the activity log.
+  const chipHtml = (c) => `<span class="chip ${c.tone}"><i aria-hidden="true">${esc(c.glyph)}</i>${esc(c.label)}${c.score === undefined ? "" : ` <b>${esc(c.score)}</b>`}</span>`;
+  function verdictRow(task) {
+    const c = task && ARView.verdictChip(task); if (!c) return "";
+    const jury = task.judgment && task.judgment.jury;
+    const judges = jury ? jury.judges.map((j) => `<span class="chip judge ${j.verdict === "accept" ? "ok" : "danger"}"><i aria-hidden="true">${j.verdict === "accept" ? "✓" : "✗"}</i>${esc(j.family)}${j.local ? " (local)" : ""} <b>${esc(Math.round(j.score * 100))}</b></span>`).join("") : "";
+    const spoken = c.score === undefined ? c.label : c.label + ", score " + c.score;
+    return `<div class="vrow" aria-label="${esc(spoken)}">${chipHtml(c)}${judges}</div>`;
+  }
+
+  // 3.1 The goal card: the goal at the top of the room, with its "Done means" list, progress and state. One line when collapsed.
+  // On a phone the card starts as one line, and opens by itself only when it needs the owner (a plan to approve, or a question).
+  const goalIsOpen = (m) => st.goalOpen[m.goalId] !== undefined ? st.goalOpen[m.goalId] : m.state.key === "waiting" || m.state.key === "awaiting_approval";
+  function renderGoal() {
+    const host = $("#goal");
+    const goal = st.view === "room" ? ARView.pickGoal(Object.values(st.goals).filter((g) => g.roomId === st.roomId)) : null;
+    if (!goal) { host.hidden = true; host.replaceChildren(); return; }
+    const m = ARView.goalCardModel(goal, Object.values(st.tasks).filter((t) => t.roomId === st.roomId));
+    const open = goalIsOpen(m);
+    const line = ARView.goalProgressLine(m);
+    const frac = Math.round(ARView.goalFraction(m) * 100);
+    host.hidden = false; host.className = open ? "open" : "";
+    host.setAttribute("aria-label", `Goal: ${m.objective}. ${m.state.label}. ${line}`);
+    const reqs = m.requirements.map((r) => h("div", { class: `req ${r.status}`, "aria-label": `${r.id}, ${r.status === "met" ? "met" : r.status === "unmet" ? "not met" : "open"}: ${r.text}` },
+      h("span", { class: "rg", "aria-hidden": "true", text: r.status === "met" ? "✓" : r.status === "unmet" ? "✕" : "○" }), h("span", { class: "rid", text: r.id }),
+      h("span", { class: "rt" }, r.text, r.status === "unmet" && r.evidence ? h("span", { class: "re", text: r.evidence }) : null)));
+    host.replaceChildren(...[
+      h("button", { type: "button", class: "gc-head", "data-goal-toggle": m.goalId, "aria-expanded": open ? "true" : "false", "aria-label": open ? "Collapse the goal" : "Expand the goal" },
+        h("span", { class: `chip ${m.state.tone}`, text: m.state.label }),
+        h("span", { class: "gc-main" }, h("span", { class: "gc-obj", text: m.objective }), h("span", { class: "gc-count", text: line })), h("span", { class: "gc-caret", "aria-hidden": "true", text: open ? "▾" : "▸" })),
+      h("div", { class: "gc-bar" }, h("i", { class: m.state.key === "failed" ? "bad" : "", "data-pct": frac })),
+      open ? h("div", { class: "gc-body" },
+        m.note ? h("div", { class: `gc-note${m.note.kind === "next" ? " next" : ""}` }, h("b", { text: m.note.kind === "waiting" ? "Waiting on you" : "Next" }), m.note.text, m.note.kind === "waiting" ? h("small", { text: "Reply in the room and the work picks back up." }) : null) : null,
+        reqs.length ? h("div", {}, h("div", { class: "gc-h" }, "Done means", h("span", { text: `${m.met} of ${m.total} met` })), reqs)
+          : h("div", { class: "gc-line", text: m.state.key === "planning" ? "Writing the plan. The list of what done means shows here once it's ready." : "No list of requirements for this goal." }),
+        line ? h("div", { class: "gc-line", text: line }) : null) : null].filter(Boolean));
+    for (const el of host.querySelectorAll("[data-pct]")) el.style.width = `${el.dataset.pct}%`;
+  }
+
   // First render of a room jumps to the first unread message (or the latest); later renders
   // follow new messages only if you're already at the bottom or just sent one.
   function renderMessages(follow) {
@@ -823,7 +883,9 @@
     const view = $("#view");
     const nearBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 150;
     const msgs = st.messages.filter(visibleMsg);
+    const chips = ARView.chipMessageIds(msgs); // 3.1: the verdict sits on the last message of each task
     let html = "", prev, marked = false;
+    renderGoal();
     for (const m of msgs) {
       if (!prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString()) html += `<div class="day">${esc(dayLabel(m.createdAt))}</div>`;
       if (!marked && st.readAt > 0 && m.createdAt > st.readAt && m.author.kind !== "human") { html += `<div class="new" id="newLine"><span>New</span></div>`; marked = true; }
@@ -831,7 +893,7 @@
       const grouped = prev && prev.author.id === m.author.id && !sys && prev.type !== "system" && m.createdAt - prev.createdAt < 5 * 60_000
         && new Date(prev.createdAt).toDateString() === new Date(m.createdAt).toDateString();
       const agent = st.agents[m.author.id];
-      const color = m.author.kind === "human" ? "#1e242c" : sys ? "#c7ced6" : safeColor(agent?.color);
+      const cls = m.author.kind === "human" ? "owner" : sys ? "sys" : "";
       const name = m.author.kind === "human" ? (st.ownerName || m.author.name) : (agent?.name || m.author.name);
       const plan = m.planGoalId ? st.goals[m.planGoalId] : null;
       const actions = plan && plan.status === "awaiting_approval" ? `
@@ -841,9 +903,9 @@
           <button class="btn small ghost" data-plan="${esc(plan.id)}" data-decision="cancel">Cancel</button>
         </div>` : "";
       html += `<div class="msg${grouped ? "" : " first"}${sys ? " system" : ""}${m.planGoalId ? " plan" : ""}">
-        <span class="av" data-color="${esc(color)}">${sys ? "•" : esc(glyph(agent, name))}</span>
+        <span class="av${cls ? ` ${cls}` : ""}"${cls ? "" : ` data-color="${esc(safeColor(agent?.color))}"`}>${sys ? "•" : esc(glyph(agent, name))}</span>
         <div class="body">${grouped ? "" : `<div class="who">${esc(sys ? "Agent Room" : name)}<span class="when">${esc(time(m.createdAt))}</span></div>`}
-          <div class="text">${md(m.text)}</div>${actions}</div></div>`;
+          <div class="text">${md(m.text)}</div>${actions}</div></div>${chips[m.id] ? verdictRow(st.tasks[chips[m.id]]) : ""}`;
       prev = m;
     }
     view.innerHTML = `<div class="msgs">${html || '<div class="empty">No messages yet. Say what you need.</div>'}</div>`;
@@ -888,7 +950,8 @@
   }
 
   // Colors go on through the DOM, not inline style attributes, so the page's CSP can forbid inline styles.
-  function paintColors() { for (const el of document.querySelectorAll("[data-color]")) el.style.background = el.dataset.color; }
+  // 3.1: the tile is the agent's colour made visible on this mode's canvas; the letter takes whichever ink reads on it.
+  function paintColors() { for (const el of document.querySelectorAll("[data-color]")) { const t = tile(el.dataset.color); el.style.background = t.bg; el.style.color = t.ink; } }
 
   // ---------- actions
   async function sendMessage(text) {
@@ -939,9 +1002,65 @@
     const i = $("#input"); i.value = `/${name} `; pal.idx = 0; renderPalette(); i.focus(); grow();
   }
 
-  document.addEventListener("click", async (e) => {
-    const t = e.target.closest("button"); if (!t) return;
+  // ---------- 3.1 the jump sheet: rooms, agents, room commands and screens in one list (the Mac's Command-K)
+  const PHONE_SCREENS = ["approvals", "folders", "permissions", "appearance", "scorecard", "resumes", "agents"];
+  function jumpItems() {
+    return ARView.paletteItems({
+      rooms: st.rooms, agents: Object.values(st.agents), currentRoomId: st.view === "room" ? st.roomId : undefined,
+      screens: PHONE_SCREENS, platform: "phone",
+    });
+  }
+  function renderJump() {
+    const j = st.jump, host = $("#jumpList");
+    j.rows = ARView.filterPalette(jumpItems(), j.q).slice(0, 60);
+    if (j.idx >= j.rows.length) j.idx = 0;
+    const kids = []; let last = "";
+    j.rows.forEach((it, i) => {
+      if (it.group !== last) { kids.push(h("div", { class: "pgroup", text: it.group })); last = it.group; }
+      const a = it.action.kind === "dm" ? st.agents[it.action.agentId] : null;
+      kids.push(h("button", { type: "button", class: `jrow${i === j.idx ? " on" : ""}`, role: "option", "aria-selected": i === j.idx ? "true" : "false", "data-jump-row": String(i) },
+        a ? h("span", { class: "av", "data-color": safeColor(a.color), text: glyph(a) }) : it.action.kind === "room" ? h("span", { class: "jlead" }, h("span", { class: "mark" })) : null,
+        h("span", { class: "jt", text: it.title }), it.hint ? h("span", { class: "jh", text: it.hint }) : null));
+    });
+    if (!j.rows.length) kids.push(h("div", { class: "jnone", text: `Nothing matches "${j.q}".` }));
+    host.replaceChildren(...kids); paintColors();
+    host.querySelector(".jrow.on")?.scrollIntoView({ block: "nearest" });
+  }
+  function openJump() {
+    if (!st.token) return;
+    st.jump = { open: true, q: "", idx: 0, rows: [] };
+    $("#jump").hidden = false; $("#jumpInput").value = ""; renderJump(); $("#jumpInput").focus();
+  }
+  function closeJump() { st.jump.open = false; $("#jump").hidden = true; }
+  const navigate = (name) => { const b = document.createElement("button"); b.dataset.nav = name; document.body.append(b); b.click(); b.remove(); }; // the same path as tapping the row
+  async function runJump(it) {
+    if (!it) return;
+    closeJump();
+    const a = it.action;
     try {
+      if (a.kind === "room") go("room", a.roomId);
+      else if (a.kind === "dm") { const r = await api(`/rooms/dm/${encodeURIComponent(a.agentId)}`, { method: "POST", body: {} }); if (!st.rooms.some((x) => x.id === r.id)) st.rooms.push(r); go("room", r.id); }
+      else if (a.kind === "page") {
+        const sc = { approvals: "approvals", folders: "folders", permissions: "permissions", appearance: "appearance", scorecard: "scorecard", resumes: "resumes", agents: "personas" }[a.screen];
+        if (sc === "approvals") go("approvals"); else if (sc) navigate(sc);
+      }
+      else if (a.kind === "command") { if (st.roomId) await api(`/rooms/${st.roomId}/messages`, { method: "POST", body: { text: a.text } }); }
+      else if (a.kind === "goal") { if (st.roomId !== a.roomId || st.view !== "room") go("room", a.roomId); setTimeout(() => $("#input").focus(), 120); }
+    } catch (err) { if (err.message !== "unpaired") toast(err.message); }
+  }
+
+  document.addEventListener("click", async (e) => {
+    const t = e.target.closest("button, [data-jump-close]"); if (!t) return;
+    try {
+      if (t.dataset.jumpClose) { closeJump(); return; }
+      if (t.dataset.jumpRow !== undefined) { void runJump(st.jump.rows[Number(t.dataset.jumpRow)]); return; }
+      if (t.dataset.goalToggle) {
+        const g = st.goals[t.dataset.goalToggle];
+        const cur = goalIsOpen(ARView.goalCardModel(g, Object.values(st.tasks).filter((x) => x.roomId === g.roomId)));
+        st.goalOpen[g.id] = !cur; renderGoal(); return;
+      }
+      if (t.dataset.themeMode) { window.ARTheme.set(t.dataset.themeMode); renderAppearance(); return; }
+      if (t.dataset.nav === "appearance") { go("appearance"); return; }
       if (t.dataset.room) return go("room", t.dataset.room);
       if (t.dataset.nav === "permissions") {
         go("permissions");
@@ -1103,6 +1222,21 @@
   $("#view").addEventListener("scroll", () => { if (st.view === "diff") updateGate(); }, { passive: true });
   window.addEventListener("resize", () => { if (st.view === "diff") updateGate(); });
   $("#approvalsBtn").onclick = () => go("approvals");
+  $("#jumpBtn").onclick = () => openJump();
+  $("#jumpInput").addEventListener("input", (e) => { st.jump.q = e.target.value; st.jump.idx = 0; renderJump(); });
+  $("#jumpInput").addEventListener("keydown", (e) => {
+    const j = st.jump, n = j.rows.length;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); if (n) { j.idx = (j.idx + (e.key === "ArrowDown" ? 1 : n - 1)) % n; renderJump(); } }
+    else if (e.key === "Enter") { e.preventDefault(); void runJump(j.rows[j.idx]); }
+    else if (e.key === "Escape") { e.preventDefault(); closeJump(); }
+  });
+  // Command-K (or Control-K) on a keyboard opens the same sheet.
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); if (st.jump.open) closeJump(); else openJump(); }
+    else if (e.key === "Escape" && st.jump.open) closeJump();
+  });
+  // A change of mode (the choice, or the system) redraws the tiles so each agent colour is checked against the new canvas.
+  window.ARTheme.onChange(() => { if (st.token) render(); });
   $("#send").onsubmit = (e) => { e.preventDefault(); void sendMessage($("#input").value); };
   $("#input").addEventListener("input", grow);
   $("#input").addEventListener("input", () => { pal.off = false; pal.idx = 0; if (palQuery() !== null) void loadCommands(); renderPalette(); });

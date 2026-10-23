@@ -14,6 +14,7 @@
 		8A4440AF14DE49318E1B3CC3 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E230A01382DBE6B8D609CFAB /* PrivacyInfo.xcprivacy */; };
 		95D15235E659213D258C903E /* libPods-AgentRoom-macOS.a in Frameworks */ = {isa = PBXBuildFile; fileRef = BA40452B8C602340A805AD46 /* libPods-AgentRoom-macOS.a */; };
 		A0A0A0A0A0A0A0A0A0A0A001 /* HubLauncher.m in Sources */ = {isa = PBXBuildFile; fileRef = A0A0A0A0A0A0A0A0A0A0A002 /* HubLauncher.m */; };
+		A0A0A0A0A0A0A0A0A0A0A003 /* ARShell.m in Sources */ = {isa = PBXBuildFile; fileRef = A0A0A0A0A0A0A0A0A0A0A004 /* ARShell.m */; };
 		DE28CDA532B26DBDFA8CD1D0 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E230A01382DBE6B8D609CFAB /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
@@ -30,6 +31,7 @@
 		514201572437B4B40078DB4F /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
 		514201592437B4B40078DB4F /* AgentRoom.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AgentRoom.entitlements; sourceTree = "<group>"; };
 		A0A0A0A0A0A0A0A0A0A0A002 /* HubLauncher.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = HubLauncher.m; sourceTree = "<group>"; };
+		A0A0A0A0A0A0A0A0A0A0A004 /* ARShell.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ARShell.m; sourceTree = "<group>"; };
 		BA40452B8C602340A805AD46 /* libPods-AgentRoom-macOS.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-AgentRoom-macOS.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		E230A01382DBE6B8D609CFAB /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
@@ -69,6 +71,7 @@
 				5142014B2437B4B30078DB4F /* AppDelegate.h */,
 				5142014C2437B4B30078DB4F /* AppDelegate.mm */,
 				A0A0A0A0A0A0A0A0A0A0A002 /* HubLauncher.m */,
+				A0A0A0A0A0A0A0A0A0A0A004 /* ARShell.m */,
 				514201512437B4B40078DB4F /* Assets.xcassets */,
 				514201532437B4B40078DB4F /* Main.storyboard */,
 				514201562437B4B40078DB4F /* Info.plist */,
@@ -317,6 +320,7 @@
 				514201582437B4B40078DB4F /* main.m in Sources */,
 				5142014D2437B4B30078DB4F /* AppDelegate.mm in Sources */,
 				A0A0A0A0A0A0A0A0A0A0A001 /* HubLauncher.m in Sources */,
+				A0A0A0A0A0A0A0A0A0A0A003 /* ARShell.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

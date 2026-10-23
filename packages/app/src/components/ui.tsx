@@ -1,9 +1,11 @@
 import React, { useState } from "react";
 import * as RN from "react-native";
 import { Pressable, StyleSheet, Switch, Text, TextInput, View, type TextInputProps, type ViewStyle } from "react-native";
-import { radius, space, type as t, usePalette } from "../theme";
+import { agentTone } from "@agent-room/shared/src/colors";
+import type { Tone, VerdictChipModel } from "@agent-room/shared/src/goalview";
+import { radius, space, type as t, usePalette, type Palette } from "../theme";
 
-/** Page chrome for non-chat views: a slim header like a Slack channel header. */
+/** Page chrome for non-chat views: a slim header with the title and its actions, and a hairline under it. */
 export function Screen({ title, subtitle, right, left, children }: { title: string; subtitle?: string; right?: React.ReactNode; left?: React.ReactNode; children: React.ReactNode }) {
   const p = usePalette();
   return (
@@ -65,7 +67,7 @@ export function Toggle({ label, hint, value, onChange, accent, nested }: { label
         <Text style={[nested ? t.small : t.body, { color: nested ? p.muted : p.ink }]}>{label}</Text>
         {hint ? <Text style={[nested ? t.tiny : t.small, { color: nested ? p.faint : p.muted }]}>{hint}</Text> : null}
       </View>
-      <Switch accessibilityLabel={label} value={value} onValueChange={onChange} trackColor={{ true: accent ?? p.ok, false: p.raised }} />
+      <Switch accessibilityLabel={label} value={value} onValueChange={onChange} trackColor={{ true: accent ?? p.ok, false: p.lineStrong }} />
     </View>
   );
   if (!nested) return row;
@@ -94,7 +96,7 @@ export function Section({ title, hint, children }: { title: string; hint?: strin
     <View style={{ marginBottom: space(7) }}>
       <Text style={[t.heading, { color: p.inkStrong, marginBottom: hint ? space(1) : space(2.5) }]}>{title}</Text>
       {hint ? <Text style={[t.small, { color: p.muted, marginBottom: space(2.5) }]}>{hint}</Text> : null}
-      <View style={[styles.card, { backgroundColor: p.surface, borderColor: p.line }]}>{children}</View>
+      <View style={[styles.card, { borderColor: p.line }]}>{children}</View>
     </View>
   );
 }
@@ -109,17 +111,21 @@ export function Strip({ color }: { color: string }) {
   return <View style={{ width: 3, alignSelf: "stretch", borderRadius: 2, backgroundColor: color }} />;
 }
 
-/** Slack-style rounded-square avatar with the first letter, in the agent's colour. */
-export function Avatar({ name, color, size = 36, presence, glyph }: { name: string; color: string; size?: number; presence?: "ready" | "busy" | "off"; /** 3.2: the persona's letter or emoji; empty means the first letter of the name */ glyph?: string }) {
+/**
+ * An agent's avatar: a round tile in its own colour with the persona's letter or emoji. The colour is nudged until it can be seen on
+ * the current canvas (dark mode too), and the letter takes whichever ink reads on it.
+ */
+export function Avatar({ name, color, size = 28, presence, glyph, ring }: { name: string; color: string; size?: number; presence?: "ready" | "busy" | "off"; /** 3.2: the persona's letter or emoji; empty means the first letter of the name */ glyph?: string; /** the surface behind the avatar, for the presence dot's ring */ ring?: string }) {
   const p = usePalette();
+  const tone = agentTone(color, p.canvas);
   const dot = presence === "ready" ? p.ok : presence === "busy" ? p.warn : presence === "off" ? p.faint : undefined;
   return (
     <View style={{ width: size, height: size }}>
-      <View style={{ width: size, height: size, borderRadius: size * 0.22, backgroundColor: color, alignItems: "center", justifyContent: "center" }}>
-        <Text style={{ color: "#FFFFFF", fontFamily: t.name.fontFamily, fontWeight: "600", fontSize: size * 0.46 }}>{glyph || name.slice(0, 1).toUpperCase()}</Text>
+      <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: tone.bg, alignItems: "center", justifyContent: "center" }}>
+        <Text style={{ color: tone.ink, fontFamily: t.name.fontFamily, fontWeight: "600", fontSize: size * 0.46 }}>{glyph || name.slice(0, 1).toUpperCase()}</Text>
       </View>
       {dot ? (
-        <View style={{ position: "absolute", right: -3, bottom: -3, width: size * 0.36, height: size * 0.36, borderRadius: size, backgroundColor: dot, borderWidth: 2, borderColor: p.sidebar }} />
+        <View style={{ position: "absolute", right: -2, bottom: -2, width: size * 0.34, height: size * 0.34, borderRadius: size, backgroundColor: dot, borderWidth: 2, borderColor: ring ?? p.canvas }} />
       ) : null}
     </View>
   );
@@ -140,6 +146,27 @@ export function Pill({ text, color }: { text: string; color?: string }) {
     </View>
   );
 }
+
+/** Ink and tint for a tone. Colour never stands alone: every chip also carries a glyph and a word. */
+export const toneColors = (p: Palette, tone: Tone): { ink: string; bg: string } =>
+  tone === "ok" ? { ink: p.ok, bg: p.okBg } : tone === "warn" ? { ink: p.warn, bg: p.warnBg }
+    : tone === "danger" ? { ink: p.danger, bg: "transparent" } : tone === "accent" ? { ink: p.accent, bg: p.tint } : { ink: p.muted, bg: p.raised };
+
+/** One small status chip: glyph, word, and (for a verdict) the score. */
+export function Chip({ glyph, label, tone, score }: { glyph?: string; label: string; tone: Tone; score?: number }) {
+  const p = usePalette();
+  const c = toneColors(p, tone);
+  return (
+    <View accessibilityLabel={score === undefined ? label : `${label}, score ${score}`}
+      style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: space(2), height: 20, borderRadius: 99, backgroundColor: c.bg, borderWidth: 1, borderColor: tone === "neutral" ? p.line : c.ink }}>
+      {glyph ? <Text style={[t.tiny, { color: c.ink, fontWeight: "700" }]}>{glyph}</Text> : null}
+      <Text style={[t.tiny, { color: c.ink, fontWeight: "600" }]}>{label}</Text>
+      {score !== undefined ? <Text style={[t.tiny, { color: c.ink, fontVariant: ["tabular-nums"] }]}>{score}</Text> : null}
+    </View>
+  );
+}
+
+export const VerdictChip = ({ chip }: { chip: VerdictChipModel }) => <Chip glyph={chip.glyph} label={chip.label} tone={chip.tone} score={chip.score} />;
 
 /** Monospace block with a Copy button. */
 export function CodeBlock({ text, label }: { text: string; label?: string }) {
@@ -169,5 +196,6 @@ const styles = StyleSheet.create({
   nested: { marginLeft: space(6), borderLeftWidth: 2, marginBottom: space(1) },
   nestedRow: { paddingLeft: space(3), paddingVertical: space(2.5) },
   input: { borderWidth: 1, borderRadius: radius.lg, paddingHorizontal: space(3), paddingVertical: space(2.5) },
-  card: { borderWidth: 1, borderRadius: radius.xl, overflow: "hidden" },
+  // A section is a hairline above and below, not a filled box.
+  card: { borderTopWidth: 1, borderBottomWidth: 1, overflow: "hidden" },
 });
