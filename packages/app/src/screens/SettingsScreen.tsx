@@ -1,7 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
 import React, { useEffect, useState } from "react";
 import { Platform, ScrollView, Text, View } from "react-native";
-import type { AuditEntry, CapacitySnapshot, ControlCommit, ControlStatus, JuryCalibration, OrchestratorSettings } from "@agent-room/shared";
+import { NIGHT_SHIFT_DEFAULTS, type AuditEntry, type CapacitySnapshot, type ControlCommit, type ControlStatus, type JuryCalibration, type OrchestratorSettings } from "@agent-room/shared";
 import type { SetupInfo } from "../api/client";
 import { useRoom } from "../state/store";
 import { Button, Field, Screen, Section, Toggle } from "../components/ui";
@@ -100,6 +100,11 @@ export function SettingsScreen() {
               <Toggle label="Pick up work after a restart" value={s.autoResume !== false}
                 hint="If the hub restarts mid-job, the work continues where it left off."
                 onChange={(v) => save({ autoResume: v })} />
+            </Section>
+            <Section title="Night shift">
+              <Toggle label="Night shift" value={s.nightShift?.enabled ?? NIGHT_SHIFT_DEFAULTS.enabled}
+                hint="Overnight, re-run the day's finished tasks on other agents with quota that would expire, and grade both results blind. Nothing is merged or said in a room."
+                onChange={(v) => save({ nightShift: { ...s.nightShift, enabled: v } })} />
             </Section>
             <Section title="Learning">
               <View style={{ padding: space(4) }}>

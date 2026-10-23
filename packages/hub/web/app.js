@@ -7,7 +7,8 @@
   const st = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
-    view: "rooms",          // rooms | room | approvals | diff | permissions | folders | control | subscriptions | remote | personas | persona | resumes | scorecard | appearance | pair
+    view: "rooms",          // rooms | room | tasks | roominfo | fork | approvals | diff | permissions | folders | control | policy | subscriptions | remote | personas | persona | resumes | scorecard | appearance | pair
+    settings: null, // the owner's settings (PUT /settings), for the night shift switch
     tools: [], control: null, policy: null, quota: [], remote: null, firstPass: null, memExport: [], resumes: null, probationCount: 0,
     scorecard: null, scWeek: "this", ledger: null, attention: null, // 2.7
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, tasks: {}, goalOpen: {}, working: {}, approvals: [],
@@ -24,8 +25,8 @@
     roomGrants: [], folderId: "", folderOpen: false,
     // 3.2 personas: the starter templates, the agent being edited and its form
     personas: { templates: [], id: "", form: null, err: "", busy: false },
-    // 3.3 tasks: the room's tasks (helpers included), shown as a tree from the room header
-    tasks: [], taskRoom: "",
+    // 3.3 tasks: the room's tasks (helpers included), shown as a tree from the room header (`tasks` above is the room's tasks by id, for the goal card)
+    taskList: [], taskRoom: "",
     // 4.3 standing rooms: the read-only room info (what ROOM.md says)
     info: { roomId: "", def: null, err: "" },
     // 4.4 forks: the fork on screen, its tab, a merge waiting for a second tap, and the diffs left open
@@ -155,9 +156,8 @@
         } else if (visibleMsg(m) && m.author.kind !== "human") { st.unread.add(m.roomId); if (st.view === "rooms") renderRooms(); }
         break;
       }
-      case "task": case "subagent": upsertTask(e.task); break; // 3.3
+      case "task": case "subagent": upsertTask(e.task); break; // 3.3 (the Tasks screen) and 3.1 (the verdict chips and the goal card)
       case "goal": st.goals[e.goal.id] = e.goal; if (e.goal.roomId === st.roomId) { renderMessages(); renderComposerState(); } if (e.goal.fork && e.goal.fork.id === st.fork.id) refreshFork(); break; // 4.4
-      case "task": if (e.task.roomId === st.roomId) { st.tasks[e.task.id] = e.task; if (st.view === "room") renderMessages(); } break; // 3.1: the verdict chips and the goal card
       case "working": {
         const w = (st.working[e.roomId] ||= {});
         if (e.active) w[e.agentId] = e.label || ""; else delete w[e.agentId];
@@ -206,6 +206,7 @@
       openFromHash(); // 3.4: the office page links back here with #room=<id>
       // 1.5: what the hub found about its computer, one line under Settings
       api("/capacity").then((c) => { st.capacity = c; if (st.view === "rooms") renderRooms(); }).catch(() => {});
+      api("/settings").then((s) => { st.settings = s; if (st.view === "rooms") renderRooms(); }).catch(() => {}); // 4.5: the night shift switch
       api("/resumes").then((r) => { st.probationCount = r.filter((x) => x.probation.on).length; if (st.view === "rooms") renderRooms(); }).catch(() => {}); // 2.3: "2 on probation" under Résumés
     } catch (err) { if (err.message !== "unpaired") toast(`Can't reach the hub: ${err.message}`); }
   }
@@ -259,6 +260,7 @@
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : room.name)
       : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "policy" ? "Approval rules" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : st.view === "scorecard" ? "Scorecard" : st.view === "personas" ? "Personas" : st.view === "persona" ? (st.agents[st.personas.id]?.name || "Persona") : "Agent Room";
     renderDot(); renderBadge();
+    $("#bar").classList.toggle("tools", st.view === "room"); // the room's pills get their own row
     $("#tasksBtn").hidden = st.view !== "room"; // 3.3
     if (st.view === "tasks") $("#title").textContent = "Tasks"; // 3.3
     $("#infoBtn").hidden = !(st.view === "room" && room && !room.dmAgentId); // 4.3
@@ -317,18 +319,20 @@
   async function openTasks() {
     if (st.view !== "room" || !st.roomId) return;
     st.taskRoom = st.roomId; st.view = "tasks"; render();
-    try { const list = await api(`/rooms/${st.taskRoom}/tasks`); if (st.view === "tasks") { st.tasks = list; renderTasks(); } }
+    try { const list = await api(`/rooms/${st.taskRoom}/tasks`); if (st.view === "tasks") { st.taskList = list; renderTasks(); } }
     catch (e) { if (e.message !== "unpaired") toast(e.message); }
   }
   function upsertTask(t) {
-    if (!t || t.roomId !== st.taskRoom) return;
-    const i = st.tasks.findIndex((x) => x.id === t.id);
-    if (i >= 0) st.tasks[i] = t; else st.tasks.push(t);
+    if (!t) return;
+    if (t.roomId === st.roomId) { st.tasks[t.id] = t; if (st.view === "room") renderMessages(); } // 3.1: the verdict chips and the goal card
+    if (t.roomId !== st.taskRoom) return;
+    const i = st.taskList.findIndex((x) => x.id === t.id);
+    if (i >= 0) st.taskList[i] = t; else st.taskList.push(t);
     if (st.view === "tasks") renderTasks();
   }
   function renderTasks() {
     const goal = Object.values(st.goals).filter((g) => g.roomId === st.taskRoom).sort((a, b) => b.createdAt - a.createdAt)[0];
-    const rows = taskTree(goal ? st.tasks.filter((t) => t.goalId === goal.id) : []);
+    const rows = taskTree(goal ? st.taskList.filter((t) => t.goalId === goal.id) : []);
     const row = ({ task: t, depth }) => {
       const a = st.agents[t.assignee || t.owner];
       const tag = t.kind === "subagent" ? (t.native ? "built-in" : t.readOnly === false ? "writes" : "read-only") : "";
@@ -365,9 +369,15 @@
       <button class="row" data-nav="scorecard"><span class="hash">▥</span><span class="name">Scorecard</span></button>
       <button class="row" data-nav="appearance"><span class="hash">☾</span><span class="name">Appearance</span></button>
       <button class="row" data-nav="policy"><span class="hash">✓</span><span class="name">Approval rules</span>${st.policy?.pending ? `<span class="sub">${st.policy.pending} to review</span>` : ""}</button>
-      <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>${st.capacity ? `<div class="capline">${esc(st.capacity.summary)}</div>` : ""}`;
+      <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>
+      ${st.settings ? nightShiftRow() : ""}${st.capacity ? `<div class="capline">${esc(st.capacity.summary)}</div>` : ""}`;
     paintColors();
   }
+
+  // 4.5 Night shift: spare quota re-runs the day's finished tasks on other agents, graded blind. Off until switched on here or on the Mac.
+  const nightShiftRow = () => `
+      <label class="perm"><span class="hash">◐</span><span class="txt"><span class="lbl">Night shift</span><span class="hint2">Overnight, re-run the day's finished tasks on other agents with spare quota.</span></span>
+        <input type="checkbox" role="switch" class="switch" aria-label="Night shift" data-setting="nightShift"${st.settings.nightShift && st.settings.nightShift.enabled === true ? " checked" : ""}></label>`;
 
   // 3.1 Appearance: System follows the phone; Light and Dark stay as chosen. Kept on this phone only.
   function renderAppearance() {
@@ -1212,9 +1222,9 @@
     const chip = (props, text, on) => h("button", { class: `fchip${on ? " on" : ""}`, type: "button", ...props, text });
     host.replaceChildren(
       chip({ "data-folder-toggle": "1", "aria-expanded": st.folderOpen ? "true" : "false" }, sel ? `In folder: ${name(sel)}` : "Work in folder", !!sel),
-      st.folderOpen ? h("div", { class: "fopts" },
+      ...(st.folderOpen ? [h("div", { class: "fopts" },
         h("div", { class: "fnote", text: `Agents work on a copy.${sel ? (sel.write ? " What they change comes back to you to approve." : " It is read only, so nothing is written back.") : ""}` }),
-        h("div", { class: "frow" }, chip({ "data-folder": "" }, "No folder", !sel), ...st.roomGrants.map((g) => chip({ "data-folder": g.id, role: "radio", "aria-checked": g.id === st.folderId ? "true" : "false" }, `${name(g)}${g.write ? "" : " (read only)"}`, g.id === st.folderId)))) : null);
+        h("div", { class: "frow" }, chip({ "data-folder": "" }, "No folder", !sel), ...st.roomGrants.map((g) => chip({ "data-folder": g.id, role: "radio", "aria-checked": g.id === st.folderId ? "true" : "false" }, `${name(g)}${g.write ? "" : " (read only)"}`, g.id === st.folderId))))] : []));
   }
 
   // Colors go on through the DOM, not inline style attributes, so the page's CSP can forbid inline styles.
@@ -1436,7 +1446,7 @@
 
   // Permission switches: tool on/off, or the nested "without asking" setting.
   document.addEventListener("change", async (e) => {
-    const el = e.target; if (!el.matches?.("input.switch") || el.dataset.remote || el.dataset.grant || el.dataset.gform) return;
+    const el = e.target; if (!el.matches?.("input.switch") || el.dataset.remote || el.dataset.grant || el.dataset.gform || el.dataset.setting) return;
     const { agent, kind, tool } = el.dataset;
     el.disabled = true;
     try {
@@ -1485,6 +1495,18 @@
     renderPersona();
   });
   document.addEventListener("submit", (e) => { if (e.target.id === "personaForm") { e.preventDefault(); void savePersona(); } });
+
+  // Night shift switch (4.5): one setting, saved with the rest of nightShift (the window and limits are kept as they are).
+  document.addEventListener("change", async (e) => {
+    const el = e.target; if (!el.matches?.("input.switch") || el.dataset.setting !== "nightShift") return;
+    el.disabled = true;
+    try {
+      const cur = st.settings || await api("/settings");
+      const saved = await api("/settings", { method: "PUT", body: { nightShift: { ...(cur.nightShift || {}), enabled: el.checked } } });
+      st.settings = { ...cur, ...saved };
+      if (st.view === "rooms") renderRooms();
+    } catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
+  });
 
   // Funnel switch (1.2). Turning it on asks first; the hub does the work and tells us what Tailscale ended up doing.
   document.addEventListener("change", async (e) => {
