@@ -50,6 +50,10 @@ export interface SourceMeta {
   clone?: string; integration?: string; shadow?: string;
   /** granted-git: the last push of `branch` to the owner's repo failed, so the clone holds work the owner does not have yet */
   unpushed?: boolean;
+  /** 1.1 round 2: what git wrote in the integration folder's `.git` file and in its worktree admin folder's `gitdir` file when the hub made it, put back before every hub git call there. */
+  integrationPointer?: string; integrationGitdir?: string;
+  /** 1.1 round 2 (M5): the commit the hub last put on `branch` (fetched, or merged by an accept). Refs in the shared .git are agent-writable, so what is pushed and merged on is this id, never a ref name. */
+  tip?: string;
 }
 /** What the base of a goal is: the hub's own folder (plain), the owner's repo through a branch (granted-git), or a private copy of the owner's folder (shadow). */
 export type BaseMode = "plain" | "granted-git" | "shadow";
@@ -62,6 +66,8 @@ export interface TaskWorkspace {
   integration?: string;
   /** 1.1 git kind: what git wrote in the work folder's `.git` file, put back before the hub runs git there (an agent can overwrite it). */
   gitdir?: string;
+  /** 1.1 round 2 (M5): the commit of this task's branch when the hub accepted it. The merge uses this id, not the branch name (refs are agent-writable). */
+  tip?: string;
   /** The task's own directory: the agent's cwd. */
   path: string;
   /** The goal folder this was cut from. */
@@ -103,6 +109,13 @@ const BRANCH = (taskId: string) => `ar/${taskId}`;
 const isDir = (p: string) => { try { return lstatSync(p).isDirectory(); } catch { return false; } };
 const firstLine = (s: string) => s.trim().split("\n")[0].slice(0, 300);
 const EXCLUDES = ["LEDGER.md", ".agent-room*", "node_modules", ".DS_Store"];
+/**
+ * 1.1 round 2 (L7): pathspecs for `git add` that leave out what the hub writes into a work folder and dependencies, at the top level and in
+ * any subfolder. They do not depend on .git/info/exclude (the agent can empty it); the glob forms cover nested node_modules (monorepos).
+ */
+export const ADD_EXCLUDES_TOP = [":(exclude).agent-room*", ":(exclude)LEDGER.md", ":(exclude)node_modules", ":(exclude).DS_Store", ":(exclude,glob)**/node_modules", ":(exclude,glob)**/node_modules/**"];
+/** Plain goal folders used to rely on info/exclude patterns, which match at any depth. */
+export const ADD_EXCLUDES_ANYWHERE = [...ADD_EXCLUDES_TOP, ":(exclude,glob)**/LEDGER.md", ":(exclude,glob)**/.DS_Store", ":(exclude,glob)**/.agent-room*", ":(exclude,glob)**/.agent-room*/**"];
 const hasMarkers = (text: string) => /^<{7}(?: .*)?$/m.test(text) && /^>{7}(?: .*)?$/m.test(text);
 
 const COPY_SKIP = new Set([".git", "node_modules", ".DS_Store", "LEDGER.md"]);
@@ -136,24 +149,30 @@ export function copyGrantedTree(src: string, dst: string): { files: number; skip
   return { files, skippedLinks, skippedHardLinks, skipped };
 }
 
-/** 1.1: regular files under `root` that have more than one name (hard links). `.git` and `node_modules` are not looked into. */
+/**
+ * 1.1: regular files under `root` that have more than one name (hard links). `.git` is not looked into. 1.1 round 2 (L7): `node_modules` is
+ * scanned too (a package manager's store makes most of it hard links, so it has its own budget and cannot crowd out the rest); a hit there is
+ * listed after the others. Callers leave `inModules(path)` ones out of pathspec lists, because node_modules is never committed anyway.
+ */
 export function hardLinkedFiles(root: string, limit = 5000): string[] {
-  const out: string[] = [];
-  const walk = (dir: string) => {
+  const out: string[] = [], inModules: string[] = [];
+  const walk = (dir: string, modules: boolean) => {
     let names: string[] = [];
     try { names = readdirSync(dir); } catch { return; }
     for (const name of names) {
-      if (out.length >= limit) return;
-      if (name === ".git" || name === "node_modules") continue;
+      if (modules ? inModules.length >= limit : out.length >= limit) return;
+      if (name === ".git") continue;
       const full = join(dir, name);
       let st; try { st = lstatSync(full); } catch { continue; }
-      if (st.isDirectory()) walk(full);
-      else if (st.isFile() && st.nlink > 1) out.push(relative(root, full));
+      if (st.isDirectory()) walk(full, modules || name === "node_modules");
+      else if (st.isFile() && st.nlink > 1) (modules ? inModules : out).push(relative(root, full));
     }
   };
-  walk(root);
-  return out;
+  walk(root, false);
+  return [...out, ...inModules];
 }
+/** 1.1 round 2: is this relative path inside a node_modules folder? */
+export const inNodeModules = (rel: string) => rel.split(/[\\/]/).includes("node_modules");
 
 export class TaskWorkspaces {
   private chains = new Map<string, Promise<unknown>>();
@@ -162,10 +181,10 @@ export class TaskWorkspaces {
   /** 1.1: the common .git/config of every repository the hub owns, put back before each git call (see files/gitSafe.ts). */
   readonly guard: GitConfigGuard;
   /** 1.1: for a folder the hub runs git in: the repository whose config is guarded, and the exact git dirs (so a rewritten `.git` pointer or `commondir` is never believed). */
-  private bound = new Map<string, { repo?: string; env?: Record<string, string>; fix?: () => void }>();
+  private bound = new Map<string, { repo?: string; env?: Record<string, string>; fix?: () => string | undefined }>();
   constructor(private o: WorkspaceOptions) {
     this.gitBin = o.git ?? process.env.AGENT_ROOM_GIT ?? "git";
-    this.guard = new GitConfigGuard(join(o.dataDir, "gitguard"), (repo, why) => o.onSecurity?.("git.config.restored", `${repo}: ${why}`));
+    this.guard = new GitConfigGuard(join(o.dataDir, "gitguard"), (repo, why) => o.onSecurity?.("git.config.restored", `${repo}: ${why}`), this.gitBin);
   }
 
   // ---------- paths and metadata
@@ -199,7 +218,9 @@ export class TaskWorkspaces {
     if (!owner) {
       const repo = b?.repo ?? (isDir(join(cwd, ".git")) ? cwd : undefined);
       if (repo) this.guard.restore(repo);
-      b?.fix?.();
+      // 1.1 round 2: the worktree's own git files are put back, or the call is refused (the admin folder itself was replaced).
+      const refuse = b?.fix?.();
+      if (refuse) { this.security("worktree.tampered", `${cwd}: ${refuse}; the git command was not run`); return Promise.resolve({ code: 128, stdout: "", stderr: refuse }); }
     }
     return runProc(this.gitBin, [
       ...hardenedGitArgs(),
@@ -217,13 +238,31 @@ export class TaskWorkspaces {
     });
   }
   /** Tell the guard (and git) which repository a folder belongs to. For a task worktree git is pointed at its git dirs directly, so a rewritten `.git` file or `commondir` cannot redirect the hub to another repository. */
-  private bind(folder: string, repo: string, gitdirPointer?: string) {
+  private bind(folder: string, repo: string, gitdirPointer?: string, expect: { head?: string; gitdirFile?: string; pointer?: string } = {}) {
     const admin = /^gitdir:\s*(.+?)\s*$/m.exec(gitdirPointer ?? "")?.[1];
     // The admin folder of a worktree (<repo>/.git/worktrees/<name>) is writable by the agent too. Its `commondir` file says where the shared
     // repository is (objects, refs, config), and git reads it even when GIT_COMMON_DIR is set for some paths, so it is put back as git wrote it.
-    const fix = admin ? () => {
-      try { const f = join(admin, "commondir"); if (readFileSync(f, "utf8") !== "../..\n") writeFileSync(f, "../..\n"); } catch { try { writeFileSync(join(admin, "commondir"), "../..\n"); } catch { /* admin folder gone */ } }
-      try { rmSync(join(admin, "config.worktree"), { force: true }); } catch { /* none */ }
+    // 1.1 round 2: every change is audited (`worktree.tampered`), and the hub's integration worktree is held to the same standard as a task's:
+    // besides `commondir`, its `gitdir` file, its `HEAD` (must still be the goal branch) and the `.git` file in its folder are put back as the hub made them.
+    // Returns a reason to REFUSE the git call when the admin folder itself was swapped for a link or a file (it cannot be put back).
+    const fix = admin ? (): string | undefined => {
+      const heal = (file: string, want: string, what: string) => {
+        let have: string | undefined;
+        try { const st = lstatSync(file); if (st.isFile() && !st.isSymbolicLink()) have = readFileSync(file, "utf8"); } catch { /* missing */ }
+        if (have === want) return;
+        try { rmSync(file, { recursive: true, force: true }); writeFileSync(file, want); } catch { /* admin folder gone */ }
+        this.security("worktree.tampered", `${folder}: ${what} was changed outside the hub and has been put back`);
+      };
+      try {
+        const parent = dirname(admin);
+        if (lstatSync(parent).isSymbolicLink() || !lstatSync(admin).isDirectory() || lstatSync(admin).isSymbolicLink()) return "the work folder's git administration folder was replaced";
+      } catch { return undefined; /* admin folder gone: git will say so */ }
+      heal(join(admin, "commondir"), "../..\n", "the worktree's commondir file");
+      if (expect.gitdirFile) heal(join(admin, "gitdir"), expect.gitdirFile, "the worktree's gitdir file");
+      if (expect.head) heal(join(admin, "HEAD"), expect.head, "the worktree's HEAD");
+      if (expect.pointer) heal(join(folder, ".git"), expect.pointer, "the work folder's .git file");
+      try { if (existsSync(join(admin, "config.worktree"))) { rmSync(join(admin, "config.worktree"), { force: true }); this.security("worktree.tampered", `${folder}: config.worktree was changed outside the hub and has been removed`); } } catch { /* none */ }
+      return undefined;
     } : undefined;
     this.bound.set(folder, { repo, fix, ...(admin ? { env: { GIT_DIR: admin, GIT_COMMON_DIR: join(repo, ".git"), GIT_WORK_TREE: folder } } : {}) });
   }
@@ -313,7 +352,7 @@ export class TaskWorkspaces {
         await this.git(clone, ["worktree", "prune"]); // forget a work folder of the same task that a crash left registered
         const add = head ? await this.git(clone, ["worktree", "add", "-q", "-B", BRANCH(task.id), path, head]) : undefined;
         if (add?.code !== 0) { rmSync(path, { recursive: true, force: true }); await this.git(clone, ["worktree", "prune"]); throw new Error("Could not cut a work folder from the hub's copy of the granted folder's repository."); }
-        this.guard.snapshot(clone); // anything git itself wrote into the config while adding the worktree is the hub's own
+        this.guard.reconcile(clone); // 1.1 round 2: only keys git itself sets are accepted; anything else written meanwhile is put back
         const m: TaskWorkspace = { goalId: goal.id, taskId: task.id, agentId, kind: "git", path, base: clone, branch: BRANCH(task.id), mode, integration: src.integration, gitdir: this.pointerOf(path) };
         this.save(m); this.bindTask(m); return { ...m, reused: false };
       }
@@ -321,7 +360,7 @@ export class TaskWorkspaces {
         const head = opts.from ?? await this.out(goal.folder, ["rev-parse", "HEAD"]); // 4.5: or the commit asked for
         const add = head ? await this.git(goal.folder, ["worktree", "add", "-q", "-B", BRANCH(task.id), path, head]) : undefined;
         if (add?.code === 0) {
-          this.guard.snapshot(goal.folder);
+          this.guard.reconcile(goal.folder); // 1.1 round 2: see above
           const m: TaskWorkspace = { goalId: goal.id, taskId: task.id, agentId, kind: "git", path, base: goal.folder, branch: BRANCH(task.id), gitdir: this.pointerOf(path), ...(mode !== "plain" ? { mode } : {}) };
           this.save(m); this.bindTask(m); return { ...m, reused: false };
         }
@@ -368,13 +407,14 @@ export class TaskWorkspaces {
    * (or of agent-room/<goal> when the owner's repo already has it), over the file protocol, with no templates, tags, submodules, remote or
    * hooks. The clone has no remote, so nothing in it (or in what an agent can read of it) names the owner's repository.
    */
-  private async makeClone(goalId: string, s: GoalSource): Promise<{ clone: string; integration: string } | undefined> {
+  private async makeClone(goalId: string, s: GoalSource): Promise<{ clone: string; integration: string; pointer?: string; gitdirFile?: string; tip?: string } | undefined> {
     const clone = join(this.root(goalId), "_repo"), integration = join(this.root(goalId), "_integration");
     rmSync(clone, { recursive: true, force: true }); rmSync(integration, { recursive: true, force: true });
     mkdirSync(clone, { recursive: true });
     const fail = () => { rmSync(clone, { recursive: true, force: true }); rmSync(integration, { recursive: true, force: true }); return undefined; };
     if ((await this.git(clone, ["init", "-q", "--template="])).code !== 0) return fail();
     this.bind(clone, clone);
+    this.guard.snapshot(clone); // 1.1 round 2: the config as the hub made it, taken BEFORE anything else runs; never retaken after a later git command
     const has = await this.gitOk(s.path, ["rev-parse", "--verify", "-q", `refs/heads/${s.branch}`], true);
     const hasFrom = !has && !!s.from && await this.gitOk(s.path, ["rev-parse", "--verify", "-q", `refs/heads/${s.from}`], true); // 4.4
     const from = has ? `refs/heads/${s.branch}` : hasFrom ? `refs/heads/${s.from}` : "HEAD";
@@ -383,9 +423,45 @@ export class TaskWorkspaces {
     // fetch records where it fetched from (FETCH_HEAD, reflog): an agent that can read the clone must not learn where the owner's repository is.
     rmSync(join(clone, ".git", "FETCH_HEAD"), { force: true }); rmSync(join(clone, ".git", "logs"), { recursive: true, force: true });
     if ((await this.git(clone, ["worktree", "add", "-q", integration, s.branch])).code !== 0) return fail();
-    this.bind(integration, clone);
-    this.guard.snapshot(clone);
-    return { clone, integration };
+    this.guard.reconcile(clone); // 1.1 round 2: only keys git itself sets for a worktree are accepted
+    // 1.1 round 2 (H1): the integration worktree is bound exactly like a task worktree: its git dirs are recorded as git wrote them,
+    // git is pointed at them directly, and they are verified before every hub git call there.
+    const pointer = this.pointerOf(integration), admin = /^gitdir:\s*(.+?)\s*$/m.exec(pointer ?? "")?.[1];
+    let gitdirFile: string | undefined; try { gitdirFile = admin ? readFileSync(join(admin, "gitdir"), "utf8") : undefined; } catch { /* none */ }
+    this.bind(integration, clone, pointer, this.integrationExpect(s.branch, pointer, gitdirFile));
+    const tip = await this.out(clone, ["rev-parse", "--verify", "-q", `refs/heads/${s.branch}`]); // M5: the commit the hub fetched
+    return { clone, integration, pointer, gitdirFile, tip: tip || undefined };
+  }
+
+  /** What the hub expects of the integration worktree's git files (see bind). */
+  private integrationExpect(branch: string, pointer?: string, gitdirFile?: string) { return { head: `ref: refs/heads/${branch}\n`, gitdirFile, pointer }; }
+
+  /**
+   * 1.1 round 2 (H1, M5): bind the integration worktree of a granted-git goal from the hub's own record of it (a goal made before round 2 has
+   * none: what is there now is recorded once), and make sure the goal's branch still holds the commit the hub put there. Refs in the shared
+   * .git are writable by the agent; a moved branch is put back to the recorded commit (audited) before anything merges or is cut from it.
+   */
+  private async guardIntegration(goalId: string): Promise<SourceMeta | undefined> {
+    let s = this.sourceOf(goalId);
+    if (!s || s.mode !== "granted-git" || !s.clone || !s.integration || !s.branch) return s;
+    const clone = s.clone, integration = s.integration, branch = s.branch;
+    if (s.integrationPointer === undefined && existsSync(integration)) {
+      const ptr = this.pointerOf(integration), admin = /^gitdir:\s*(.+?)\s*$/m.exec(ptr ?? "")?.[1];
+      let gf: string | undefined; try { gf = admin ? readFileSync(join(admin, "gitdir"), "utf8") : undefined; } catch { /* none */ }
+      if (ptr) { s = { ...s, integrationPointer: ptr, integrationGitdir: gf }; this.saveSource(goalId, s); }
+    }
+    this.bind(clone, clone);
+    this.bind(integration, clone, s.integrationPointer, this.integrationExpect(branch, s.integrationPointer, s.integrationGitdir));
+    const ref = `refs/heads/${branch}`;
+    const cur = await this.out(clone, ["rev-parse", "--verify", "-q", ref]);
+    if (!s.tip) { if (cur) { s = { ...s, tip: cur }; this.saveSource(goalId, s); } return s; } // made before round 2: trusted once
+    if (cur !== s.tip) {
+      if (await this.gitOk(clone, ["cat-file", "-e", `${s.tip}^{commit}`])) {
+        const r = await this.git(clone, ["update-ref", ref, s.tip]);
+        this.security("goal.source.ref_repaired", `${goalId}: ${branch} pointed at ${cur ? cur.slice(0, 12) : "nothing"} instead of the commit the hub recorded (${s.tip.slice(0, 12)})${r.code === 0 ? "; put back" : "; could not be put back"}`);
+      } else this.security("goal.source.ref_repaired", `${goalId}: ${branch} does not match the commit the hub recorded and that commit is gone`);
+    }
+    return s;
   }
 
   private async ensureSource(goal: GoalRef) {
@@ -397,7 +473,7 @@ export class TaskWorkspaces {
         if (!existsSync(join(have.clone, ".git")) && s && !s.revoked) {
           const again = await this.makeClone(goal.id, s);
           if (!again) throw new Error("Could not reopen the hub's copy of the granted folder's repository.");
-          this.saveSource(goal.id, { ...have, clone: again.clone, integration: again.integration });
+          this.saveSource(goal.id, { ...have, clone: again.clone, integration: again.integration, integrationPointer: again.pointer, integrationGitdir: again.gitdirFile, tip: again.tip });
           return this.sourceOf(goal.id)!;
         }
         this.bind(have.clone, have.clone);
@@ -405,9 +481,12 @@ export class TaskWorkspaces {
           await this.git(have.clone, ["worktree", "prune"]);
           const r = await this.git(have.clone, ["worktree", "add", "-q", have.integration, have.branch!]);
           if (r.code !== 0) throw new Error("Could not reopen the branch for this goal in the hub's copy of the granted folder's repository.");
-          this.guard.snapshot(have.clone);
+          this.guard.reconcile(have.clone); // 1.1 round 2: never retaken; only keys git itself sets are accepted
+          const ptr = this.pointerOf(have.integration), admin = /^gitdir:\s*(.+?)\s*$/m.exec(ptr ?? "")?.[1];
+          let gf: string | undefined; try { gf = admin ? readFileSync(join(admin, "gitdir"), "utf8") : undefined; } catch { /* none */ }
+          this.saveSource(goal.id, { ...have, integrationPointer: ptr, integrationGitdir: gf });
         }
-        if (have.integration) this.bind(have.integration, have.clone);
+        return (await this.guardIntegration(goal.id)) ?? have; // 1.1 round 2: H1 binding and M5 branch check
       }
       if (have.mode === "shadow" && have.shadow && !existsSync(have.shadow)) this.noteSkipped(goal.id, copyGrantedTree(have.path, have.shadow));
       return have;
@@ -418,7 +497,7 @@ export class TaskWorkspaces {
     // Writable git folder: the hub clones it, accepted work goes to a branch in the clone, and the branch is pushed to the owner's repo for the owner to merge.
     if (s.write && await this.isRepoRoot(s.path)) {
       const made = await this.makeClone(goal.id, s);
-      if (made) meta = { mode: "granted-git", path: s.path, branch: s.branch, clone: made.clone, integration: made.integration };
+      if (made) meta = { mode: "granted-git", path: s.path, branch: s.branch, clone: made.clone, integration: made.integration, integrationPointer: made.pointer, integrationGitdir: made.gitdirFile, tip: made.tip };
     }
     // Anything else (not a repo, read-only grant, git unusable): a private copy. Accepted work stays in the copy; it reaches the owner's folder only as a reviewed diff.
     if (!meta) {
@@ -441,9 +520,22 @@ export class TaskWorkspaces {
     // git does not hand `-c` overrides to the receiving side of a local push, so the owner's server-side hooks (pre-receive, update,
     // post-receive) would run as unattended code from a hub-initiated push. The receiving git is started with hooks off, explicitly.
     const q = (x: string) => `'${x.replace(/'/g, `'\\''`)}'`;
-    const r = await this.git(s.clone, ["push", "-q", `--receive-pack=${q(this.gitBin)} -c core.hooksPath=/dev/null receive-pack`, s.path, `refs/heads/${s.branch}:refs/heads/${s.branch}`]);
+    const setUnpushed = (v: boolean) => { const cur = this.sourceOf(goalId); if (cur && !!cur.unpushed !== v) this.saveSource(goalId, { ...cur, unpushed: v }); };
+    // 1.1 round 2 (M5): refs in the shared .git are writable by the agent, so what is pushed is the commit the hub recorded when it produced
+    // the branch (fetched, or merged by an accept), by id. A branch that no longer holds that commit is refused and audited, never pushed.
+    const ref = `refs/heads/${s.branch}`;
+    const cur = await this.out(s.clone, ["rev-parse", "--verify", "-q", ref]);
+    const tip = s.tip ?? cur; // a goal made before round 2 has no record: trusted once
+    if (!tip || cur !== tip) {
+      this.security("goal.source.push_refused", `${goalId}: ${s.branch} holds ${cur ? cur.slice(0, 12) : "nothing"}, not the commit the hub made (${tip ? tip.slice(0, 12) : "none"}); it was not pushed to your repository`);
+      setUnpushed(true);
+      return { pushed: false, error: "The branch in the hub's copy does not hold the commit the hub made, so it was not sent to your repository." };
+    }
+    // The receiving git is started with hooks off and `receive.denyCurrentBranch=refuse` (L6): whatever the owner's own config says, a push never
+    // updates a branch the owner has checked out (`updateInstead` would rewrite their working tree) or silently moves it (`ignore`).
+    const r = await this.git(s.clone, ["push", "-q", `--receive-pack=${q(this.gitBin)} -c core.hooksPath=/dev/null -c receive.denyCurrentBranch=refuse receive-pack`, s.path, `${tip}:${ref}`]);
     const ok = r.code === 0;
-    if (!!s.unpushed !== !ok) this.saveSource(goalId, { ...s, unpushed: !ok });
+    setUnpushed(!ok);
     return ok ? { pushed: true } : { pushed: false, error: firstLine(r.stderr.replace(/^(remote: |error: |hint: )/gm, "")) || "git push failed" };
   }
 
@@ -533,34 +625,46 @@ export class TaskWorkspaces {
   private async acceptGit(m: TaskWorkspace, task: { id: string; title?: string }): Promise<AcceptResult> {
     // 1.1: for a granted repo the merge happens in the hub's own worktree on agent-room/<goal>, never in the owner's checkout.
     this.restorePointer(m);
+    if (m.integration) await this.guardIntegration(m.goalId); // 1.1 round 2: the integration worktree's git files and the goal branch are verified before anything runs there
     const wt = m.path, base = m.integration ?? m.base, branch = m.branch!;
     // 1.1: a second name for a file the agent could not read (a hard link to ~/.ssh/id_rsa) would be committed with its content. Left out, and reported.
     const links = hardLinkedFiles(wt);
-    const leave = links.map((l) => `:(exclude,literal)${l}`);
-    if (links.length) this.security("worktree.hardlink", `${m.taskId}: ${links.length} hard-linked file(s) not committed: ${links.slice(0, 8).join(", ")}`.slice(0, 600));
+    const loose = links.filter((l) => !inNodeModules(l)), modules = links.length - loose.length;
+    const leave = loose.map((l) => `:(exclude,literal)${l}`);
+    if (links.length) this.security("worktree.hardlink", `${m.taskId}: ${links.length} hard-linked file(s) not committed: ${links.slice(0, 8).join(", ")}${modules ? ` (${modules} of them inside node_modules)` : ""}`.slice(0, 600));
     // 1. commit the agent's work on its branch (author = the agent)
-    // 1.1: the owner's repo has no local exclude file of ours, so the files the hub itself writes into a work folder are left out here.
-    await this.git(wt, m.integration ? ["add", "-A", "--", ".", ":(exclude).agent-room*", ":(exclude)LEDGER.md", ":(exclude)node_modules", ":(exclude).DS_Store", ...leave] : links.length ? ["add", "-A", "--", ".", ...leave] : ["add", "-A"]);
+    // 1.1 round 2 (L7): the files the hub itself writes into a work folder, and dependencies, are left out by EXPLICIT pathspecs in every mode.
+    // .git/info/exclude, which the plain mode used to rely on, is writable by the agent (it is shared by every worktree of the repository).
+    await this.git(wt, ["add", "-A", "--", ".", ...(m.integration ? ADD_EXCLUDES_TOP : ADD_EXCLUDES_ANYWHERE), ...leave]);
     const merging = await this.gitOk(wt, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
     const dirty = !(await this.gitOk(wt, ["diff", "--cached", "--quiet"]));
     if (dirty || merging) {
       const c = await this.git(wt, ["commit", "--no-verify", "--allow-empty", "-m", task.title ? `Task: ${task.title}` : `Task ${task.id}`, "--author", `${m.agentId} <${m.agentId}@agent-room.local>`]);
       if (c.code !== 0) return { ok: false, conflict: [] };
     }
+    // 1.1 round 2 (M5): the commit the hub just made is recorded, and everything below merges THAT id, not the branch name: refs in the
+    // shared .git are writable by the agent, so a ref is not believed after the hub has read it once.
+    const tip = await this.out(wt, ["rev-parse", "--verify", "-q", `refs/heads/${branch}^{commit}`]);
+    if (!tip) return { ok: false, conflict: [] };
+    m.tip = tip; this.save(m);
     // 2. merge into the base
     if (m.integration) { await this.git(base, ["reset", "--hard", "-q", "HEAD"]); await this.git(base, ["clean", "-fdq"]); } // the hub's own worktree: a check may have left files in it
     else await this.syncBase(base);
     const before = await this.out(base, ["rev-parse", "HEAD"]);
-    if (await this.gitOk(base, ["merge-base", "--is-ancestor", branch, "HEAD"])) return { ok: true, merged: [], how: "empty", ...(links.length ? { hardLinks: links } : {}) };
-    const fastForward = await this.gitOk(base, ["merge-base", "--is-ancestor", "HEAD", branch]);
-    const r = await this.git(base, ["merge", "--no-edit", "-m", task.title ? `Merge task: ${task.title}` : `Merge task ${task.id}`, branch]);
+    if (await this.gitOk(base, ["merge-base", "--is-ancestor", tip, "HEAD"])) return { ok: true, merged: [], how: "empty", ...(loose.length ? { hardLinks: loose } : {}) };
+    const fastForward = await this.gitOk(base, ["merge-base", "--is-ancestor", "HEAD", tip]);
+    const r = await this.git(base, ["merge", "--no-edit", "-m", task.title ? `Merge task: ${task.title}` : `Merge task ${task.id}`, tip]);
     if (r.code === 0) {
       const files = this.names((await this.git(base, ["diff", "--name-only", "-z", before, "HEAD"])).stdout);
-      return { ok: true, merged: files, how: fastForward ? "fast-forward" : "merge", ...(links.length ? { hardLinks: links } : {}) };
+      if (m.integration) { // M5: the commit this accept produced on agent-room/<goal> is what is pushed to the owner
+        const now = await this.out(base, ["rev-parse", "HEAD"]), cur = this.sourceOf(m.goalId);
+        if (now && cur) this.saveSource(m.goalId, { ...cur, tip: now });
+      }
+      return { ok: true, merged: files, how: fastForward ? "fast-forward" : "merge", ...(loose.length ? { hardLinks: loose } : {}) };
     }
     // 3. conflict: leave the base exactly as it was, bring the latest base into the task's worktree for the agent to resolve
     let conflict = this.names((await this.git(base, ["diff", "--name-only", "-z", "--diff-filter=U"])).stdout);
-    if (!conflict.length) conflict = this.names((await this.git(base, ["diff", "--name-only", "-z", `${before}...${branch}`])).stdout);
+    if (!conflict.length) conflict = this.names((await this.git(base, ["diff", "--name-only", "-z", `${before}...${tip}`])).stdout);
     await this.git(base, ["merge", "--abort"]);
     await this.git(wt, ["merge", "--no-edit", "-m", "Bring in accepted work from other tasks", before]);
     m.conflicted = conflict; this.save(m);
@@ -571,7 +675,7 @@ export class TaskWorkspaces {
     const was = new Map(Object.entries(m.snap ?? {}));
     const mine = snapshot(m.path), theirs = snapshot(m.base);
     // 1.1: hard-linked files are never copied into the base (see acceptGit).
-    const links = new Set(hardLinkedFiles(m.path));
+    const links = new Set(hardLinkedFiles(m.path).filter((l) => !inNodeModules(l))); // node_modules is never copied (snapshot skips it)
     if (links.size) this.security("worktree.hardlink", `${m.taskId}: ${links.size} hard-linked file(s) not copied: ${[...links].slice(0, 8).join(", ")}`.slice(0, 600));
     const changed = changedFiles(was, mine).filter((p) => !links.has(p));
     const clash = changed.filter((p) => theirs.get(p) !== was.get(p) && theirs.get(p) !== mine.get(p));

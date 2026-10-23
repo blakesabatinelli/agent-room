@@ -80,7 +80,6 @@ export function acpUsage(u: unknown): RunUsage | undefined {
 export function confineToWorktree(cwd: string, p: unknown): string {
   if (typeof p !== "string" || !p) throw new PathDenied("a path is required");
   if (!isAbsolute(p)) throw new PathDenied("the path must be absolute");
-  assertPlainPath(p);
   const lexicalRoot = resolve(cwd);
   let root: string;
   try { root = realpathSync.native(lexicalRoot); } catch { throw new PathDenied("the task folder is not available"); }
@@ -89,6 +88,7 @@ export function confineToWorktree(cwd: string, p: unknown): string {
   if (!base) throw new PathDenied("the path is outside the task folder");
   const rel = relative(base, target);
   if (!rel) throw new PathDenied("that is the task folder itself, not a file");
+  assertPlainPath(rel); // the spelling under the task folder (what the owner sees); the folder's own name is the hub's
   if (touchesGit(rel)) throw new PathDenied("version-control files are off limits");
   return resolveInGrant(root, rel);
 }

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -85,6 +86,9 @@ export function hardenedGitEnv(): NodeJS.ProcessEnv {
   };
 }
 
+/** Config keys git itself may set while it adds a worktree (lower-cased, as `git config --list` prints them). Everything else is put back. */
+export const REPO_CONFIG_ALLOWED = ["extensions.worktreeconfig", "core.repositoryformatversion"] as const;
+
 /**
  * Layer (b). Keeps the bytes of the common `.git/config` of each repository the hub owns and puts them back before every hub git call.
  * The snapshots are also kept on disk (outside the repositories) so a hub restart does not forget them. A repository the hub
@@ -92,7 +96,7 @@ export function hardenedGitEnv(): NodeJS.ProcessEnv {
  */
 export class GitConfigGuard {
   private mem = new Map<string, Buffer>();
-  constructor(private dir: string, private onRestore: (repo: string, why: string) => void = () => undefined) {}
+  constructor(private dir: string, private onRestore: (repo: string, why: string) => void = () => undefined, private gitBin = "git") {}
 
   private configPath(repo: string) { return join(repo, ".git", "config"); }
   private snapPath(repo: string) { return join(this.dir, `${createHash("sha256").update(repo).digest("hex").slice(0, 24)}.config`); }
@@ -106,6 +110,50 @@ export class GitConfigGuard {
   }
 
   has(repo: string) { return this.mem.has(repo) || existsSync(this.snapPath(repo)); }
+
+  /**
+   * 1.1 round 2 (M2). Call after a hub git command that may legitimately have touched the config of a repository that already has a
+   * snapshot (`git worktree add`). The snapshot is NEVER simply retaken: anything an agent wrote into the config during that window
+   * would become trusted. The current config is compared with the snapshot key by key (`git config --file --list`, which runs nothing):
+   * when the only differences are keys git itself sets for worktrees (REPO_CONFIG_ALLOWED) the new config becomes the snapshot,
+   * otherwise the snapshot is put back and the restore is reported. A repository with no snapshot yet is snapshotted (first use).
+   */
+  reconcile(repo: string, allowed: readonly string[] = REPO_CONFIG_ALLOWED): "same" | "accepted" | "restored" {
+    const want = this.mem.get(repo) ?? (() => { try { return readFileSync(this.snapPath(repo)); } catch { return undefined; } })();
+    if (!want) { this.snapshot(repo); return "same"; }
+    this.mem.set(repo, want);
+    let cur: Buffer;
+    try { cur = readFileSync(this.configPath(repo)); } catch { this.restore(repo); return "restored"; }
+    if (cur.equals(want)) return "same";
+    const before = this.entries(want), after = this.entries(cur);
+    if (before && after) {
+      const keys = new Set([...before.keys(), ...after.keys()]);
+      const changed = [...keys].filter((k) => JSON.stringify(before.get(k) ?? null) !== JSON.stringify(after.get(k) ?? null));
+      if (changed.length > 0 && changed.every((k) => allowed.includes(k))) {
+        this.mem.set(repo, cur);
+        try { mkdirSync(this.dir, { recursive: true }); writeFileSync(this.snapPath(repo), cur, { mode: 0o600 }); } catch { /* memory copy still works */ }
+        return "accepted";
+      }
+    }
+    this.restore(repo);
+    return "restored";
+  }
+
+  /** key -> values of a config file's bytes, read by git itself without running anything (`git config --file`). undefined when it cannot be parsed. */
+  private entries(buf: Buffer): Map<string, string[]> | undefined {
+    const tmp = join(this.dir, `.parse-${process.pid}-${createHash("sha256").update(buf).digest("hex").slice(0, 12)}`);
+    try {
+      mkdirSync(this.dir, { recursive: true }); writeFileSync(tmp, buf, { mode: 0o600 });
+      const out = execFileSync(this.gitBin, [...hardenedGitArgs(), "config", "--file", tmp, "--list", "-z"], { encoding: "utf8", env: { ...process.env, ...hardenedGitEnv() } as NodeJS.ProcessEnv, timeout: 20_000 });
+      const m = new Map<string, string[]>();
+      for (const rec of out.split("\0").filter(Boolean)) {
+        const i = rec.indexOf("\n"); const k = i < 0 ? rec : rec.slice(0, i), v = i < 0 ? "" : rec.slice(i + 1);
+        m.set(k, [...(m.get(k) ?? []), v]);
+      }
+      return m;
+    } catch { return undefined; }
+    finally { try { rmSync(tmp, { force: true }); } catch { /* none */ } }
+  }
 
   /** Put the config back if anything changed it. Returns true when it had to. */
   restore(repo: string): boolean {

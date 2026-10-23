@@ -34,6 +34,9 @@ const MAX_TASK_FILES = 200;
 const KEEP_DIFFS = 100;
 const GENERIC_PATH = "that path is not allowed for writing here";
 const NOT_APPLIED = "not applied";
+/** 1.1 round 2 (L5): bidirectional embedding, override and isolate controls make code read in a different order from the one it runs in ("trojan source"). */
+const BIDI_CONTROL = /[\u202A-\u202E\u2066-\u2069]/;
+const BIDI_REFUSAL = "the content has direction-changing characters (U+202A to U+202E, U+2066 to U+2069), which can make text read differently from what it does; remove them and propose it again";
 /** What resolveInGrant says when the answer depends on the disk (links), as opposed to how the path is spelled. */
 const STATE_DENIAL = /resolves outside|cannot be resolved|cannot be accessed/;
 
@@ -62,7 +65,11 @@ export interface BrokerOptions {
 }
 
 /** What the hub holds in memory for a pending proposal: the exact bytes the owner is approving, and what they replace. */
-interface PendingItem { relPath: string; content: Buffer | null; old: Buffer | null }
+interface PendingItem {
+  relPath: string; content: Buffer | null; old: Buffer | null;
+  /** 1.1 round 2 (L4): the resolved absolute path the owner's approval is for. The apply step resolves the spelling again and must get exactly this. */
+  target?: string;
+}
 
 const sha256 = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 // Long enough for any path an agent may send (MAX_REL_PATH), so audited paths are never cut.
@@ -219,7 +226,7 @@ export class FileBroker {
       const file = resolveInGrant(auth.grant.path, relPath);
       if (touchesGit(relPath) || touchesGit(relative(realpathSync.native(auth.grant.path), file))) return this.deny(agentId, "read", relPath, "version-control internals (.git) are not available to agents");
       const got = this.readFile(file, maxBytes);
-      if (got.kind !== "file") return this.deny(agentId, "read", relPath, got.kind === "missing" ? "no such file" : got.why === "hard link" ? "file has more than one hard link; not available to agents" : "not a regular file");
+      if (got.kind !== "file") return this.deny(agentId, "read", relPath, got.kind === "missing" ? "no such file" : got.why === "hard link" ? "file has more than one hard link; not available to agents" : got.why === "denied" ? "file cannot be opened (permission denied)" : "not a regular file");
       // A read that stopped at the byte limit may end inside a character: judge the part we are returning, not the cut.
       const truncated = got.size > got.buf.length;
       const view = truncated ? withoutPartialTail(got.buf) : got.buf;
@@ -252,6 +259,7 @@ export class FileBroker {
       assertPlainPath(relPath);
       if (content.includes("\0")) return this.deny(agentId, "write", relPath, `${NOT_TEXT} content (NUL byte) cannot be written`);
       if (!isWellFormedText(content)) return this.deny(agentId, "write", relPath, `content is ${NOT_TEXT} (unpaired surrogate)`);
+      if (BIDI_CONTROL.test(content)) return this.deny(agentId, "write", relPath, BIDI_REFUSAL);
       const queued = this.pending();
       if (queued.length >= MAX_PENDING) return this.deny(agentId, "write", relPath, "too many writes are already waiting for the owner");
       if (queued.filter((x) => x.agentId === agentId).length >= MAX_PENDING_PER_AGENT) return this.deny(agentId, "write", relPath, `this agent already has ${MAX_PENDING_PER_AGENT} writes waiting for the owner; wait for a decision before proposing more`);
@@ -287,7 +295,7 @@ export class FileBroker {
       // A path that resolved outside the folder is never opened, even to look.
       const cur = stateBlocked ? { kind: "missing" as const } : this.readFile(target, MAX_EXISTING_BYTES, true);
       if (cur.kind === "missing") { /* new file */ }
-      else if (cur.kind === "notfile") { const r = targetProblem("target exists and is not a regular file"); if (r) return r; }
+      else if (cur.kind === "notfile") { const r = targetProblem(cur.why === "denied" ? "target cannot be opened (permission denied)" : "target exists and is not a regular file"); if (r) return r; }
       else if (cur.size > MAX_EXISTING_BYTES) { const r = targetProblem("existing file is too large to diff"); if (r) return r; }
       else if (isBinaryOrInvalid(cur.buf)) { const r = targetProblem(`existing file is ${NOT_TEXT}`); if (r) return r; }
       else { oldText = cur.buf.toString("utf8"); oldBuf = cur.buf; baseSha = sha256(cur.buf); }
@@ -315,7 +323,7 @@ export class FileBroker {
         id: pid, kind: "file", grantId: grant.id, agentId, roomId, relPath: shown, askedPath: relPath, baseSha256: baseSha, newSha256: newSha,
         diff, bytes: buf.length, files: [file], status: "pending", createdAt: now(), ...(unappliable ? { unappliable } : {}),
       };
-      this.pendingContent.set(pid, [{ relPath: shown, content: buf, old: oldBuf }]);
+      this.pendingContent.set(pid, [{ relPath: shown, content: buf, old: oldBuf, target }]);
       this.store.audit(agentId, "file.write.proposed", `${pid} ${grant.id} ${q(shown)} ${baseSha ? "edit" : "new file"} ${buf.length} bytes sha256=${newSha.slice(0, 12)}${unappliable ? " (cannot be applied)" : ""}`);
 
       const header = `Write proposal ${pid}: ${baseSha ? "edit" : "new file"} ${shown} in ${grant.label ?? basename(grant.path)} (${buf.length} bytes)\n${shown !== relPath ? `(the agent asked for ${q(relPath)}, a different spelling of the same file)\n` : ""}`
@@ -355,6 +363,7 @@ export class FileBroker {
         assertPlainPath(shown);
         if (ch.content && ch.content.length > MAX_WRITE_BYTES) { skipped.push({ relPath: shown, reason: `larger than ${MAX_WRITE_BYTES} bytes` }); continue; }
         if (ch.content && isBinaryOrInvalid(ch.content)) { skipped.push({ relPath: shown, reason: `${NOT_TEXT}; not written back` }); continue; }
+        if (ch.content && BIDI_CONTROL.test(ch.content.toString("utf8"))) { skipped.push({ relPath: shown, reason: `${BIDI_REFUSAL}; not written back` }); continue; }
         const cur = this.readFile(target, MAX_EXISTING_BYTES, true);
         let oldText: string | null = null, oldBuf: Buffer | null = null, baseSha: string | null = null;
         if (cur.kind === "notfile") { skipped.push({ relPath: shown, reason: "target exists and is not a regular file" }); continue; }
@@ -367,7 +376,7 @@ export class FileBroker {
         if (ch.content && baseSha === sha256(ch.content)) continue; // already the same
         if (tooLargeToDiff(oldText, newText)) { skipped.push({ relPath: shown, reason: "too large for the owner to review as a diff (over 5,000 lines)" }); continue; }
         const op: WriteProposalFile["op"] = ch.content === null ? "delete" : baseSha ? "edit" : "create";
-        items.push({ relPath: shown, content: ch.content, old: oldBuf });
+        items.push({ relPath: shown, content: ch.content, old: oldBuf, target });
         files.push({ relPath: shown, op, baseSha256: baseSha, newSha256: ch.content ? sha256(ch.content) : null, bytes: ch.content?.length ?? 0 });
         diffs.push(unifiedDiff(shown, oldText, newText));
       } catch (e) { skipped.push({ relPath: short(ch.relPath, 120), reason: this.why(e) }); }
@@ -463,7 +472,7 @@ export class FileBroker {
         const cur = this.readFile(target, MAX_EXISTING_BYTES, true);
         if (cur.kind !== "file") return `draft B names ${q(shown)}, which is not a file in the folder`;
         if (cur.size > MAX_EXISTING_BYTES || isBinaryOrInvalid(cur.buf)) return `draft B names ${q(shown)}, which can't be reviewed as text`;
-        keep.push({ f: { relPath: shown, op: "delete", baseSha256: sha256(cur.buf), newSha256: null, bytes: 0 }, it: { relPath: shown, content: null, old: cur.buf } });
+        keep.push({ f: { relPath: shown, op: "delete", baseSha256: sha256(cur.buf), newSha256: null, bytes: 0 }, it: { relPath: shown, content: null, old: cur.buf, target } });
       } catch (e) { return this.why(e); }
     }
     if (!keep.length) return "nothing is left to write";
@@ -572,6 +581,8 @@ export class FileBroker {
         const item = items[i], f = files[i];
         if ((item.content ? sha256(item.content) : null) !== f.newSha256) return fail("content changed in memory");
         const target = resolveInGrant(grant.path, item.relPath);
+        // 1.1 round 2 (L4): the owner approved THIS real location. A folder renamed or replaced by a link since the proposal (still inside the grant) would send the write elsewhere.
+        if (item.target !== undefined && target !== item.target) return fail("the place this path points to changed after the write was proposed");
         const guard = this.writeGuard(grant.path, item.relPath, target);
         if (guard) return fail(guard);
         const cur = this.readFile(target, MAX_EXISTING_BYTES, true);
@@ -623,7 +634,7 @@ export class FileBroker {
 
   /** Read a regular file without following a final symlink. `whole` reads everything up to maxBytes, else a prefix. */
   private readFile(path: string, maxBytes: number, whole = false):
-    | { kind: "missing" } | { kind: "notfile"; why?: "hard link" }
+    | { kind: "missing" } | { kind: "notfile"; why?: "hard link" | "denied" }
     | { kind: "file"; buf: Buffer; size: number; mode: number } {
     let fd: number;
     try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
@@ -631,6 +642,9 @@ export class FileBroker {
       const code = (e as NodeJS.ErrnoException).code;
       if (code === "ENOENT") return { kind: "missing" };
       if (code === "ELOOP" || code === "ENOTDIR" || code === "EISDIR" || code === "ENXIO") return { kind: "notfile" };
+      // 1.1 round 2 (L2): "permission denied" on the target is an answer about the disk: it is treated like any other target that cannot be written (on a write-only
+      // grant that is an accepted proposal the owner sees cannot be applied), never an error that tells the agent something is there.
+      if (code === "EACCES" || code === "EPERM") return { kind: "notfile", why: "denied" };
       throw e;
     }
     try {

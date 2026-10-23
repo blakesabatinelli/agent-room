@@ -1,7 +1,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { TaskWorkspace, TaskWorkspaces } from "../orchestrator/worktree.js";
-import { hardLinkedFiles } from "../orchestrator/worktree.js";
+import { ADD_EXCLUDES_TOP, hardLinkedFiles, inNodeModules } from "../orchestrator/worktree.js";
 import { changedFiles, snapshot } from "../orchestrator/workspace.js";
 
 /**
@@ -20,7 +20,7 @@ import { changedFiles, snapshot } from "../orchestrator/workspace.js";
  * (TaskWorkspaces.git): the agents' `.git` pointers are put back, hard links are left out.
  */
 
-const HUB_FILES = [":(exclude).agent-room*", ":(exclude)LEDGER.md", ":(exclude)node_modules", ":(exclude).DS_Store"];
+const HUB_FILES = ADD_EXCLUDES_TOP; // 1.1 round 2: includes nested node_modules, and never relies on .git/info/exclude
 const names = (stdout: string) => stdout.split("\0").filter(Boolean).sort();
 const hasMarkers = (text: string) => /^<{7}(?: .*)?$/m.test(text) && /^>{7}(?: .*)?$/m.test(text);
 const BRANCH = (id: string) => `ar/${id}`;
@@ -70,7 +70,7 @@ export class ChildSpaces {
     const idx = join(this.dataDir, `snap-${childId}.index`);
     const env = { GIT_INDEX_FILE: idx };
     try {
-      const links = hardLinkedFiles(parent.path).map((l) => `:(exclude,literal)${l}`);
+      const links = hardLinkedFiles(parent.path).filter((l) => !inNodeModules(l)).map((l) => `:(exclude,literal)${l}`);
       if ((await ws.git(parent.path, ["read-tree", "HEAD"], undefined, false, env)).code !== 0) return undefined;
       if ((await ws.git(parent.path, ["add", "-A", "--", ".", ...HUB_FILES, ...links], undefined, false, env)).code !== 0) return undefined;
       const tree = (await ws.git(parent.path, ["write-tree"], undefined, false, env)).stdout.trim();
@@ -81,7 +81,7 @@ export class ChildSpaces {
       await ws.git(parent.base, ["worktree", "prune"]);
       const add = await ws.git(parent.base, ["worktree", "add", "-q", "-B", BRANCH(childId), path, sha]);
       if (add.code !== 0) return undefined;
-      ws.guard.snapshot(parent.base); // anything git itself wrote while adding the worktree is the hub's own
+      ws.guard.reconcile(parent.base); // 1.1 round 2: only keys git itself sets for a worktree are accepted; anything else written meanwhile is put back
       const m: TaskWorkspace = { goalId, taskId: childId, agentId, kind: "git", path, base: parent.base, branch: BRANCH(childId), gitdir: this.pointer(path), parentTaskId: parent.taskId };
       ws.save(m); ws.bindTask(m);
       return m;
@@ -108,7 +108,7 @@ export class ChildSpaces {
   private async commitChild(m: TaskWorkspace, agentId: string, title: string) {
     const ws = this.ws;
     ws.bindTask(m); ws.restorePointer(m);
-    const links = hardLinkedFiles(m.path).map((l) => `:(exclude,literal)${l}`);
+    const links = hardLinkedFiles(m.path).filter((l) => !inNodeModules(l)).map((l) => `:(exclude,literal)${l}`);
     await ws.git(m.path, ["add", "-A", "--", ".", ...HUB_FILES, ...links]);
     const merging = (await ws.git(m.path, ["rev-parse", "-q", "--verify", "MERGE_HEAD"])).code === 0;
     const dirty = (await ws.git(m.path, ["diff", "--cached", "--quiet"])).code !== 0;
@@ -133,7 +133,7 @@ export class ChildSpaces {
     await this.commitChild(child, o.childAgentId, o.title);
     ws.bindTask(parent); ws.restorePointer(parent);
     // the parent's own work in progress goes on its branch first, so the merge never trips on uncommitted files
-    const links = hardLinkedFiles(wt).map((l) => `:(exclude,literal)${l}`);
+    const links = hardLinkedFiles(wt).filter((l) => !inNodeModules(l)).map((l) => `:(exclude,literal)${l}`);
     await ws.git(wt, ["add", "-A", "--", ".", ...HUB_FILES, ...links]);
     if ((await ws.git(wt, ["diff", "--cached", "--quiet"])).code !== 0) await ws.git(wt, ["commit", "--no-verify", "-m", "Work in progress (before merging a helper)", "--author", `${o.parentAgentId} <${o.parentAgentId}@agent-room.local>`]);
     const before = (await ws.git(wt, ["rev-parse", "HEAD"])).stdout.trim();

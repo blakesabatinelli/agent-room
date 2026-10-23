@@ -11,10 +11,21 @@ const real = (p: string) => realpathSync.native(p);
 
 /** Characters that make a name look like something else in an approval card: format (Cf: bidi overrides, zero-width), line and paragraph separators. */
 const DECEPTIVE_NAME = /[\p{Cf}\p{Zl}\p{Zp}]/u;
+/**
+ * 1.1 round 2 (L3). More ways a name can read as a different one on the owner's card, none of which has a use in a file an agent writes:
+ *  - U+034F (combining grapheme joiner), U+FE00 to U+FE0F (variation selectors), U+180B to U+180D (Mongolian free variation selectors): invisible nonspacing marks;
+ *  - U+00A0 (no-break space) and U+3000 (ideographic space): a space that is not the space it looks like;
+ *  - a nonspacing mark (Mn) after a character that is not a letter (it floats over a dot or a slash), or after a Latin letter or digit at the end of a
+ *    name or just before the dot of an extension (`report.pdf` + a mark reads as `report.pdf`).
+ * Whatever else NFKC would rewrite (full-width letters, ligatures, other exotic spaces) is refused by the last check in assertPlainPath.
+ */
+const LOOKALIKE_NAME = /[\u034F\uFE00-\uFE0F\u180B-\u180D\u00A0\u3000]|(?<![\p{L}\p{Mn}])\p{Mn}|[A-Za-z0-9]\p{Mn}+(?=$|[./\\])/u;
 
 /** Throws PathDenied for a path whose spelling could mislead the owner reading it. */
 export function assertPlainPath(relPath: string): void {
-  if (DECEPTIVE_NAME.test(relPath)) throw new PathDenied("invisible or direction-changing characters in a path are not allowed");
+  if (DECEPTIVE_NAME.test(relPath) || LOOKALIKE_NAME.test(relPath) || relPath.normalize("NFKC") !== relPath) {
+    throw new PathDenied("invisible, look-alike or direction-changing characters in a path are not allowed");
+  }
 }
 
 /** True when p is root or lies below it. Both must already be absolute and normalised. */
@@ -91,6 +102,8 @@ export function inspectGrantRoot(input: string, opts: GrantRootOptions = {}): { 
   try { root = real(input); } catch { throw hard("that folder does not exist"); }
   if (!statSync(root).isDirectory()) throw hard("that path is not a folder");
   if (root === sep || dirname(root) === root) throw hard("the filesystem root cannot be granted");
+  // 1.1 round 2 (L1): a version-control folder is never reachable through the broker (touchesGit), so a grant that is one, or lies inside one, is a mistake or an attack.
+  if (touchesGit(root)) throw hard("a .git folder (or a folder inside one) cannot be granted");
 
   const home = realIfExists(opts.home ?? homedir());
   if (home && isInside(root, home)) throw hard("the home folder (or a folder containing it) cannot be granted; pick a subfolder");

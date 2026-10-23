@@ -68,7 +68,10 @@ export class ClaudeCodeAdapter implements Adapter {
     if (req.effort && !req.jsonOnly) args.push("--effort", req.effort);
     if (req.systemPrompt) args.push("--append-system-prompt", req.systemPrompt);
     if (req.jsonOnly) {
-      args.push("--disallowedTools", "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch", "--max-turns", "1");
+      // 1.1 round 2 (M1): no settings file of any kind is read (an agent could have planted `.claude/settings.json` hooks in a folder the next
+      // call runs in), no MCP server of the owner's own config is loaded, and no tool is allowed. The run also gets a fresh empty folder (adapters/scratch.ts).
+      args.push("--setting-sources", "", "--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: {} }));
+      args.push("--disallowedTools", "Bash,Read,Write,Edit,Glob,Grep,LS,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task", "--max-turns", "1");
       return args;
     }
     if (req.mcp) {

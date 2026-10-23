@@ -6,7 +6,7 @@ import { TOOLS } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import { inbox } from "../adapters/mcp.js";
 import type { McpGrant, Orchestrator } from "../orchestrator/orchestrator.js";
-import { checkFileToolRequest } from "../files/confine.js";
+import { checkFileToolRequest, isFileTool } from "../files/confine.js";
 import { localModelsFor, mcpReportShape, normalizeMcpReport } from "../discovery/usage.js"; // 1.3
 import { annotate } from "../memory/model.js"; // 2.5
 import { RoomRules } from "../rooms/rules.js"; // 4.3
@@ -14,6 +14,8 @@ import { overlayDraft } from "../twokey/draft.js"; // 4.1
 import { toolIdOf } from "../twokey/classify.js"; // 4.1: a tool name stands for a hub tool only by whole words (pipedrive is not drive)
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
+/** 1.1 round 2 (M3): the file tools already named in the audit log for a run (a read is listed once per tool per run). */
+const fileToolSeen = new WeakMap<object, Set<string>>();
 
 /** Build one MCP server instance bound to a caller's grant (stateless per request). */
 export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant) {
@@ -178,6 +180,17 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
       if (!c.allow) {
         store.audit(grant.agentId, "file.denied", `${tool_name} outside the task folder: ${c.reason}`.slice(0, 300));
         return text(JSON.stringify({ behavior: "deny", message: `Stay inside your task folder: ${c.reason}.` }));
+      }
+      // 1.1 round 2 (M3): Claude Code is given no path-scoped allow rule for file tools any more (it decides those on the path as spelled, so a link
+      // inside the worktree that points at ~ would pass), so every file tool call lands here. A path that really is inside the task folder (links
+      // resolved by the check above) gets what the rule used to give: allowed at once, no card for the owner, unless the room says to ask about files.
+      // Audited at a low level so the log stays readable: each write, and a read once per tool per run.
+      if (isFileTool(tool_name) && a?.tools.filesystem === true && !orch.rooms.narrow(a, grant.roomId).ask.includes("filesystem")) {
+        const seen = fileToolSeen.get(grant) ?? new Set<string>();
+        fileToolSeen.set(grant, seen);
+        const writes = /^(Write|Edit|MultiEdit|NotebookEdit)$/.test(tool_name);
+        if (writes || !seen.has(tool_name)) { seen.add(tool_name); store.audit(grant.agentId, "file.tool.allowed", `${tool_name} inside the task folder${writes ? "" : " (first of this run; the rest are not listed)"}`); }
+        return text(JSON.stringify({ behavior: "allow", updatedInput: input ?? {} }));
       }
     }
     const res = await orch.requestApproval(grant, toolId, tool_name, JSON.stringify(input ?? {}).slice(0, 4000), input);

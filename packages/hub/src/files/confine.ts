@@ -14,9 +14,11 @@ import { PathDenied, isInside, resolveInGrant } from "./paths.js";
  *    directories in every permission mode), an empty `permissions.additionalDirectories`, `permissions.deny` rules for credential
  *    folders and the hub's own data, and turns the Bash sandbox on (`sandbox.enabled`, `failIfUnavailable`, no unsandboxed retry),
  *    which is OS-level and also covers child processes that the Read and Edit rules cannot see.
- *  - `--allowedTools` names Read and Edit for the worktree only (`Read(//<abs path>/**)`, `Edit(//<abs path>/**)`: `//` is an absolute
- *    path in permission rules, and Edit rules cover the Write tool). A bare `Read`, `Write`, `Glob` or `Grep` would allow any path.
- *  - Anything else that would ask goes to the hub's approval_prompt tool, which refuses file tools aimed outside the worktree (checkFileToolRequest).
+ *  - `--allowedTools` names NO file tool (1.1 round 2, M3). A path-scoped rule such as `Read(//<abs path>/**)` is decided by Claude Code on the
+ *    path as spelled, before the hub looks at it, and a symlink `<worktree>/h -> ~` makes `<worktree>/h/.ssh/id_rsa` match it. So every file tool
+ *    call (Read, Write, Edit, MultiEdit, NotebookEdit, Glob, Grep, LS) goes to the hub's approval_prompt tool, where checkFileToolRequest resolves
+ *    links, auto-allows a path that really is inside the worktree (no card for the owner, one low-level audit line) and refuses everything else.
+ *  - Anything else that would ask goes to the hub's approval_prompt tool too.
  *  - The Bash sandbox confines WRITES to the working directory but, by default, lets commands READ the whole machine
  *    (https://code.claude.com/docs/en/sandboxing, "Default read behavior"). So reads are an allow-list, which that page documents:
  *    `sandbox.filesystem.denyRead` blocks a region and `sandbox.filesystem.allowRead` re-opens narrower paths inside it ("the rule with
@@ -29,13 +31,31 @@ import { PathDenied, isInside, resolveInGrant } from "./paths.js";
  */
 
 /** Per-user folders that hold credentials, settings and app data. Denied for Read and Edit (a Read deny also blocks Write and Edit). */
-export const SECRET_HOME_DIRS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config", ".claude", ".codex", ".gemini", "Library"];
-export const SECRET_HOME_FILES = [".npmrc", ".netrc", ".git-credentials", ".claude.json", ".zsh_history", ".bash_history", ".pypirc", ".yarnrc", ".cargo/credentials", ".cargo/credentials.toml", ".m2/settings.xml", ".gradle/gradle.properties"];
+export const SECRET_HOME_DIRS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config", ".claude", ".codex", ".gemini", "Library", ".local/share/keyrings", ".local/share/fish"];
+export const SECRET_HOME_FILES = [
+  ".npmrc", ".netrc", ".git-credentials", ".claude.json", ".pypirc", ".yarnrc", ".cargo/credentials", ".cargo/credentials.toml", ".m2/settings.xml", ".gradle/gradle.properties",
+  // 1.1 round 2 (M4): git-credential-store's other home, Hugging Face's token, and what people typed into shells and REPLs (commands often carry tokens)
+  ".config/git/credentials", ".cache/huggingface/token", ".huggingface/token",
+  ".zsh_history", ".bash_history", ".zhistory", ".sh_history", ".history", ".python_history", ".node_repl_history", ".psql_history", ".mysql_history", ".sqlite_history", ".rediscli_history", ".lesshst",
+];
 /**
- * Folders under home that toolchains read (version managers, package caches, global git settings). Re-opened inside the denied home folder
- * when they exist. The owner can add more with `agent.settings.sandboxReadAllow` (absolute or ~/ paths).
+ * Folders and files under home that toolchains read (version managers, package caches, global git settings). Re-opened inside the denied home
+ * folder when they exist. The owner can add more with `agent.settings.sandboxReadAllow` (absolute or ~/ paths).
+ *
+ * 1.1 round 2 (M4): no whole shared folder is re-opened any more. `~/.config/git` is three files (git-credential-store keeps
+ * `~/.config/git/credentials` next to them); `~/.cache`, `~/.local` and `~/.npm` are only the subfolders a toolchain needs to run:
+ *   ~/.cache/{node,pnpm,yarn,pip,uv,go-build,typescript}        package and build caches (not ~/.cache/huggingface, which holds a token)
+ *   ~/.local/{bin,lib}, ~/.local/share/{pnpm,uv,mise,fnm,nvm}   user-installed tools and their runtimes (not ~/.local/share/keyrings)
+ *   ~/.npm/{_cacache,_npx}                                      npm's package cache (not ~/.npm/_logs)
+ * Anything else a tool needs is added by the owner in `agent.settings.sandboxReadAllow`.
  */
-export const TOOLCHAIN_HOME_DIRS = [".nvm", ".volta", ".fnm", ".bun", ".deno", ".cargo", ".rustup", ".pyenv", ".rbenv", ".asdf", ".sdkman", ".local", ".npm", ".pnpm-store", ".cache", ".gradle", ".m2", "go", ".gitconfig", ".config/git"];
+export const TOOLCHAIN_HOME_DIRS = [
+  ".nvm", ".volta", ".fnm", ".bun", ".deno", ".cargo", ".rustup", ".pyenv", ".rbenv", ".asdf", ".sdkman", ".pnpm-store", ".gradle", ".m2", "go", ".gitconfig",
+  ".config/git/config", ".config/git/ignore", ".config/git/attributes",
+  ".cache/node", ".cache/pnpm", ".cache/yarn", ".cache/pip", ".cache/uv", ".cache/go-build", ".cache/typescript",
+  ".local/bin", ".local/lib", ".local/share/pnpm", ".local/share/uv", ".local/share/mise", ".local/share/fnm", ".local/share/nvm",
+  ".npm/_cacache", ".npm/_npx",
+];
 
 export interface ConfineOptions {
   /** The worktree (the agent's cwd). */
@@ -120,20 +140,20 @@ export function claudeConfinementSettings(o: ConfineOptions) {
   };
 }
 
-/** File tools the worktree rules govern. Bare names are replaced by path-scoped rules; other tools keep their bare names. */
+/** File tools the worktree rules govern. */
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "LS"]);
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+/** True for a Claude Code tool that reads or writes a path on its own. */
+export const isFileTool = (name: string) => READ_TOOLS.has(name) || EDIT_TOOLS.has(name);
 
-/** Replace bare file-tool names in an allow list with rules for the worktree only. */
-export function scopeAllowedTools(allowed: string[], cwd: string): string[] {
-  const wt = abs(real(cwd));
-  const out: string[] = [];
-  for (const t of allowed) {
-    if (READ_TOOLS.has(t)) out.push(`Read(${wt}/**)`);
-    else if (EDIT_TOOLS.has(t)) out.push(`Edit(${wt}/**)`);
-    else out.push(t);
-  }
-  return [...new Set(out)];
+/**
+ * 1.1 round 2 (M3): take every file tool, bare or path-scoped, out of an allow list. A path-scoped allow rule is matched by Claude Code on the path
+ * as spelled, before the hub's symlink-aware check runs, so a link inside the worktree that points at ~ would pass it. With no rule, each file tool
+ * call reaches approval_prompt (mcp/server.ts), where checkFileToolRequest resolves links and the hub auto-allows paths that are really inside
+ * the worktree. Other tools keep their names. (`cwd` is no longer needed; the parameter stays so callers do not change.)
+ */
+export function scopeAllowedTools(allowed: string[], _cwd?: string): string[] {
+  return [...new Set(allowed.filter((t) => !isFileTool(t.replace(/\(.*$/, ""))))];
 }
 
 /** Extra argv for a confined Claude Code run. Spread after the permission args. */

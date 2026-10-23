@@ -7,16 +7,17 @@ import { OpenAIApiAdapter } from "./openaiApi.js";
 import { MockAdapter } from "./mock.js";
 import { ExternalMcpAdapter } from "./mcp.js";
 import { AcpAdapter } from "./acp.js"; // 4.6
+import { withJsonScratch } from "./scratch.js"; // 1.1 round 2
 
 export * from "./types.js";
 export { inbox, type Assignment } from "./mcp.js";
 
 export const adapters: Record<AdapterKind, Adapter> = {
-  "claude-code": new ClaudeCodeAdapter(),
-  codex: new CodexAdapter(),
+  "claude-code": withJsonScratch(new ClaudeCodeAdapter()), // 1.1 round 2 (M1): planner, judge and draft calls run in a fresh empty folder
+  codex: withJsonScratch(new CodexAdapter()),
   mcp: new ExternalMcpAdapter(),
-  command: new CommandAdapter(),
+  command: withJsonScratch(new CommandAdapter()),
   "openai-api": new OpenAIApiAdapter(),
   mock: new MockAdapter(),
-  acp: new AcpAdapter(), // 4.6
+  acp: withJsonScratch(new AcpAdapter()), // 4.6
 };

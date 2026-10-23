@@ -222,7 +222,7 @@ test("AC2: an agent that swaps its work folder's .git for a repository of its ow
 
 // ============================================================ confinement
 
-test("AC2: Claude Code argv confines the run to its worktree: cwd, one --add-dir, no settings files, deny rules, scoped allow rules, sandbox on", () => {
+test("AC2: Claude Code argv confines the run to its worktree: cwd, one --add-dir, no settings files, deny rules, no file-tool allow rules, sandbox on", () => {
   const e = setup();
   const wt = dir("task-"), data = dir("data-");
   const agent = e.store.getAgent("claude")!;
@@ -246,12 +246,12 @@ test("AC2: Claude Code argv confines the run to its worktree: cwd, one --add-dir
   assert.ok(!fsr.allowRead.some((a) => a === data || a === home), "nothing wide is re-opened");
   assert.ok(fsr.denyRead.includes(`${home}/.ssh`) && fsr.denyRead.includes(`${home}/.npmrc`));
 
-  // allow rules name the worktree; a bare Read/Write/Edit/Glob/Grep would allow every path
+  // 1.1 round 2 (M3): no file tool is pre-allowed, bare or path-scoped (Claude Code decides a scoped rule on the spelled path, before a symlink is looked at): every file call goes to approval_prompt
   const i = at("--allowedTools")[0];
   const allowed: string[] = [];
   for (let k = i + 1; k < args.length && !args[k].startsWith("--"); k++) allowed.push(args[k]);
   for (const bare of ["Read", "Write", "Edit", "Glob", "Grep", "LS", "MultiEdit"]) assert.ok(!allowed.includes(bare), `bare ${bare}`);
-  assert.ok(allowed.includes(`Read(//${wt.replace(/^\//, "")}/**)`) && allowed.includes(`Edit(//${wt.replace(/^\//, "")}/**)`), allowed.join(" "));
+  assert.ok(!allowed.some((a) => /^(Read|Edit|Write|Glob|Grep|LS|MultiEdit|NotebookEdit)(\(|$)/.test(a)), `no file tool rule: ${allowed.join(" ")}`);
   assert.ok(allowed.includes("mcp__agent-room"));
   assert.ok(!args.includes("--dangerously-skip-permissions") && !args.includes("--permission-mode"));
 
@@ -315,7 +315,7 @@ test("ungrantable folders are refused; protected ones are allowed only with forc
   // the system folders that exist on this machine (a Mac has /System, /Library, /Applications; Linux has /etc, /usr, /bin...)
   const systemDirs = ["/System", "/Library", "/Applications", "/private", "/etc", "/usr", "/usr/bin", "/bin", "/sbin", "/var", "/lib", "/proc", "/sys"].filter((p) => existsSync(p));
   assert.ok(systemDirs.length >= 3);
-  const protectedPaths = [join(home, ".ssh"), join(home, ".config"), join(home, ".aws"), join(home, ".hidden-tool"), join(home, "Library"), join(home, "Library", "Application Support"), join(control, ".git"), ...systemDirs];
+  const protectedPaths = [join(home, ".ssh"), join(home, ".config"), join(home, ".aws"), join(home, ".hidden-tool"), join(home, "Library"), join(home, "Library", "Application Support"), ...systemDirs];
   for (const p of protectedPaths) {
     const c = broker.checkFolder(p);
     assert.ok(c.ok && c.protected && c.because, `${p} is protected`);
@@ -325,7 +325,8 @@ test("ungrantable folders are refused; protected ones are allowed only with forc
   assert.equal(broker.listGrants().length, 0);
 
   // never allowed, even with force: /, the home folder and the folders that contain it, and things that aren't folders
-  for (const p of ["/", home, join(home, ".."), "relative", join(home, "missing"), join(home, "Documents", "work", "nope")]) {
+  // (1.1 round 2, L1: a .git folder itself, such as the control folder's version history, is never grantable either)
+  for (const p of ["/", home, join(home, ".."), "relative", join(home, "missing"), join(home, "Documents", "work", "nope"), join(control, ".git")]) {
     assert.throws(() => broker.addGrant({ path: p, agentId: "claude", read: true, write: false, force: true, reason: "I really want this one" }), (x: unknown) => x instanceof GrantRefused && x.canForce === false, p);
   }
   // force without a real reason is refused
