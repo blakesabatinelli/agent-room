@@ -367,6 +367,65 @@ test("writes to symlinks, into .git, of binary or oversized content, and no-op w
   assert.equal(readFileSync(join(outside, "secret.txt"), "utf8"), "TOP SECRET");
 });
 
+test("H1: a change too big to diff is DENIED, never approved on a one-line summary", () => {
+  const { files, root, store } = ctx();
+  const big = (tag: string) => Array.from({ length: 5001 }, (_, i) => `${tag}${i}`).join("\n") + "\n";
+  // new side over the limit
+  const r1 = files.proposeWrite("claude", undefined, "new-big.txt", big("a"));
+  assert.equal(r1.ok, false);
+  if (!r1.ok) assert.match(r1.reason, /smaller|split/i);
+  // old side over the limit
+  writeFileSync(join(root, "old-big.txt"), big("a"));
+  const r2 = files.proposeWrite("claude", undefined, "old-big.txt", "tiny\n");
+  assert.equal(r2.ok, false);
+  if (!r2.ok) assert.match(r2.reason, /smaller|split/i);
+  assert.equal(store.listApprovals("pending").length, 0, "the owner is never asked to approve a summary");
+  assert.equal(files.proposals().length, 0);
+  assert.equal(readFileSync(join(root, "old-big.txt"), "utf8"), big("a"));
+  // just under the limit is still reviewable
+  const ok = files.proposeWrite("claude", undefined, "edge.txt", Array.from({ length: 5000 }, (_, i) => `l${i}`).join("\n") + "\n");
+  assert.equal(ok.ok, true);
+  if (ok.ok) assert.ok(!ok.proposal.diff.includes("too large to diff"));
+});
+
+test("M1: a symlinked folder that points at .git cannot be used to write into .git", () => {
+  const { files, root, store } = ctx();
+  mkdirSync(join(root, ".git", "hooks"), { recursive: true });
+  symlinkSync(join(root, ".git"), join(root, "gitdir"));
+  for (const p of ["gitdir/hooks/pre-commit", "gitdir/config", "gitdir"]) assert.equal(files.proposeWrite("claude", undefined, p, "#!/bin/sh\nevil\n").ok, false, p);
+  assert.equal(store.listApprovals("pending").length, 0);
+  assert.equal(existsSync(join(root, ".git", "hooks", "pre-commit")), false);
+});
+
+test("M1: the owner sees the resolved path, not the symlinked spelling the agent used", () => {
+  const { files, root, store } = ctx();
+  mkdirSync(join(root, "real"));
+  symlinkSync(join(root, "real"), join(root, "docs"));
+  const r = files.proposeWrite("claude", undefined, "docs/a.txt", "hello\n");
+  assert.ok(r.ok); if (!r.ok) return;
+  assert.equal(r.proposal.relPath, "real/a.txt");
+  assert.ok(r.proposal.diff.includes("+++ b/real/a.txt"));
+  const apr = pendingApproval(store);
+  assert.equal(apr.action, "write real/a.txt");
+  assert.ok(apr.detail.includes("real/a.txt"));
+});
+
+test("L1: names with invisible or direction-changing characters, or a trailing slash, are refused", () => {
+  const { files, root } = ctx();
+  const bad = ["report\u202Etxt.exe", "zero\u200Bwidth.txt", "line\u2028sep.txt", "para\u2029sep.txt", "bom\uFEFF.txt", "dir/sub/", "newdir/"];
+  for (const p of bad) assert.equal(files.proposeWrite("claude", undefined, p, "x\n").ok, false, JSON.stringify(p));
+  assert.equal(files.proposeWrite("claude", undefined, "caf\u00e9.txt", "x\n").ok, true, "ordinary non-ASCII letters are fine");
+  assert.deepEqual(readdirSync(root), []);
+});
+
+test("I3: audited paths are not cut short below the 1,024 character path limit", () => {
+  const { files, store } = ctx();
+  const long = Array.from({ length: 10 }, (_, i) => String(i).repeat(99)).join("/"); // 999 chars
+  assert.equal(files.read("claude", undefined, long).ok, false);
+  const e = store.listAudit(50).find((a) => a.action === "file.denied")!;
+  assert.ok(e.detail.includes(JSON.stringify(long)), "the whole path is in the audit entry");
+});
+
 test("a write-only grant never shows the agent the existing file through the diff", async () => {
   const { files, root, store, approvals } = ctx({ read: false, write: true });
   writeFileSync(join(root, "a.txt"), "private old content\n");
@@ -497,7 +556,7 @@ test("MCP end to end: an agent lists, reads, proposes a write, the owner approve
   assert.equal(readFileSync(outsideFile, "utf8"), "TOP SECRET");
 
   const log = actions(store);
-  for (const want of ["file.list", "file.read", "file.denied", "file.write.proposed", "file.write.applied", "grant.added"]) assert.ok(log.includes(want), want);
+  for (const want of ["file.list", "file.read", "file.denied", "file.write.proposed", "file.write.applied", "grant.added", "file.grants.listed", "file.write.status"]) assert.ok(log.includes(want), want);
   assert.equal(((await (await fetch(`${base}/write-proposals`, { headers: auth })).json()) as { status: string }[])[0].status, "applied");
   await cloud.close(); await other.close();
   await app.close();

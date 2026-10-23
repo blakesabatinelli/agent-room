@@ -3,13 +3,13 @@ import {
   closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync,
   readdirSync, realpathSync, renameSync, unlinkSync, writeSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import type { Approval, FolderGrant, WriteProposal } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import type { Approvals } from "../orchestrator/approvals.js";
 import { id, now } from "../util.js";
-import { unifiedDiff } from "./diff.js";
-import { PathDenied, isInside, resolveInGrant, validateGrantRoot } from "./paths.js";
+import { tooLargeToDiff, unifiedDiff } from "./diff.js";
+import { MAX_REL_PATH, PathDenied, assertPlainPath, isInside, resolveInGrant, validateGrantRoot } from "./paths.js";
 
 const GRANTS_KEY = "folder_grants";
 const PROPOSALS_KEY = "write_proposals";
@@ -32,7 +32,8 @@ export type ReadResult =
 export type ProposeResult = { ok: true; proposal: WriteProposal } | Denied;
 
 const sha256 = (b: Buffer) => createHash("sha256").update(b).digest("hex");
-const short = (s: string, n = 300) => (s.length > n ? s.slice(0, n) + "..." : s);
+// Long enough for any path an agent may send (MAX_REL_PATH), so audited paths are never cut.
+const short = (s: string, n = MAX_REL_PATH) => (s.length > n ? s.slice(0, n) + "..." : s);
 const q = (s: string) => JSON.stringify(short(s));
 
 /**
@@ -125,11 +126,16 @@ export class FileBroker {
       if (buf.length > MAX_WRITE_BYTES) return this.deny(agentId, "write", relPath, `content larger than ${MAX_WRITE_BYTES} bytes`);
       // eslint-disable-next-line no-control-regex
       if (/[\u0000-\u001f\u007f]/.test(relPath)) return this.deny(agentId, "write", relPath, "control characters in a path are not allowed");
+      if (relPath.endsWith("/") || relPath.endsWith("\\")) return this.deny(agentId, "write", relPath, "a file path cannot end with a slash");
+      assertPlainPath(relPath);
       if (content.includes("\0")) return this.deny(agentId, "write", relPath, "binary content (NUL byte) cannot be written");
       if (this.pending().length >= MAX_PENDING) return this.deny(agentId, "write", relPath, "too many writes are already waiting for the owner");
       const target = resolveInGrant(grant.path, relPath);
       const guard = this.writeGuard(grant.path, relPath, target);
       if (guard) return this.deny(agentId, "write", relPath, guard);
+      // What the owner sees and approves is the real location, not the spelling (symlinked folders) the agent chose.
+      const shown = relative(realpathSync.native(grant.path), target);
+      assertPlainPath(shown);
 
       let oldText: string | null = null, baseSha: string | null = null;
       const cur = this.readFile(target, MAX_EXISTING_BYTES, true);
@@ -144,25 +150,28 @@ export class FileBroker {
       if (baseSha === newSha) return this.deny(agentId, "write", relPath, "content is identical to the existing file; nothing to write");
 
       const pid = id("wp");
-      const diff = unifiedDiff(relPath, oldText, content);
-      // The owner must be able to read everything that will be written, so oversized changes are refused rather than cut.
+      // The owner must be able to read everything that will be written. unifiedDiff only returns a one-line
+      // summary past MAX_DIFF_LINES, and a summary is not a diff: refuse, never let it stand in for one.
+      if (tooLargeToDiff(oldText, content)) return this.deny(agentId, "write", relPath, "the change is too large for the owner to review as a diff (over 5,000 lines on one side); propose smaller edits or split the file");
+      const diff = unifiedDiff(shown, oldText, content);
+      // Oversized diffs are refused rather than cut, for the same reason.
       if (diff.length > DIFF_STORE_MAX) return this.deny(agentId, "write", relPath, `the change is too large for the owner to review (diff over ${DIFF_STORE_MAX} characters); propose smaller edits`);
       const p: WriteProposal = {
-        id: pid, grantId: grant.id, agentId, roomId, relPath, baseSha256: baseSha, newSha256: newSha,
+        id: pid, grantId: grant.id, agentId, roomId, relPath: shown, baseSha256: baseSha, newSha256: newSha,
         diff, bytes: buf.length, status: "pending", createdAt: now(),
       };
       this.pendingContent.set(pid, buf);
       this.saveProposal(p);
-      this.store.audit(agentId, "file.write.proposed", `${pid} ${grant.id} ${q(relPath)} ${baseSha ? "edit" : "new file"} ${buf.length} bytes sha256=${newSha.slice(0, 12)}`);
+      this.store.audit(agentId, "file.write.proposed", `${pid} ${grant.id} ${q(shown)} ${baseSha ? "edit" : "new file"} ${buf.length} bytes sha256=${newSha.slice(0, 12)}`);
 
       // Straight to the owner: never through requestApproval, so "run without asking" cannot skip this.
-      const header = `Write proposal ${pid}: ${baseSha ? "edit" : "new file"} ${relPath} in ${grant.label ?? basename(grant.path)} (${buf.length} bytes)\n`;
+      const header = `Write proposal ${pid}: ${baseSha ? "edit" : "new file"} ${shown} in ${grant.label ?? basename(grant.path)} (${buf.length} bytes)\n${shown !== relPath ? `(the agent asked for ${q(relPath)}, a different spelling of the same file)\n` : ""}`;
       let detail = header + diff;
       if (detail.length > APPROVAL_DETAIL_MAX) {
         const warn = `!! DIFF TRUNCATED: showing the first part of ${detail.length} characters. Approving writes the WHOLE change. Full diff: GET /write-proposals (${pid}).\n`;
         detail = warn + detail.slice(0, APPROVAL_DETAIL_MAX - warn.length - 20) + "\n... (truncated)";
       }
-      const decision = this.approvals.request({ agentId, roomId, tool: "filesystem", action: `write ${relPath}`, detail });
+      const decision = this.approvals.request({ agentId, roomId, tool: "filesystem", action: `write ${shown}`, detail });
       const apr = this.store.listApprovals("pending").filter((a) => a.agentId === agentId && a.tool === "filesystem" && a.detail.includes(`Write proposal ${pid}:`))
         .sort((a, b) => b.createdAt - a.createdAt)[0];
       if (apr) { p.approvalId = apr.id; this.saveProposal(p); }
@@ -250,13 +259,17 @@ export class FileBroker {
     } catch (e) { fail(`write failed: ${this.why(e)}`); }
   }
 
-  /** Reasons a target may not be written, beyond staying inside the folder. null = fine. */
+  /**
+   * Reasons a target may not be written, beyond staying inside the folder. null = fine.
+   * `target` is the resolved real path, so the .git check runs on where the write would really land:
+   * a symlinked folder that points at .git is caught as well as a plain `.git/...` spelling.
+   */
   private writeGuard(grantRoot: string, relPath: string, target: string): string | null {
     const root = realpathSync.native(grantRoot);
     if (target === root) return "cannot write the folder itself";
-    const lexical = resolve(root, relPath);
-    if (lexical.slice(root.length).split(/[\\/]/).some((part) => part.toLowerCase() === ".git")) return "writes inside .git are not allowed";
-    try { if (lstatSync(lexical).isSymbolicLink()) return "target is a symlink; writes to symlinks are not allowed"; } catch { /* does not exist yet */ }
+    const inGit = (rel: string) => rel.split(/[\\/]/).some((part) => part.toLowerCase() === ".git");
+    if (inGit(relative(root, target)) || inGit(relative(root, resolve(root, relPath)))) return "writes inside .git are not allowed";
+    try { if (lstatSync(resolve(root, relPath)).isSymbolicLink()) return "target is a symlink; writes to symlinks are not allowed"; } catch { /* does not exist yet */ }
     return null;
   }
 

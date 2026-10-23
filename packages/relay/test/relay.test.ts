@@ -56,7 +56,7 @@ test("hub with the wrong secret, or an unknown id, is refused at the door", asyn
   await t.waitFor("disconnected");
   assert.match(t.states.find((s) => s.state === "disconnected")!.detail ?? "", /401/);
   assert.equal(t.states.some((s) => s.state === "connected"), false);
-  assert.equal((await fetch(`http://127.0.0.1:${relay.port}/h/${HUB}/health`)).status, 503);
+  assert.equal((await fetch(`http://127.0.0.1:${relay.port}/h/${HUB}/mcp`)).status, 503);
   t.tunnel.close();
   await relay.close();
 });
@@ -92,10 +92,10 @@ test("only allowlisted paths cross the relay", async () => {
     await r.arrayBuffer();
   }
   assert.deepEqual(hub.seen, [], "nothing non-allowlisted reached the hub");
-  const ok = await fetch(`${base}/health?x=1`);
+  const ok = await fetch(`${base}/mcp?x=1`);
   assert.equal(ok.status, 200);
   assert.equal(await ok.text(), "secret stuff");
-  assert.deepEqual(hub.seen, ["/health?x=1"]);
+  assert.deepEqual(hub.seen, ["/mcp?x=1"]);
   t.tunnel.close();
   await relay.close();
   await hub.close();
@@ -103,7 +103,7 @@ test("only allowlisted paths cross the relay", async () => {
 
 test("the tunnel enforces its own allowlist even if the relay forwards something else", async () => {
   const hub = await localHub((_req, res) => { res.end("nope"); });
-  const relay = await startRelay({ port: 0, hubSecrets, host: "127.0.0.1", allowPaths: ["/mcp", "/health", "/agents"] });
+  const relay = await startRelay({ port: 0, hubSecrets, host: "127.0.0.1", allowPaths: ["/mcp", "/agents"] });
   const t = tracked({ relayUrl: relayUrl(relay.port), hubId: HUB, secret: SECRET, localBase: hub.base });
   await t.waitFor("connected");
   const r = await fetch(`http://127.0.0.1:${relay.port}/h/${HUB}/agents`);
@@ -201,13 +201,13 @@ test("hub reconnects by itself after the relay restarts on the same port", async
   const port = relay1.port;
   const t = tracked({ relayUrl: relayUrl(port), hubId: HUB, secret: SECRET, localBase: hub.base });
   await t.waitFor("connected");
-  assert.equal(await (await fetch(`http://127.0.0.1:${port}/h/${HUB}/health`)).text(), "still here");
+  assert.equal(await (await fetch(`http://127.0.0.1:${port}/h/${HUB}/mcp`)).text(), "still here");
 
   await relay1.close();
   await t.waitFor("disconnected");
   const relay2 = await startRelay({ port, hubSecrets, host: "127.0.0.1" });
   await t.waitFor("connected", 2);
-  assert.equal(await (await fetch(`http://127.0.0.1:${port}/h/${HUB}/health`)).text(), "still here");
+  assert.equal(await (await fetch(`http://127.0.0.1:${port}/h/${HUB}/mcp`)).text(), "still here");
   t.tunnel.close();
   await relay2.close();
   await hub.close();
@@ -217,7 +217,7 @@ test("a newer connection for the same hub id replaces the old one", async () => 
   const a = await localHub((_req, res) => { res.end("A"); });
   const b = await localHub((_req, res) => { res.end("B"); });
   const relay = await startRelay({ port: 0, hubSecrets, host: "127.0.0.1" });
-  const url = `http://127.0.0.1:${relay.port}/h/${HUB}/health`;
+  const url = `http://127.0.0.1:${relay.port}/h/${HUB}/mcp`;
   const ta = tracked({ relayUrl: relayUrl(relay.port), hubId: HUB, secret: SECRET, localBase: a.base, minBackoffMs: 60_000, maxBackoffMs: 60_000 });
   await ta.waitFor("connected");
   assert.equal(await (await fetch(url)).text(), "A");
@@ -228,4 +228,54 @@ test("a newer connection for the same hub id replaces the old one", async () => 
   ta.tunnel.close(); tb.tunnel.close();
   await relay.close();
   await a.close(); await b.close();
+});
+
+test("L3: /health is not on the relay's default client-facing allowlist", async () => {
+  const hub = await localHub((_req, res) => { res.end("up"); });
+  const relay = await startRelay({ port: 0, hubSecrets, host: "127.0.0.1" });
+  const t = tracked({ relayUrl: relayUrl(relay.port), hubId: HUB, secret: SECRET, localBase: hub.base });
+  await t.waitFor("connected");
+  const r = await fetch(`http://127.0.0.1:${relay.port}/h/${HUB}/health`);
+  assert.equal(r.status, 404);
+  await r.arrayBuffer();
+  assert.deepEqual(hub.seen, []);
+  assert.equal((await fetch(`http://127.0.0.1:${relay.port}/h/${HUB}/mcp`)).status, 200, "/mcp still crosses");
+  t.tunnel.close();
+  await relay.close();
+  await hub.close();
+});
+
+test("M3: a hub frame with invalid header names or values cannot crash the relay", async () => {
+  const relay = await startRelay({ port: 0, hubSecrets, host: "127.0.0.1" });
+  const ws = new WebSocket(relayUrl(relay.port), { headers: { "x-hub-id": HUB, authorization: `Bearer ${SECRET}` } });
+  await new Promise<void>((r, j) => { ws.once("open", () => r()); ws.once("error", j); });
+  const rogueHeaders: Record<string, unknown>[] = [
+    { "bad header": "x", "x-good": "yes" },
+    { "x-split": "a\r\nSet-Cookie: pwned=1", "x-good": "yes" },
+    { "x-num": 5, "x-obj": { a: 1 }, "x-arr": ["fine", "bad\nvalue"], "x-good": "yes" },
+    { "": "empty-name", "x-good": "yes" },
+  ];
+  let n = 0;
+  ws.on("message", (raw) => {
+    const f = JSON.parse(raw.toString()) as { t: string; id: string };
+    if (f.t !== "req") return;
+    const headers = rogueHeaders[Math.min(n++, rogueHeaders.length - 1)];
+    ws.send(JSON.stringify({ t: "head", id: f.id, status: 200, headers }));
+    ws.send(JSON.stringify({ t: "data", id: f.id, chunk: Buffer.from("ok").toString("base64") }));
+    ws.send(JSON.stringify({ t: "end", id: f.id }));
+  });
+  const url = `http://127.0.0.1:${relay.port}/h/${HUB}/mcp`;
+  for (let i = 0; i < rogueHeaders.length + 1; i++) {
+    const r = await fetch(url);
+    assert.ok(r.status === 200 || r.status === 502, `request ${i}: status ${r.status}`);
+    if (r.status === 200) {
+      assert.equal(await r.text(), "ok");
+      assert.equal(r.headers.get("x-good"), "yes", "valid headers still pass");
+      assert.equal(r.headers.get("set-cookie"), null, "an injected header never reaches the client");
+      assert.equal(r.headers.get("x-split"), null);
+      assert.equal(r.headers.get("x-num"), null);
+    } else await r.arrayBuffer();
+  }
+  ws.close();
+  await relay.close();
 });

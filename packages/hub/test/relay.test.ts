@@ -5,6 +5,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { buildServer } from "../src/api/server.js";
 import { connectTunnel } from "../src/relay/tunnel.js";
 import { startRelay, sha256Hex } from "../../relay/src/relay.js";
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setup } from "./helpers.js";
 
 const HUB_ID = "blakes-mac";
@@ -73,7 +76,10 @@ test("the rest of the hub API is not reachable through the relay, even with a va
     assert.equal(r.status, 404, `${path} must be 404 at the relay`);
     assert.deepEqual(await r.json(), { error: "Not found." });
   }
-  assert.equal((await fetch(`${relayBase}/health`)).status, 200);
+  assert.equal((await fetch(`${hubBase}/health`)).status, 200, "control: the hub itself serves /health");
+  const h = await fetch(`${relayBase}/health`);
+  assert.equal(h.status, 404, "/health is not on the relay's default allowlist");
+  await h.arrayBuffer();
   await stop();
 });
 
@@ -97,5 +103,34 @@ test("latency: read_room direct vs through the relay (localhost, median of 20)",
   const relayed = await time(relayBase);
   console.log(`# read_room median of 20: direct ${direct.toFixed(2)} ms, via relay ${relayed.toFixed(2)} ms (+${(relayed - direct).toFixed(2)} ms)`);
   assert.ok(relayed < 1000, "relay round trip stays sane on localhost");
+  await stop();
+});
+
+test("I1: an agent that reaches the hub only through the relay reads a granted file and gets a write applied after the owner approves", async () => {
+  const { relayBase, mcpToken, client, store, approvals, orch, stop } = await bootRelayed();
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "relay-grant-")));
+  writeFileSync(join(root, "plan.md"), "# Plan\n- one\n");
+  const a = store.getAgent("claude")!; a.tools.filesystem = true; store.saveAgent(a);
+  orch.files.addGrant({ path: root, agentId: "claude", label: "Work", read: true, write: true });
+
+  const { c, connect } = client(relayBase, mcpToken);
+  await connect();
+  const call = async (name: string, args: Record<string, unknown> = {}) => textOf(await c.callTool({ name, arguments: args }));
+
+  assert.match(await call("list_granted_folders"), /\| Work \| read write/);
+  assert.equal(await call("read_file", { path: "plan.md" }), "# Plan\n- one\n");
+  const proposed = await call("propose_file_write", { path: "plan.md", content: "# Plan\n- one\n- two\n" });
+  const pid = /proposalId: (\S+)/.exec(proposed)![1];
+  assert.match(proposed, /status: pending/);
+  assert.equal(readFileSync(join(root, "plan.md"), "utf8"), "# Plan\n- one\n", "nothing written before the owner decides");
+  assert.match(await call("file_write_status", { proposalId: pid }), /status: pending/);
+
+  const pending = store.listApprovals("pending");
+  assert.equal(pending.length, 1);
+  approvals.decide(pending[0].id, "approved");
+  for (let i = 0; i < 300 && orch.files.proposal(pid)!.status === "pending"; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.match(await call("file_write_status", { proposalId: pid }), /status: applied/);
+  assert.equal(readFileSync(join(root, "plan.md"), "utf8"), "# Plan\n- one\n- two\n");
+  await c.close();
   await stop();
 });

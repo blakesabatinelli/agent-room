@@ -32,6 +32,10 @@ const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "p
 const HUB_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const WS_MAX_PAYLOAD = 32 * 1024 * 1024;
+// What node's http module accepts: an RFC 7230 token name, and a value free of control characters (CR, LF, NUL...).
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+const HEADER_VALUE_BAD = /[^\t\x20-\x7e\x80-\xff]/;
+const validValue = (v: unknown): v is string => typeof v === "string" && !HEADER_VALUE_BAD.test(v);
 
 export const sha256Hex = (s: string) => createHash("sha256").update(s).digest("hex");
 
@@ -66,7 +70,7 @@ export function normalisePath(raw: string): { pathname: string; search: string }
 }
 
 export async function startRelay(opts: RelayOptions): Promise<Relay> {
-  const allow = new Set(opts.allowPaths ?? ["/mcp", "/health"]);
+  const allow = new Set(opts.allowPaths ?? ["/mcp"]);
   const maxBody = opts.maxBodyBytes ?? 5 * 1024 * 1024;
   const timeoutMs = opts.requestTimeoutMs ?? 120_000;
   const checkSecret = secretChecker(opts.hubSecrets);
@@ -154,40 +158,54 @@ export async function startRelay(opts: RelayOptions): Promise<Relay> {
 
   // ---------- hub side: frames coming back
   const onHubFrame = (hub: HubConn, raw: RawData) => {
-    let f: { t?: string; id?: string; status?: number; headers?: Record<string, string | string[]>; chunk?: string; message?: string };
+    let f: { t?: string; id?: string; status?: number; headers?: unknown; chunk?: string; message?: string };
     try { f = JSON.parse(raw.toString()); } catch { return; }
     if (!f || typeof f.id !== "string") return;
-    const p = hub.pending.get(f.id);
+    const id = f.id;
+    const p = hub.pending.get(id);
     if (!p) return; // finished or cancelled already
     const { res } = p;
-    switch (f.t) {
-      case "head": {
-        if (p.headSent || typeof f.status !== "number" || f.status < 200 || f.status > 599) return;
-        const headers: Record<string, string | string[]> = {};
-        for (const [k, v] of Object.entries(f.headers ?? {})) if (!HOP_BY_HOP.has(k.toLowerCase())) headers[k] = v;
-        headers["x-content-type-options"] = "nosniff";
-        p.headSent = true;
-        res.writeHead(f.status, headers);
-        res.flushHeaders();
-        armTimer(hub, f.id, p);
-        return;
+    // The hub is not trusted to send well-formed frames: nothing here may throw out of the socket's message handler.
+    const fail = () => {
+      finish(hub, id);
+      send(hub, { t: "cancel", id });
+      json(res, 502, "The hub sent an invalid response.");
+    };
+    try {
+      switch (f.t) {
+        case "head": {
+          if (p.headSent || !Number.isInteger(f.status) || f.status! < 200 || f.status! > 599) return;
+          const headers: Record<string, string | string[]> = {};
+          if (f.headers && typeof f.headers === "object" && !Array.isArray(f.headers)) {
+            for (const [k, v] of Object.entries(f.headers)) {
+              if (!HEADER_NAME.test(k) || HOP_BY_HOP.has(k.toLowerCase())) continue;
+              if (validValue(v) || (Array.isArray(v) && v.every(validValue))) headers[k] = v as string | string[];
+            }
+          }
+          headers["x-content-type-options"] = "nosniff";
+          res.writeHead(f.status!, headers);
+          p.headSent = true;
+          res.flushHeaders();
+          armTimer(hub, id, p);
+          return;
+        }
+        case "data":
+          if (!p.headSent || typeof f.chunk !== "string") return;
+          res.write(Buffer.from(f.chunk, "base64"));
+          armTimer(hub, id, p);
+          return;
+        case "end":
+          finish(hub, id);
+          if (!p.headSent) return json(res, 502, "The hub sent no response.");
+          res.end();
+          return;
+        case "err":
+          finish(hub, id);
+          // The message is the hub's own text about a transport failure; never headers or bodies.
+          json(res, 502, typeof f.message === "string" ? f.message.slice(0, 200) : "The hub failed to answer.");
+          return;
       }
-      case "data":
-        if (!p.headSent || typeof f.chunk !== "string") return;
-        res.write(Buffer.from(f.chunk, "base64"));
-        armTimer(hub, f.id, p);
-        return;
-      case "end":
-        finish(hub, f.id);
-        if (!p.headSent) return json(res, 502, "The hub sent no response.");
-        res.end();
-        return;
-      case "err":
-        finish(hub, f.id);
-        // The message is the hub's own text about a transport failure; never headers or bodies.
-        json(res, 502, typeof f.message === "string" ? f.message.slice(0, 200) : "The hub failed to answer.");
-        return;
-    }
+    } catch { fail(); }
   };
 
   const dropHub = (hubId: string, hub: HubConn) => {

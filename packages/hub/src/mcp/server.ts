@@ -151,14 +151,21 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
 
   // ---- 0.3 spike: files in folders the owner granted. The hub touches the disk; writes wait for the owner.
   const denied = (reason: string) => text(`DENIED: ${reason}`);
+  const deniedAudited = (op: string, reason: string, what = "") => {
+    store.audit(grant.agentId, "file.denied", `${op}${what ? ` ${what}` : ""}: ${reason}`);
+    return denied(reason);
+  };
+  /** Audited text is cut at the path limit, the same as the broker's own entries. */
+  const quoted = (s: string) => JSON.stringify(s.slice(0, 1024));
 
   server.registerTool("list_granted_folders", {
     description: "List the folders the owner has granted you, with the grantId and whether you may read and/or write. Paths for the other file tools are relative to a granted folder.",
     inputSchema: {},
   }, async () => {
     const a = agent();
-    if (!a || a.tools.filesystem !== true) return denied("the filesystem tool is switched off for you.");
+    if (!a || a.tools.filesystem !== true) return deniedAudited("list_granted_folders", "the filesystem tool is switched off for you.");
     const gs = orch.files.grantsFor(grant.agentId, grant.roomId);
+    store.audit(grant.agentId, "file.grants.listed", `${gs.length} grant(s) visible${grant.roomId ? ` from room ${grant.roomId}` : ""}`);
     return text(gs.map((g) => `${g.id} | ${g.label ?? basename(g.path)} | ${g.read ? "read" : "no-read"} ${g.write ? "write" : "no-write"}`).join("\n") || "(no folders granted to you here)");
   });
 
@@ -196,9 +203,10 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
     inputSchema: { proposalId: z.string().min(1).max(100) },
   }, async ({ proposalId }) => {
     const a = agent();
-    if (!a || a.tools.filesystem !== true) return denied("the filesystem tool is switched off for you.");
+    if (!a || a.tools.filesystem !== true) return deniedAudited("file_write_status", "the filesystem tool is switched off for you.", quoted(proposalId));
     const p = orch.files.proposalFor(grant.agentId, proposalId);
-    if (!p) return denied("unknown proposal.");
+    if (!p) return deniedAudited("file_write_status", "unknown proposal.", quoted(proposalId));
+    store.audit(grant.agentId, "file.write.status", `${p.id} ${p.grantId} ${quoted(p.relPath)} ${p.status}`);
     return text(`proposalId: ${p.id}\nstatus: ${p.status}\npath: ${p.relPath}${p.reason ? `\nreason: ${p.reason}` : ""}`);
   });
 

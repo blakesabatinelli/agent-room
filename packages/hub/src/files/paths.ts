@@ -9,6 +9,14 @@ export const MAX_REL_PATH = 1024;
 
 const real = (p: string) => realpathSync.native(p);
 
+/** Characters that make a name look like something else in an approval card: format (Cf: bidi overrides, zero-width), line and paragraph separators. */
+const DECEPTIVE_NAME = /[\p{Cf}\p{Zl}\p{Zp}]/u;
+
+/** Throws PathDenied for a path whose spelling could mislead the owner reading it. */
+export function assertPlainPath(relPath: string): void {
+  if (DECEPTIVE_NAME.test(relPath)) throw new PathDenied("invisible or direction-changing characters in a path are not allowed");
+}
+
 /** True when p is root or lies below it. Both must already be absolute and normalised. */
 export function isInside(root: string, p: string): boolean {
   return p === root || p.startsWith(root.endsWith(sep) ? root : root + sep);
