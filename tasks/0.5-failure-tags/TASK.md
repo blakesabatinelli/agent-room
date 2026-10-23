@@ -12,11 +12,13 @@ Failure tags, per PLAN.md section 5 and PRODUCT.md.
 - `packages/hub/test/routing.test.ts`
 
 ## Acceptance criteria
-- [ ] AC1: Every failed or sent-back task is tagged as spec, misalignment, verification or other
-- [ ] AC2: The tags are visible in the audit log and the JSONL export
+- [x] AC1: Every failed or sent-back task is tagged as spec, misalignment, verification or other
+- [x] AC2: The tags are visible in the audit log and the JSONL export
 
 ## How to verify
 pnpm test
 
 ## Status
-Not started.
+Done 2026-10-23 (commit 8a8c368).
+- [x] AC1: `packages/hub/src/orchestrator/failures.ts`; tests `failure tags: mechanical evidence first...`, drift → misalignment, blocked → spec, overclaimed PASS → verification, honest shortfall → judge's category.
+- [x] AC2: audit action `task.failure` with `[tag]` prefix; `failureTag` and `failureNote` on each routing record (JSONL export).

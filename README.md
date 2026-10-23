@@ -9,6 +9,7 @@ A local-first room where agents from different providers work together. You give
 | `packages/hub` | Node/TypeScript daemon for your Mac: orchestrator, room, SQLite store, CLI agent runners, REST + WebSocket API, MCP server |
 | `packages/app` | React Native app (macOS + iOS) for the room, approvals, agents, permissions, memory and settings |
 | `packages/shared` | Types shared by both |
+| `packages/relay` | Outbound-only relay (spike 0.3): lets cloud agents reach the hub's MCP endpoint with no inbound port on the Mac |
 
 ## Get started
 
@@ -42,6 +43,12 @@ The app starts the hub on your Mac by itself and connects to it with no codes. A
 
 **Permissions.** Per-agent switches for web, files, shell, Gmail, Slack, Drive and Salesforce. For Claude Code they become `--allowedTools`/`--disallowedTools`, and enabled sensitive tools are routed through the hub's approval tool, so Claude Code pauses until you approve on your phone. Codex maps onto its sandbox modes; because `codex exec` can't pause mid-run, its sensitive actions rely on it calling `request_approval`. Every run, decision and change goes to the audit log.
 
+**Routing log.** Every routing pick is recorded with each candidate's pick probability, epsilon, the model that ran, tokens, cost, seconds, the outcome, the judge's score and, for work sent back, a failure tag (spec, misalignment, verification, other). Export it with `GET /routing/export.jsonl`.
+
+**Documents.** Agents save documents with the `save_document` MCP tool. Each lands as Markdown with front matter in `~/Agent Room/Library/<room>/<goal>/YYYY-MM-DD-slug.md` and is indexed (`GET /documents`). See `docs/DOCUMENTS.md`.
+
+**Local files (spike).** The owner grants folders per room and per agent (`/folder-grants`); agents read through `read_file` and write only by proposing a diff (`propose_file_write`) that the owner approves. Cloud agents reach the same tools through the relay. See `docs/spikes/0.3-file-access.md`.
+
 **MCP.** The hub serves the room at `POST /mcp` (Streamable HTTP). Tools: `read_room`, `post_message`, `read_memory`, `propose_memory`, `list_tasks`, `update_task`, `request_approval`. CLI agents get a short-lived token per run. For Claude Desktop or another MCP app, use Settings > Let MCP apps join the room on the Mac.
 
 **Security.** The hub only answers on localhost and Tailscale addresses. Devices pair with the one-time code and then use a bearer token. Provider logins stay with each CLI.
@@ -54,11 +61,15 @@ The app starts the hub on your Mac by itself and connects to it with no codes. A
 
 ## Settings (environment)
 
-`AGENT_ROOM_PORT` (4747), `AGENT_ROOM_DATA` (`~/.agent-room`), `AGENT_ROOM_OWNER` (Blake), `AGENT_ROOM_TAILSCALE_IP` (auto-detected), `AGENT_ROOM_NTFY_TOPIC`, `AGENT_ROOM_DEMO`.
+`AGENT_ROOM_PORT` (4747), `AGENT_ROOM_DATA` (`~/.agent-room`), `AGENT_ROOM_OWNER` (Blake), `AGENT_ROOM_TAILSCALE_IP` (auto-detected), `AGENT_ROOM_NTFY_TOPIC`, `AGENT_ROOM_DEMO`, `AGENT_ROOM_LIBRARY` (`~/Agent Room/Library`), and, to dial out to a relay, `AGENT_ROOM_RELAY_URL`, `AGENT_ROOM_RELAY_HUB_ID`, `AGENT_ROOM_RELAY_SECRET`.
 
 ## Tests
 
-`pnpm test` runs 67 tests over the full loop with mock agents: planning, delegation, judging, revision and failure, memory keeping, @mentions, owner overrides, pause, approvals, calibration, routing, permission mapping, pairing/auth (including the Mac app's own local pairing), and a real MCP client against the server.
+`pnpm test` runs every package's tests (123 in the hub, 12 in the relay) with mock agents: planning, delegation, judging, revision and failure, memory keeping, @mentions, owner overrides, pause, approvals, calibration, routing, permission mapping, pairing/auth (including the Mac app's own local pairing), a real MCP client against the server, the routing log and failure tags, the document Library, file grants and diff-approved writes, and the relay end to end. `scripts/check.sh` runs typecheck and tests, the same gate CI runs on every push.
+
+## Working on it
+
+`PLAN.md` is the build plan; `PRODUCT.md` the brief. Each item has a work contract in `tasks/`; decisions go in `DECISIONS.md`; each Friday's release goes in `CHANGELOG.md` and `VERSION`.
 
 ## Getting started on a Mac (fresh copy)
 

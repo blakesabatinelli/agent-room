@@ -127,7 +127,7 @@ Any agent can launch subagents when it needs them, and those subagents can talk 
 - **Private and shared memory.** Each agent has private notes and a workspace. Agents propose shared memory, and only the orchestrator writes it. Items it can't decide on wait for the user.
 - **Facts expire and get renewed.** Each fact carries a source and an expiry date. When new evidence contradicts a fact, the user gets one question. Stale context is worse than none.
 - **Memory goes back out to the agents.** Shared memory is compiled into each agent's own context files (`CLAUDE.md`, `AGENTS.md`, Hermes's `MEMORY.md`), capped by size, so agents carry what the room knows even when used outside it.
-- **A single document standard.** See section 7.
+- **Everything lives in editable files.** Memory, lessons, personas and rules are plain Markdown control files (section 7.1). Documents follow one standard (section 7.2).
 
 ### 6.9 Gets smarter with every goal
 
@@ -160,7 +160,60 @@ Any agent can launch subagents when it needs them, and those subagents can talk 
 
 ---
 
-## 7. Document standard (proposal)
+## 7. Files: control files and documents
+
+### 7.1 Control files
+
+Everything that steers an agent lives in plain Markdown files the user can read and edit, the same way OpenClaw and Hermes keep an agent's identity, rules and memory in files. The app's settings screens edit these files; they don't keep a separate copy. Edit a file in any text editor and the Room picks up the change. Change a setting in the app and the file updates.
+
+**Layout** (default `~/Agent Room/`):
+
+```
+~/Agent Room/
+  AGENTS.md                 Rules for every agent in every room: scope, conventions, hard limits
+  USER.md                   Who the owner is, how they work, what they expect from agents
+  POLICY.md                 Approval rules and permission defaults; learned rules land here in plain words
+  agents/<agent>/
+    SOUL.md                 Persona: name, voice, role (6.7)
+    TOOLS.md                What the agent can reach on its platform, and what the Room allows (6.3)
+    RESUME.md               What it has proven good at, written from results (6.9)
+    LESSONS.md              Lessons from retros, by task type (6.9)
+    MEMORY.md               The agent's private notes
+  rooms/<room>/
+    ROOM.md                 Purpose, roster, scope, permission overrides, schedule
+    MEMORY.md               The room's shared memory
+  goals/<goal>/
+    GOAL.md                 The ask, the "Done means" list, what's in scope and what's out
+    LEDGER.md               Progress, rewritten after every change
+    DECISIONS.md            Decisions every later task must follow
+  playbooks/<task-type>.md  Reusable how-tos built from retros
+  Library/                  Documents (7.2)
+```
+
+Settings the hub needs to read exactly (permissions, roster, size caps) sit in YAML front matter at the top of the file. Rules and guidance go in the body. The database keeps only runtime state: messages, scores and the audit log.
+
+**How the files keep everything in scope**
+
+- **Layers that only tighten.** The layers go from broadest to narrowest: `AGENTS.md`, then `ROOM.md`, then the agent's files, then `GOAL.md`. A narrower file can add rules and restrict access. It can't loosen a broader rule or grant access the agent's platform doesn't have.
+- **Built fresh for each task.** When a task starts, the hub combines the layers that apply into the agent's own context file inside the task's worktree: `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, Hermes's own files for Hermes. Each agent gets only what applies to that task, within a size cap.
+- **Scope is checked, not hoped for.** The reviewer checks finished work against `GOAL.md`'s in-scope and out-of-scope lists, and work outside scope is sent back. `GOAL.md` is locked once the plan starts. After that it only changes through owner instructions.
+- **Agents propose; they never edit.** Agents read the control files but can't change them. Their suggested changes arrive as proposals in the Memory screen, the same flow shared memory uses today.
+- **Size caps in bytes.** Every file has a cap. When a file nears it, the orchestrator condenses it rather than letting context bloat.
+- **Versioned.** The control folder is a git repository. Every change, whether by the user or the orchestrator, is a commit that records who made it and why, and the app can revert any of them.
+- **Checked on save.** A linter checks structure and front matter, and flags rules that contradict each other across layers before they take effect.
+
+**Who writes what**
+
+| File | Written by | User can edit |
+|---|---|---|
+| `AGENTS.md`, `USER.md`, `POLICY.md`, `SOUL.md`, `ROOM.md` | The user; the orchestrator can propose changes | Yes |
+| `TOOLS.md` | Discovery writes what the platform allows; the user sets the Room's limits | Room limits only |
+| `RESUME.md`, `LESSONS.md`, playbooks, room `MEMORY.md` | The orchestrator | Yes (edit or delete) |
+| Agent `MEMORY.md` | That agent | Yes |
+| `GOAL.md` | The orchestrator drafts it; the user approves | Before the plan locks |
+| `LEDGER.md`, `DECISIONS.md` | The orchestrator | Read only |
+
+### 7.2 Document standard (proposal)
 
 **Markdown is the canonical format. A local folder is the source of truth. Google Drive is just a location choice.**
 
@@ -244,6 +297,7 @@ What makes it its own:
 - **Agents bring their own reach.** The Room combines access; it never widens it.
 - **Learning compounds.** Every goal should leave the Room better than it found it.
 - **The user owns the record.** Scores, memory and documents are plain files they can export.
+- **Everything that steers an agent is a file.** Rules, personas, permissions, memory and scope are plain Markdown the user can read, edit, version and revert.
 
 ---
 
@@ -266,7 +320,8 @@ Each phase is ordered by dependency. **[New]** marks items from the latest round
 | 0.1 | Fix the indented "Run shell commands" setting **[New]** | Visible polish bug; a two-line fix | XS |
 | 0.2 | Log every routing decision with pick probability, model version, cost and outcome **[R]** | Unlocks replay, scorecards and any future index. History you don't log is gone | S |
 | 0.3 | **Spike: local file access for local and cloud agents [New]** | Without it the product doesn't work. Decides the relay design | M |
-| 0.4 | Decide and implement the document standard (section 7) **[New]** | Every later feature writes documents; settle the format once | S |
+| 0.4 | Decide and implement the document standard (section 7.2) **[New]** | Every later feature writes documents; settle the format once | S |
+| 0.6 | Define the control file layout, layers and ownership (section 7.1) **[New]** | Personas, permissions, memory, lessons and scope all live in these files; settle the shape before building on it | S |
 | 0.5 | Tag every failure by category (spec, misalignment, verification) **[R]** | Shows which failure modes still bite | S |
 
 ### Phase 1: Usable by anyone on a Mac
@@ -279,8 +334,9 @@ Each phase is ordered by dependency. **[New]** marks items from the latest round
 | 1.4 | A worktree per task **[R]** | Table stakes elsewhere. Stops agents overwriting each other; needed for subagents and forks | M |
 | 1.5 | Scheduling that adapts to the hardware, with overflow to cloud agents | 8 GB to Studio on one build | M |
 | 1.6 | Quota awareness per subscription, with local models as a free tier **[R]** | Stops rate-limit thrashing; spends capacity that's about to expire first | M |
-| 1.7 | Signed, notarized app; bundled hub runtime; CLI sign-in inside the app; drag-to-install **[New]** | No Xcode, no Terminal | M |
+| 1.7 | Installable app: bundled hub runtime, CLI sign-in inside the app, drag-to-install DMG (signing and notarization wait for 4.7) **[New]** | No Xcode, no Terminal | M |
 | 1.8 | App icon **[New]** | Needed to ship | S |
+| 1.9 | Control files as the source of truth: two-way sync with the settings screens, per-task context built into each worktree, git history, linter **[New]** | Keeps every agent in scope and makes the Room's behaviour readable and editable. Needs 1.4 | M |
 
 ### Phase 2: Gets smarter
 
@@ -313,7 +369,7 @@ Each phase is ordered by dependency. **[New]** marks items from the latest round
 | 4.4 | Fork a goal: two rosters on the same goal, then compare and merge **[R]** | Variety pays most on judgment work with no test to run | S |
 | 4.5 | Night-shift tournaments **[R]** | Clean head-to-head data from capacity already paid for | S |
 | 4.6 | A2A agent cards and an ACP adapter **[R]** | Muse Code, Gemini CLI and others on ACP join with no custom glue | M |
-| 4.7 | Full distribution: auto-update, crash reporting, opt-in telemetry, licensing, a clean position on provider terms **[New]** | From "anyone can install it" to a real product | M |
+| 4.7 | Full distribution: Developer ID signing and notarization, auto-update, crash reporting, opt-in telemetry, licensing, a clean position on provider terms **[New]** | From "anyone can install it" to a real product | M |
 
 **Later, if the data earns it:** calibrated bids (agents state their odds before a task), side bets (other agents predict whether the assignee will pass), more than one person per room, and an opt-in Agent Index built from anonymized outcomes.
 
@@ -324,6 +380,7 @@ Each phase is ordered by dependency. **[New]** marks items from the latest round
 | Decision | Options | Leaning |
 |---|---|---|
 | How agents get local file access | Relayed MCP file tools; worktree sync to cloud sandboxes; each vendor's own remote features | Relayed MCP as the default, worktree sync for heavy cloud coding. Decided by spike 0.3 |
+| Where control files live | A visible `~/Agent Room/` folder; the hidden `~/.agent-room` folder | Visible. Users are meant to read and edit them |
 | Document source of truth | Local Markdown; Google Drive | Local Markdown, with Drive as a synced location |
 | Distribution channel | Mac App Store; Developer ID outside the store | Developer ID. The App Store sandbox blocks spawning the user's CLIs and broad file access |
 | Provider terms posture | Subscriptions only; API keys only; both | Both. Each CLI signs itself in and the Room never touches credentials. API keys are the clean default for distribution |

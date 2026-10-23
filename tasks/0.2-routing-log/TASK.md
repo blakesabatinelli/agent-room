@@ -16,12 +16,16 @@ Routing decision log, per PLAN.md section 5 and PRODUCT.md.
 - `packages/hub/test/routing.test.ts`
 
 ## Acceptance criteria
-- [ ] AC1: Every routing pick records the goal, task, task type, each candidate's pick probability, the chosen agent, the model version, epsilon, tokens, cost, seconds, the outcome and the judgment score
-- [ ] AC2: Exportable as JSONL
-- [ ] AC3: Tests cover the write path
+- [x] AC1: Every routing pick records the goal, task, task type, each candidate's pick probability, the chosen agent, the model version, epsilon, tokens, cost, seconds, the outcome and the judgment score
+- [x] AC2: Exportable as JSONL
+- [x] AC3: Tests cover the write path
 
 ## How to verify
 pnpm test (routing.test.ts); GET /routing/export.jsonl on a live hub
 
 ## Status
-Not started.
+Done 2026-10-23 (commit 8a8c368).
+- [x] AC1: tests `routing log: every task attempt is recorded with candidates, model, tokens, cost, time, outcome and score`, `routing: epsilon-greedy probabilities are exact and match the pick`, `routing log: learned picks record the policy's probabilities; planned owners record p = 1`, `routing log: a direct answer is recorded too`.
+- [x] AC2: `GET /routing/export.jsonl`; test `JSONL export round-trips and sits behind device auth`.
+- [x] AC3: 13 tests in `packages/hub/test/routing.test.ts`.
+- Live check for M0: run one real goal and confirm `curl -H "Authorization: Bearer <token>" http://127.0.0.1:4747/routing/export.jsonl` shows it (owner).

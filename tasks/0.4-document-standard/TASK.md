@@ -14,12 +14,15 @@ Document standard, per PLAN.md section 5 and PRODUCT.md.
 - `docs/DOCUMENTS.md`
 
 ## Acceptance criteria
-- [ ] AC1: Front matter schema implemented
-- [ ] AC2: A hub save_document tool writes to the Library with front matter and indexes the result
-- [ ] AC3: An agent-produced document lands correctly in a test
+- [x] AC1: Front matter schema implemented
+- [x] AC2: A hub save_document tool writes to the Library with front matter and indexes the result
+- [x] AC3: An agent-produced document lands correctly in a test
 
 ## How to verify
 pnpm test (library.test.ts)
 
 ## Status
-Not started.
+Done 2026-10-23 (commit bd6deb9).
+- [x] AC1: `packages/hub/src/library/frontmatter.ts`; tests `front matter round trips, including quotes and colons in titles`, `splitFrontMatter strips a leading block only, and validateFrontMatter enforces the schema`.
+- [x] AC2: `save_document` / `list_documents` MCP tools, `GET /documents`, SQLite index; tests in `library.test.ts`.
+- [x] AC3: test `end to end: an agent saves a document over MCP and it lands in the Library and the API`.

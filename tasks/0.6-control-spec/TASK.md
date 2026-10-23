@@ -9,11 +9,13 @@ Control file specification, per PLAN.md section 5 and PRODUCT.md.
 - `CONTROL.md`
 
 ## Acceptance criteria
-- [ ] AC1: CONTROL.md defines the folder layout, the front matter schema for each file, the order layers apply in, the ownership table and the size caps
+- [x] AC1: CONTROL.md defines the folder layout, the front matter schema for each file, the order layers apply in, the ownership table and the size caps
 - [ ] AC2: Owner approved
 
 ## How to verify
 Owner review
 
 ## Status
-Not started.
+Drafted 2026-10-23: `CONTROL.md`.
+- [x] AC1: layout, front matter per file, layer order, ownership table, size caps (plus sync and linter rules).
+- [ ] AC2: owner approval.
