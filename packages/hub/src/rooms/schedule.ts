@@ -136,7 +136,7 @@ export class StandingRooms {
       const out: TickOutcome[] = [];
       const now = this.clock();
       for (const room of this.d.store.listRooms()) {
-        if (room.dmAgentId) continue;
+        if (room.dmAgentId || room.forkId) continue; // 4.4: a fork lane never runs a schedule
         const o = this.tickRoom(room, now);
         if (o) out.push(o);
       }

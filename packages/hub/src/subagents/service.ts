@@ -48,7 +48,7 @@ export interface SubagentHost {
   dataDir: string;
   workspaces: TaskWorkspaces;
   ref(goal: Goal): GoalRef;
-  readyAgents(): Promise<AgentConfig[]>;
+  readyAgents(roomId?: string): Promise<AgentConfig[]>;
   /** Is the agent holding a task or answering chat? With `set`, mark it busy or free. */
   busy(agentId: string, set?: boolean): boolean;
   governor: { admit(a: AgentConfig): boolean; start(key: string, a: AgentConfig): void; release(key: string): void; preferForOverflow(c: AgentConfig[]): AgentConfig[] };
@@ -202,7 +202,7 @@ export class Subagents {
   /** Choose who runs it: the named agent, or one of a vendor, or learned routing among everyone free except the parent. */
   private async pick(args: SpawnArgs, parentAgent: AgentConfig, parent: Task): Promise<{ agent: AgentConfig; route: RouteDecision } | { why: string }> {
     const store = this.store, host = this.host;
-    const ready = await host.readyAgents();
+    const ready = await host.readyAgents(parent.roomId); // 4.4: the roster of the parent's room (a fork lane has its own)
     const barred = barredSet(store, ready); // agents on probation practise on copies; they take no real work
     const usable = (a: AgentConfig) => a.id !== parentAgent.id && !host.busy(a.id) && !barred.has(a.id) && !quotaLimited(store, a.id);
     const want = (args.agent ?? "").trim().replace(/^@/, "");

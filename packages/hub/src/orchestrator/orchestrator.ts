@@ -37,6 +37,7 @@ import { Resumes, ShadowRunner, barredSet, planNotes, realAgents, type ShadowHos
 import { attentionFor, type Attention } from "../attention/index.js"; // 2.7
 import { Subagents, subagentSettings, type SubagentHost } from "../subagents/index.js"; // 3.3
 import { RoomRules, StandingRooms } from "../rooms/index.js"; // 4.3
+import { Forks, type ForkHost } from "../fork/index.js"; // 4.4
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -123,6 +124,8 @@ export class Orchestrator {
   rooms: RoomRules;
   /** 4.3: scheduled goals for standing rooms. */
   standing: StandingRooms;
+  /** 4.4: forks: two rosters on one goal in two lanes, compared blind, one merged. */
+  forks: Forks;
 
   /** 1.2: the hub's data folder (the API server keeps local-pair.secret there). */
   get dataDir(): string { return this.opts.dataDir; }
@@ -156,6 +159,7 @@ export class Orchestrator {
     this.resumes = new Resumes({ store, control: () => this.control, say: (roomId, text) => { if (roomId) this.post(roomId, SYS, text, "system"); } });
     this.shadows = new ShadowRunner(this.shadowHost());
     this.subagents = new Subagents(this.subagentHost()); // 3.3
+    this.forks = new Forks(this.forkHost()); // 4.4
     // 4.3: the calendar trigger for standing rooms (started by main.ts with orch.standing.start()).
     this.standing = new StandingRooms({
       store, control: () => this.control, attention: this.attention,
@@ -171,7 +175,7 @@ export class Orchestrator {
     return {
       store: this.store, dataDir: this.opts.dataDir, workspaces: this.workspaces, governor: this.governor, floor: this.floor,
       ref: (g) => this.goalSources.ref(g, g.folder ?? goalFolder(this.opts.dataDir, g.id)),
-      readyAgents: () => this.readyAgents(),
+      readyAgents: (roomId) => this.readyAgents(roomId), // 4.4: a helper is spawned from the room's roster (a fork's lane has its own)
       busy: (agentId, set) => {
         if (set === true) this.busy.add(agentId); else if (set === false) this.busy.delete(agentId);
         return this.busy.has(agentId) || this.chatting.has(agentId);
@@ -208,6 +212,24 @@ export class Orchestrator {
       ledger: (g) => this.ledgerText(g),
       checksAllowed: (g) => !!g.approvedAt || this.cfg().autoRunChecks,
       log: (roomId, text) => { this.log(roomId, text); },
+    };
+  }
+
+  /** 4.4: what the fork service may use of the orchestrator. Its two sides run as ordinary goals through advance(); everything else it observes. */
+  private forkHost(): ForkHost {
+    return {
+      store: this.store, dataDir: this.opts.dataDir, rooms: this.rooms, files: this.files, goalSources: this.goalSources, library: this.library, workspaces: this.workspaces,
+      readyAgents: (roomId) => this.readyAgents(roomId),
+      realAgents: (agents) => realAgents(this.store, agents),
+      barred: (agents) => barredSet(this.store, agents),
+      advance: (goalId) => this.advance(goalId),
+      stopGoal: (goalId, summary) => this.stopGoal(goalId, summary),
+      decidePlan: (goalId, decision, text) => this.decidePlan(goalId, decision, text),
+      cleanWorkspaces: (goalId) => this.dropWorktrees(goalId),
+      call: (agent, prompt, o) => this.call(agent, prompt, o),
+      quotaLimited: (agentId) => quotaLimited(this.store, agentId),
+      notify: (p) => { this.attention.notify("decision", { title: p.title, body: p.body, roomId: p.roomId, key: p.key }); },
+      rand: this.opts.rand ?? Math.random,
     };
   }
 
@@ -400,6 +422,7 @@ export class Orchestrator {
     if (cmd === "/resume") return this.setPaused(roomId, false);
     if (cmd === "/stop") return this.stopRoom(roomId);
     if (cmd === "/digest") { this.attention.digestNow(roomId); return msg; } // 2.7: the evening digest, now
+    if (/^\/fork(\s|$)/.test(cmd)) { void this.forks.fromCommand(roomId, text); return msg; } // 4.4: /fork [goal] [| rosterA: ...] [| rosterB: ...]
     if (this.slashCommand(roomId, text)) return msg; // 2.6: /<agent>:<command> args, or an unknown /command
 
     // Direct-message room: the agent answers, nobody else is involved.
@@ -745,6 +768,7 @@ export class Orchestrator {
   }
 
   stopRoom(roomId: string) {
+    this.forks.stopRoom(roomId); // 4.4: both sides of a fork started here
     for (const g of this.store.listGoals(roomId)) {
       const c = this.running.get(g.id);
       if (c) { c.abort(); this.running.delete(g.id); }
@@ -989,6 +1013,7 @@ export class Orchestrator {
         void this.advance(g.id);
       }
     }
+    this.forks.sweep(); // 4.4: a fork whose sides finished before the restart still gets its comparison
     return resumed;
   }
 

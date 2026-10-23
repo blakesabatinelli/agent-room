@@ -161,7 +161,7 @@ export const useRoom = create<State>((set, get) => ({
         else set({ statuses: { ...s.statuses, [e.status.id]: e.status } });
         if (e.status.detail === "deleted") set({ agents: get().agents.filter((a) => a.id !== e.status.id) });
         break;
-      case "room": set({ rooms: [...s.rooms.filter((r) => r.id !== e.room.id), e.room].sort((a, b) => a.createdAt - b.createdAt) }); break;
+      case "room": if (e.room.forkId) break; /* 4.4: the two lanes of a fork are not rooms to open */ set({ rooms: [...s.rooms.filter((r) => r.id !== e.room.id), e.room].sort((a, b) => a.createdAt - b.createdAt) }); break;
       case "room_deleted": {
         const rooms = s.rooms.filter((r) => r.id !== e.roomId);
         set({ rooms });

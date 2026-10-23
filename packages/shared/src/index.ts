@@ -411,7 +411,7 @@ export type ServerEvent =
   | { type: "subagent"; parentTaskId: string; task: Task };
 
 // ---- 0.4 Document standard
-export type DocStatus = "draft" | "review" | "final";
+export type DocStatus = "draft" | "review" | "final" | "superseded"; // superseded (4.4): set by the hub when a fork was merged the other way; agents cannot set it
 
 /** YAML front matter at the top of every Library document (see docs/DOCUMENTS.md). */
 export interface DocFrontMatter {
@@ -1695,3 +1695,116 @@ export interface CrashEntry { name: string; at: number; kind: string; message: s
 export interface MacCrashReport { name: string; at: number; bytes: number; isNew: boolean }
 /** GET /crashes */
 export interface CrashList { hub: CrashEntry[]; mac: MacCrashReport[]; dir: string; macDir: string }
+// ---- 4.4 Fork a goal
+// Two rosters work the same goal in two lanes (a hidden room each), the results are compared blind, and the owner merges one.
+export type ForkSideId = "a" | "b";
+/** A lane of a fork is a room of its own (its roster is the side's roster). Clients leave these out of the room list. */
+export interface Room { forkId?: string; forkSide?: ForkSideId; /** The room the fork was started in */ forkOf?: string }
+/** Goal on a lane that works from the owner's git branch of another goal: the branch to start from when its own does not exist yet. */
+export interface Goal { sourceFrom?: string }
+/** A goal that is one side of a fork. */
+export interface Goal { fork?: { id: string; side: ForkSideId } }
+/** A message that stands for a fork in the room: the apps draw the fork card from it. */
+export interface Message { forkId?: string }
+
+/** Where a merge lands. hub: the hub's own folder (the source goal's folder, else the fork's result folder). git: branch agent-room/<goal> in the owner's repository. copy: one write proposal into the owner's folder. */
+export interface ForkTarget {
+  kind: "hub" | "git" | "copy";
+  /** The goal that was forked, when there was one. */
+  goalId?: string;
+  grantId?: string;
+  /** git: the branch the merge lands on. The owner's checked-out branch is never used. */
+  branch?: string;
+  /** hub: the folder the merged files go to. */
+  folder?: string;
+  /** git: the owner's head when the fork started (the shared start of both sides). */
+  startSha?: string;
+}
+export interface ForkSideRef {
+  side: ForkSideId;
+  roster: string[];
+  roomId: string;
+  goalId: string;
+  /** git: the side's own branch in the owner's repository (agent-room/<goal>-a). */
+  branch?: string;
+  /** When the side was seen finished. */
+  endedAt?: number;
+  /** Set when the other side was merged: this one is kept for comparison, its work folders are cleaned. */
+  archived?: boolean;
+}
+/** One requirement of the contract, judged for both sides. */
+export interface ForkRequirementVerdict { text: string; a: Verdict; b: Verdict; note?: string }
+/** One judging pass. The two passes show the sides in opposite order; `preferred` is already mapped back to the real side. */
+export interface ForkPass { order: "ab" | "ba"; judge: string; family: string; preferred: ForkSideId | "tie" }
+/** The blind comparison. The judges got neutral text with no roster, agent or vendor names, in randomised order, twice. */
+export interface ForkComparison {
+  id: string;
+  at: number;
+  state: "done" | "partial" | "failed";
+  /** The jury's preference. The owner decides; this is only a suggestion. `unclear`: the two orders disagreed or nobody answered. */
+  preference: ForkSideId | "tie" | "unclear";
+  /** Both orders gave the same answer. */
+  agreement: boolean;
+  reasons: string[];
+  requirements: ForkRequirementVerdict[];
+  passes: ForkPass[];
+  /** full: every judge came from outside both rosters' model families. partial: some judge shares a family with a roster. */
+  independence: "full" | "partial";
+  note?: string;
+}
+export interface ForkMerge { side: ForkSideId; at: number; how: "folder" | "branch" | "proposal"; detail: string; branch?: string; proposalId?: string; files?: number }
+export interface Fork {
+  id: string;
+  /** The room the fork was started in. */
+  roomId: string;
+  text: string;
+  createdAt: number;
+  sourceGoalId?: string;
+  sides: ForkSideRef[];
+  target: ForkTarget;
+  /** Requirement texts both sides are checked against: the forked goal's contract, else the union of the two sides' contracts (set when the comparison runs). */
+  requirements: string[];
+  comparison?: ForkComparison;
+  comparing?: boolean;
+  merged?: ForkMerge;
+}
+export type ForkState = "running" | "waiting" | "compared" | "merged";
+export interface ForkFileChange { path: string; change: "added" | "modified" | "deleted"; bytes: number; /** Unified diff against the shared start; empty for a file that is not text. */ diff: string; binary?: boolean; truncated?: boolean }
+export interface ForkSideView {
+  side: ForkSideId;
+  roomId: string;
+  goalId: string;
+  roster: { id: string; name: string; color: string }[];
+  status: Goal["status"];
+  summary?: string;
+  waitingOnOwner?: string;
+  awaitingApproval: boolean;
+  archived: boolean;
+  tasks: { total: number; done: number };
+  /** The tasks the judges accepted. */
+  accepted: { id: string; title: string; agentId?: string; agentName?: string; taskType: string; score?: number }[];
+  requirements: { id: string; text: string; status: "open" | "met" | "unmet" }[];
+  deliverables: { files: ForkFileChange[]; docs: { id: string; title: string; status: DocStatus; relPath: string }[]; more: number };
+  cost: { runs: number; inputTokens: number; outputTokens: number; costUsd: number };
+  time: { startedAt: number; endedAt?: number; seconds: number };
+  branch?: string;
+}
+/** GET /forks/:id: both sides next to each other, and the blind comparison once both are done. */
+export interface ForkView {
+  id: string;
+  roomId: string;
+  text: string;
+  state: ForkState;
+  createdAt: number;
+  sourceGoalId?: string;
+  target: { kind: ForkTarget["kind"]; branch?: string; label?: string };
+  sides: ForkSideView[];
+  requirements: string[];
+  comparison?: ForkComparison;
+  comparing: boolean;
+  merged?: ForkMerge;
+  /** Why a merge can't happen yet, when it can't. */
+  mergeBlocked?: string;
+}
+/** A recorded preference from a merged fork: the roster that won (or lost) on a task type. Routing can read it; it is never a judge score. */
+export interface ForkPreference { agentId: string; taskType: string; wins: number; losses: number; lastAt: number; forks: string[] }

@@ -159,7 +159,7 @@ export class ControlFolder {
   /** The folder name of a room in the control folder (same slug the Library uses). */
   slugFor(roomId: string): string | undefined {
     const r = this.store.getRoom(roomId);
-    return r && !r.dmAgentId ? roomSlug(r) : undefined;
+    return r && !r.dmAgentId && !r.forkId ? roomSlug(r) : undefined;
   }
 
   /** Who ROOM.md says is in the room. Undefined when the room has no ROOM.md (everyone). */
@@ -321,7 +321,7 @@ export class ControlFolder {
     }
     const taken = new Set<string>();
     for (const r of this.store.listRooms()) {
-      if (r.dmAgentId) continue;
+      if (r.dmAgentId || r.forkId) continue; // 4.4: a fork lane has no ROOM.md
       const slug = roomSlug(r);
       this.roomSlugs.set(r.id, slug);
       if (taken.has(slug)) continue;
@@ -457,7 +457,7 @@ export class ControlFolder {
   private onStoreEvent = (e: ServerEvent) => {
     if (this.applying || !this.started) return;
     if (e.type === "agent") { const id = e.agent.id; this.bump(`agent:${id}`, 1); void this.enqueue(() => this.syncAgent(id)).catch((err) => this.log(`couldn't write ${id}: ${(err as Error).message}`)); }
-    if (e.type === "room" && !e.room.dmAgentId) { const id = e.room.id; this.bump(`room:${id}`, 1); void this.enqueue(() => this.syncRoom(id)).catch((err) => this.log(`couldn't write room: ${(err as Error).message}`)); }
+    if (e.type === "room" && !e.room.dmAgentId && !e.room.forkId) { const id = e.room.id; this.bump(`room:${id}`, 1); void this.enqueue(() => this.syncRoom(id)).catch((err) => this.log(`couldn't write room: ${(err as Error).message}`)); }
   };
 
   private bump(key: string, by: number) {
@@ -533,7 +533,7 @@ export class ControlFolder {
   private async syncRoom(roomId: string) {
     this.bump(`room:${roomId}`, -1);
     const r = this.store.getRoom(roomId);
-    if (!r || r.dmAgentId) return;
+    if (!r || r.dmAgentId || r.forkId) return;
     const slug = roomSlug(r); const old = this.roomSlugs.get(roomId);
     const today = this.today();
     const rel = `rooms/${slug}/ROOM.md`;

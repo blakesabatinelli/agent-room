@@ -155,6 +155,18 @@ export class MockAdapter implements Adapter {
       // 2.2: a rewriter. It hands back the text between the quotes in a flat voice (badRewrite: drops the facts, like a careless one).
       const body = p.split('"""')[1]?.trim() ?? "";
       text = (st as { badRewrite?: boolean }).badRewrite ? "Work was done." : `Neutral rewrite: ${body}`;
+    } else if (p.includes("[[COMPARE]]")) {
+      // 4.4: a pairwise judge of a fork's two results. It prefers the candidate with more text (files and summary) unless `comparePick` says
+      // otherwise: "first" / "second" always pick by position (a judge with a position bias), "tie" says they are equal, "none" answers with prose.
+      const c1 = p.split("=== CANDIDATE 1 ===")[1]?.split("=== CANDIDATE 2 ===")[0] ?? "";
+      const c2 = p.split("=== CANDIDATE 2 ===")[1]?.split("=== END ===")[0] ?? "";
+      const mode = (st as { comparePick?: string }).comparePick;
+      const reqIds2 = [...new Set([...p.matchAll(/^(R\d+):/gm)].map((m) => m[1]))];
+      const pick = mode === "first" ? "1" : mode === "second" ? "2" : mode === "tie" || c1.length === c2.length ? "tie" : c1.length > c2.length ? "1" : "2";
+      text = mode === "none" ? "I could not decide." : JSON.stringify({
+        preferred: pick, reasons: [pick === "tie" ? "Candidate 1 and Candidate 2 are equally complete." : `Candidate ${pick} delivers more of what was asked.`],
+        requirements: Object.fromEntries(reqIds2.map((k) => [k, { "1": c1.trim().length > 40 ? "PASS" : "FAIL", "2": c2.trim().length > 40 ? "PASS" : "FAIL", note: "judged from the files shown" }])),
+      });
     } else if (p.includes("[[SUMMARY]]")) {
       text = "All tasks are complete. Research gathered and summary written.";
     } else if (p.includes("tagged you")) {

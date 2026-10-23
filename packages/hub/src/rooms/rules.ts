@@ -47,6 +47,11 @@ export class RoomRules implements RoomGate {
    */
   private late = new Map<string, { sig: string; ids: Set<string> }>();
   private known: Set<string>;
+  /**
+   * 4.4: a lane of a fork is a hidden room with a roster of its own. Set by the fork service. A lane's roster wins over any ROOM.md; its tools,
+   * folders and memory come from the room the fork was started in (`parent`), and `family` lists the agents sharing an agent's model family.
+   */
+  fork?: (roomId: string) => { roster: string[]; parent: string; family(agentId: string): string[] } | undefined;
 
   constructor(private d: RoomRulesHost) {
     this.known = new Set(d.store.listAgents().map((a) => a.id));
@@ -65,7 +70,7 @@ export class RoomRules implements RoomGate {
   }
 
   private slug(roomId: string | undefined): string | undefined {
-    return roomId ? this.d.control()?.slugFor(roomId) : undefined;
+    return roomId ? this.d.control()?.slugFor(this.fork?.(roomId)?.parent ?? roomId) : undefined; // 4.4: a lane is the room the fork came from, for tools and folders
   }
 
   // ---------------------------------------------------------------- roster
@@ -73,6 +78,8 @@ export class RoomRules implements RoomGate {
   /** Agent ids ROOM.md lists, or undefined when the room is open to everyone. */
   rosterIds(roomId: string | undefined): string[] | undefined {
     if (!roomId) return undefined;
+    const lane = this.fork?.(roomId); // 4.4
+    if (lane) return lane.roster;
     const r = this.d.control()?.rosterFor(roomId);
     if (!r || !r.length) return undefined;
     const l = this.late.get(roomId);
@@ -113,6 +120,16 @@ export class RoomRules implements RoomGate {
    * caller can record it.
    */
   judgePool(roomId: string | undefined, pool: AgentConfig[], exclude: (string | undefined)[]): { pool: AgentConfig[]; outside: Set<string> } {
+    const lane = roomId ? this.fork?.(roomId) : undefined;
+    if (lane) {
+      // 4.4: in a fork's lane a judge is never the worker's own model family (the worker is the first of `exclude`). The other side's agents and outsiders may judge.
+      const worker = exclude[0];
+      const bad = new Set<string>([...exclude.filter((x): x is string => !!x), ...(worker ? lane.family(worker) : [])]);
+      const inside = pool.filter((a) => lane.roster.includes(a.id) && !bad.has(a.id));
+      if (inside.length) return { pool: inside, outside: new Set() };
+      const wide = pool.filter((a) => !bad.has(a.id));
+      return { pool: wide, outside: new Set(wide.filter((a) => !lane.roster.includes(a.id)).map((a) => a.id)) };
+    }
     const r = this.rosterIds(roomId);
     if (!r) return { pool, outside: new Set() };
     const inside = pool.filter((a) => r.includes(a.id));
