@@ -24,6 +24,9 @@ function readContext(cwd: string): string | undefined {
  * shared (1.4: a file path; the task run MERGES one line "<name> wrote <path>" into that file instead of overwriting it,
  * and when the file holds git conflict markers it keeps both sides and drops the markers, like a careful agent would;
  * the file is not written again by the usual scope-file loop).
+ * barrier ({ key, n }: a task run waits, before its delayMs, until n task runs carrying the same key are in flight at once. It never waits again once
+ * the n-th has arrived, so retries and later waves are not held. Tests that assert overlap use it instead of racing delayMs against the time a worktree takes
+ * to cut, which is unbounded under load. A run that is never joined gives up after 10 s, so a broken test fails on its assertions instead of hanging).
  * Every call also records the cwd it ran in (MockAdapter.calls[].cwd), so tests can see which worktree a task used.
  * wide (the plan is N independent tasks), needs (1.3: every planned task lists these data sources in its `needs`).
  * retro (2.1: how a `[[RETRO]]` call is answered: "invalid" | "empty" | "ghost" | "positive"; see the branch below).
@@ -32,6 +35,18 @@ export class MockAdapter implements Adapter {
   /** Every run, for tests: which profile reached the agent. */
   static calls: { agentId: string; model?: string; effort?: string; kind: string; prompt: string; cwd: string; context?: string }[] = [];
   static transientSeen = new Map<string, number>();
+  private static barriers = new Map<string, { arrived: number; open: boolean; open_: () => void; opened: Promise<void> }>();
+  /** Wait until `n` runs with this key have started (see the `barrier` knob). Returns false if the signal aborted first. */
+  private static async arrive(key: string, n: number, signal?: AbortSignal): Promise<boolean> {
+    let b = MockAdapter.barriers.get(key);
+    if (!b) { let open_!: () => void; const opened = new Promise<void>((r) => { open_ = r; }); b = { arrived: 0, open: false, open_, opened }; MockAdapter.barriers.set(key, b); }
+    if (!b.open && ++b.arrived >= n) { b.open = true; b.open_(); }
+    if (b.open) return true;
+    const gaveUp = new Promise<void>((r) => { const t = setTimeout(r, 10_000); t.unref?.(); });
+    const aborted = new Promise<void>((r) => signal?.addEventListener("abort", () => r()));
+    await Promise.race([b.opened, gaveUp, aborted]);
+    return !signal?.aborted;
+  }
   async status() { return { ready: true, state: "ready" as const, detail: "Practice agent" }; }
 
   async run(req: RunRequest): Promise<RunResult> {
@@ -172,6 +187,8 @@ export class MockAdapter implements Adapter {
       MockAdapter.transientSeen.set(k, (MockAdapter.transientSeen.get(k) ?? 0) + 1);
       if (MockAdapter.transientSeen.get(k)! <= n) return { ok: false, text: "", durationMs: Date.now() - t0, error: (st as { transientError?: string }).transientError ?? "429 rate limit exceeded, try again later" };
     }
+    const barrier = p.includes("# Your task:") ? (req.agent.settings as { barrier?: { key: string; n: number } }).barrier : undefined;
+    if (barrier && !(await MockAdapter.arrive(barrier.key, barrier.n, req.signal))) return { ok: false, text: "", durationMs: Date.now() - t0, error: "Cancelled." };
     const delay = p.includes("# Your task:") ? Number((req.agent.settings as { delayMs?: number }).delayMs ?? 0) : 0;
     if (delay) {
       const aborted = await new Promise<boolean>((r) => {

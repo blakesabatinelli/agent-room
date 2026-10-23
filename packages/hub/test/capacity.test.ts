@@ -205,35 +205,48 @@ test("preferForOverflow: at the limit only cloud agents are left; under pressure
 
 // ---------- the orchestrator honours it (AC2, AC3)
 
-/** Count task runs in flight, per agent, by watching the adapter. */
-function watchRuns() {
-  const state = { now: 0, max: 0, cli: 0, maxCli: 0, byAgent: new Map<string, number>() };
+/**
+ * Count task runs in flight, per agent, by watching the adapter. `governorPeak` is the most tasks the governor had admitted
+ * when a run started: admission happens synchronously in the drive loop, so it does not depend on how long a worktree takes to cut.
+ */
+function watchRuns(ctx: ReturnType<typeof setup>) {
+  const state = { now: 0, max: 0, cli: 0, maxCli: 0, governorPeak: 0, byAgent: new Map<string, number>() };
   const orig = adapters.mock.run.bind(adapters.mock);
   adapters.mock.run = async (req) => {
     if (!req.prompt.includes("# Your task:")) return orig(req);
     const cli = classifyAgent(req.agent) === "local-cli";
     state.now++; state.max = Math.max(state.max, state.now);
     if (cli) { state.cli++; state.maxCli = Math.max(state.maxCli, state.cli); }
+    state.governorPeak = Math.max(state.governorPeak, ctx.governor.snapshot().running.total);
     state.byAgent.set(req.agent.id, (state.byAgent.get(req.agent.id) ?? 0) + 1);
     try { return await orig(req); } finally { state.now--; if (cli) state.cli--; }
   };
   return { state, stop: () => { adapters.mock.run = orig; } };
 }
 
-function widePlan(ctx: ReturnType<typeof setup>, n: number, extra: Record<string, unknown> = {}) {
+/**
+ * A plan of n independent tasks. With `overlap`, every task run is held open (the mock's `barrier` knob) until that many runs are in flight
+ * together, so how long a worktree takes to cut (it is serialised per goal, and slow on a loaded machine) cannot make runs miss each other.
+ */
+function widePlan(ctx: ReturnType<typeof setup>, n: number, extra: Record<string, unknown> = {}, overlap = 0) {
   ctx.store.setSettings({ ...ctx.store.getSettings(), planApproval: "never" });
-  for (const a of ctx.store.listAgents()) { a.settings = { ...a.settings, delayMs: 150, ...(extra[a.id] as object ?? {}) }; if (a.id === "claude") a.settings.wide = n; ctx.store.saveAgent(a); }
+  for (const a of ctx.store.listAgents()) {
+    a.settings = { ...a.settings, delayMs: overlap ? 0 : 150, ...(overlap ? { barrier: { key: ctx.dir, n: overlap } } : {}), ...(extra[a.id] as object ?? {}) };
+    if (a.id === "claude") a.settings.wide = n;
+    ctx.store.saveAgent(a);
+  }
 }
 
 test("AC2: a goal with 4 independent tasks on a simulated 8 GB machine never runs more than 2 at once", async () => {
   const ctx = setup({ hardware: HW.small });
-  widePlan(ctx, 4, { hermes: { locality: "remote" } }); // Hermes joins over MCP in real life
-  const w = watchRuns();
+  widePlan(ctx, 4, { hermes: { locality: "remote" } }, 2); // Hermes joins over MCP in real life
+  const w = watchRuns(ctx);
   try {
     const goal = await ctx.orch.runGoal(ctx.room.id, "Write four parts");
     assert.equal(goal.status, "done");
     assert.equal(ctx.store.listTasks({ goalId: goal.id }).filter((t) => t.title.startsWith("Part")).length, 4);
-    assert.equal(w.state.max, 2, "2 at once: one local CLI plus the cloud agent");
+    assert.equal(w.state.max, 2, "2 at once: one local CLI plus the cloud agent (both were held open until they overlapped)");
+    assert.equal(w.state.governorPeak, 2, "the governor never had more than 2 admitted, even for the tasks still waiting");
     assert.ok(w.state.maxCli <= 1, "only one local CLI agent at a time on 8 GB");
     assert.equal(ctx.governor.snapshot().running.total, 0, "every slot was released");
   } finally { w.stop(); }
@@ -241,11 +254,12 @@ test("AC2: a goal with 4 independent tasks on a simulated 8 GB machine never run
 
 test("AC2: the same goal on a simulated 64 GB machine runs all agents in parallel", async () => {
   const ctx = setup({ hardware: HW.large });
-  widePlan(ctx, 4, { hermes: { locality: "remote" } });
-  const w = watchRuns();
+  widePlan(ctx, 4, { hermes: { locality: "remote" } }, 3);
+  const w = watchRuns(ctx);
   try {
     assert.equal((await ctx.orch.runGoal(ctx.room.id, "Write four parts")).status, "done");
-    assert.equal(w.state.max, 3, "one task per agent, nothing throttled");
+    assert.equal(w.state.max, 3, "one task per agent, nothing throttled (all three were held open until they overlapped)");
+    assert.equal(w.state.governorPeak, 3);
   } finally { w.stop(); }
 });
 
@@ -253,10 +267,12 @@ test("AC2: the owner's maxConcurrentTasks override is honoured", async () => {
   const ctx = setup({ hardware: HW.large });
   widePlan(ctx, 4);
   ctx.store.setSettings({ ...ctx.store.getSettings(), capacity: { maxConcurrentTasks: 1 } });
-  const w = watchRuns();
+  const w = watchRuns(ctx);
   try {
     assert.equal((await ctx.orch.runGoal(ctx.room.id, "Write four parts")).status, "done");
     assert.equal(w.state.max, 1);
+    assert.equal(w.state.governorPeak, 1);
+    assert.equal([...w.state.byAgent.values()].reduce((x, y) => x + y, 0), 4, "all four tasks ran, one at a time");
   } finally { w.stop(); }
 });
 
@@ -265,7 +281,7 @@ test("AC3: with local models off, work goes to the CLI or cloud agent, not the l
   // claude would win ties (first in pool); make it the local model server
   widePlan(ctx, 2, { claude: { locality: "local-model" }, hermes: { locality: "remote" } });
   for (const a of ctx.store.listAgents()) { a.settings.noOwner = true; ctx.store.saveAgent(a); }
-  const w = watchRuns();
+  const w = watchRuns(ctx);
   try {
     const goal = await ctx.orch.runGoal(ctx.room.id, "Write two parts");
     assert.equal(goal.status, "done");
@@ -280,7 +296,7 @@ test("AC3: with local models on and memory free, the local model may be chosen",
   const ctx = setup({ hardware: HW.medium });
   widePlan(ctx, 2, { claude: { locality: "local-model" }, hermes: { locality: "remote" } });
   for (const a of ctx.store.listAgents()) { a.settings.noOwner = true; ctx.store.saveAgent(a); }
-  const w = watchRuns();
+  const w = watchRuns(ctx);
   try {
     const goal = await ctx.orch.runGoal(ctx.room.id, "Write two parts");
     assert.equal(goal.status, "done");
@@ -293,7 +309,7 @@ test("AC3: overflow beyond the local CLI cap goes to the cloud agent", async () 
   const ctx = setup({ hardware: HW.small });
   widePlan(ctx, 3, { hermes: { locality: "remote" } });
   for (const a of ctx.store.listAgents()) { a.settings.noOwner = true; ctx.store.saveAgent(a); }
-  const w = watchRuns();
+  const w = watchRuns(ctx);
   try {
     const goal = await ctx.orch.runGoal(ctx.room.id, "Write three parts");
     assert.equal(goal.status, "done");
@@ -305,7 +321,7 @@ test("AC3: overflow beyond the local CLI cap goes to the cloud agent", async () 
 test("a planned owner the machine can't take right now is overflowed, not waited on", async () => {
   const ctx = setup({ hardware: HW.small });
   widePlan(ctx, 2, { claude: { locality: "local-model" }, hermes: { locality: "remote" } }); // owners: w0 -> claude, w1 -> codex
-  const w = watchRuns();
+  const w = watchRuns(ctx);
   try {
     const goal = await ctx.orch.runGoal(ctx.room.id, "Write two parts");
     assert.equal(goal.status, "done");

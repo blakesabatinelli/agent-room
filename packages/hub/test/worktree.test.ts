@@ -19,6 +19,8 @@ const until = async (fn: () => boolean, ms = 5000) => { for (let i = 0; i < ms /
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 const read = (...p: string[]) => readFileSync(join(...p), "utf8");
 const agent = (e: Env, aid: string, settings: Record<string, unknown>) => { const a = e.store.getAgent(aid)!; Object.assign(a.settings, settings); e.store.saveAgent(a); };
+/** Hold both agents' task runs open until the two are running together (the mock's `barrier` knob). A worktree takes an unbounded time to cut on a loaded machine, so a delayMs alone cannot make them overlap. */
+const together = (e: Env, a: string, b: string, extra: Record<string, unknown> = {}) => { for (const id of [a, b]) agent(e, id, { barrier: { key: e.dir, n: 2 }, ...extra }); };
 const taskCalls = () => MockAdapter.calls.filter((c) => c.kind === "TASK");
 
 interface Spec { key: string; owner: string; files?: string[]; deps?: string[] }
@@ -113,6 +115,7 @@ test("AC2: accepted work merges into the base; reassigned and failed work never 
 
 test("AC3: two agents write the same file in the same repo in parallel: separate directories, first merges, second is sent back to merge, nothing is overwritten", async () => {
   const e = setup();
+  together(e, "claude", "codex");
   agent(e, "claude", { shared: "notes.txt", delayMs: 250 });
   agent(e, "codex", { shared: "notes.txt", delayMs: 700 });
   const { goalId, base, tasks } = seedGoal(e, [{ key: "a", owner: "claude", files: ["notes.txt"] }, { key: "b", owner: "codex", files: ["notes.txt"] }]);
@@ -147,6 +150,7 @@ test("AC3: two agents write the same file in the same repo in parallel: separate
 
 test("AC3: two parallel tasks writing different files both merge cleanly, and never conflict", async () => {
   const e = setup();
+  together(e, "claude", "codex");
   agent(e, "claude", { delayMs: 250 }); agent(e, "codex", { delayMs: 700 });
   const { goalId, base, tasks } = seedGoal(e, [{ key: "a", owner: "claude", files: ["a.txt"] }, { key: "b", owner: "codex", files: ["docs/b.txt"] }]);
   MockAdapter.calls.length = 0;
@@ -173,6 +177,7 @@ test("AC4: worktrees and ar/* branches are gone when the goal finishes", async (
 
 test("AC4: worktrees and branches are gone after the goal is stopped, and the half-done work is not merged", async () => {
   const e = setup();
+  together(e, "claude", "codex");
   agent(e, "claude", { delayMs: 800 }); agent(e, "codex", { delayMs: 800 });
   const { goalId, base, tasks } = seedGoal(e, [{ key: "a", owner: "claude", files: ["a.txt"] }, { key: "b", owner: "codex", files: ["b.txt"] }]);
   const run = e.orch.advance(goalId);
@@ -192,6 +197,7 @@ test("AC4: worktrees and branches are gone after the goal is stopped, and the ha
 
 test("copy fallback: with no usable git, tasks get folder copies; accepted work is copied back, rejected work is not, conflicts are caught", async () => {
   const e = setup({ gitBin: "/bin/false" });
+  together(e, "claude", "codex");
   agent(e, "claude", { shared: "notes.txt", delayMs: 250 });
   agent(e, "codex", { shared: "notes.txt", delayMs: 700 });
   const s = seedGoal(e, [{ key: "a", owner: "claude", files: ["notes.txt", "a.txt"] }, { key: "b", owner: "codex", files: ["notes.txt"] }]);
