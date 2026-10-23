@@ -29,6 +29,11 @@ export interface RunRequest {
   readOnly?: boolean;
   /** 3.3: subagents the agent launches inside its own tool, as the event stream shows them. */
   onSubagent?: (e: NativeEvent) => void;
+  /**
+   * 4.6: asks the owner (through the approvals queue) whether a tool the agent wants to use may run. `tool` is one of the room's tool ids
+   * (shell, web, filesystem...). Resolves true only when it was approved. Absent for runs that can't ask: such a run is refused anything sensitive.
+   */
+  approve?: (tool: string, action: string, detail: string) => Promise<boolean>;
 }
 
 export interface RunResult {

@@ -15,3 +15,10 @@ replace the "reconstructed" ones with real captures (`docs/install-test.md`, sec
 | `signin-hostile.txt` | Made up: lookalike and non-https links the app must never open | |
 | `claude-subagents.stream.jsonl` | 3.3. Assembled by hand from the documented stream-json shapes (subagent launch is a `tool_use` named `Agent`, or `Task` before Claude Code 2.1.63; the result is a `tool_result` with the same `tool_use_id`; messages inside a subagent carry `parent_tool_use_id`; a background launch answers `async_launched`): https://code.claude.com/docs/en/agent-sdk/subagents | Not a live capture. Replace with a real one on a Mac. |
 | `codex-subagents.events.jsonl` | 3.3. Assembled from the `collab_tool_call` item shape in the Codex source (`spawn_agent`, `wait`, `receiver_thread_ids`, `agents_states`) | Not a live capture, and not checked against a live Codex. |
+
+# A2A and ACP fixtures (item 4.6)
+
+| File | Source | Notes |
+|---|---|---|
+| `a2a-v1.0.0.proto` | https://raw.githubusercontent.com/a2aproject/A2A/v1.0.0/specification/a2a.proto (tag `v1.0.0`), fetched 2026-10-23, sha256 `4b74c0baa923ae0acb55474e548f1d6e5d3f83b80d757b65f8bf3e99a3c2257f` | The A2A spec publishes its data model as protobuf and no committed JSON schema. `interop.test.ts` reads this file and checks the agent card and task replies against it (field names, types, required fields, enums). Replace it, and the hash, when A2A ships a new tag. |
+| `fake-acp-agent.mjs` | Written for the tests from the ACP protocol pages: https://agentclientprotocol.com/protocol/ | A fake ACP agent over stdio (initialize, session/new, session/prompt, session/update, fs/read_text_file, fs/write_text_file, session/request_permission, session/cancel). Modes by argument: `--perm`, `--hang`, `--auth`, `--max-tokens`, `--old-protocol`. `--help` prints what a real CLI prints when it can speak ACP. Tests copy it behind a fake `gemini` command. Not captured from a real agent: the first run with a real ACP CLI on a Mac should be compared against it. |

@@ -652,7 +652,7 @@ test("AC3: no route but /mcp answers a proxied request, and every route needs a 
   const b = await boot();
   const routes = (b.app as unknown as { routeTable: () => { method: string; url: string }[] }).routeTable();
   assert.ok(routes.length > 60, `saw ${routes.length} routes`);
-  const open = new Set(["/health", "/pair", "/pair/local", "/mcp", "/", "/web/:file", "/web/vendor/:file"]);
+  const open = new Set(["/health", "/pair", "/pair/local", "/mcp", "/", "/web/:file", "/web/vendor/:file", "/.well-known/agent-card.json"]); // 3.4 vendor files; 4.6: the A2A card is public on the tailnet by design
   let checked = 0;
   for (const r of routes) {
     if (r.url.includes("*")) continue;

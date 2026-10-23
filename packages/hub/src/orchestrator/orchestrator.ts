@@ -366,6 +366,8 @@ export class Orchestrator {
       claimTimeoutMs: this.cfg().claimTimeoutMinutes * 60_000,
       readOnly: o.readOnly, // 3.3
       onSubagent: o.taskId && !o.shadow && !o.jsonOnly ? (e) => this.subagents.native(o.taskId!, agent.id, e) : undefined, // 3.3: the agent's own subagents, for the tree
+      // 4.6: an ACP agent asks permission for a tool mid-run; the answer is the owner's (or "run without asking"), and a practice run never gets one
+      approve: (tool, action, detail) => this.requestApproval({ agentId: agent.id, roomId: o.roomId, taskId: o.taskId, shadow: o.shadow }, tool, action, detail).then((a) => a.status === "approved"),
     });
     if (!res.ok) this.forgetStatus(agent.id); // re-check sign-in before routing to it again
     if (grant) this.grants.delete(grant.token);
@@ -757,6 +759,28 @@ export class Orchestrator {
     }
     for (const a of this.enabledAgents()) this.floor.take(a.id, roomId);
     this.post(roomId, SYS, "Stopped all work in this room.", "system");
+  }
+
+  /** 4.6: stop one goal (A2A CancelTask). stopRoom does this for every goal in a room. A plan still waiting for approval is cancelled. */
+  stopGoal(goalId: string, summary = "Stopped by an outside request."): boolean {
+    const g = this.store.getGoal(goalId);
+    if (!g) return false;
+    if (g.status === "awaiting_approval") {
+      if (!this.decidePlan(goalId, "cancel").ok) return false;
+    } else if (g.status === "running" || g.status === "planning" || g.status === "paused") {
+      const c = this.running.get(g.id);
+      if (c) { c.abort(); this.running.delete(g.id); }
+      for (const t of this.store.listTasks({ goalId: g.id })) this.taskRuns.get(t.id)?.ctrl.abort();
+      g.status = "failed"; this.store.saveGoal(g);
+      for (const t of this.store.listTasks({ goalId: g.id })) {
+        if (OPEN(t)) { t.status = "cancelled"; this.store.saveTask(t); }
+      }
+      void this.dropWorktrees(g.id);
+    } else return false;
+    const done = this.store.getGoal(goalId)!;
+    done.summary = summary; this.store.saveGoal(done);
+    this.post(g.roomId, SYS, `Stopped "${g.text.slice(0, 80)}". ${summary}`, "system");
+    return true;
   }
 
   // ---------- goals

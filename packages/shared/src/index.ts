@@ -1,6 +1,6 @@
 // Shared types between the hub and the apps.
 
-export type AdapterKind = "claude-code" | "codex" | "mcp" | "command" | "openai-api" | "mock";
+export type AdapterKind = "claude-code" | "codex" | "mcp" | "command" | "openai-api" | "mock" | "acp";
 
 /** Live connection state of an agent, as shown in the sidebar. */
 export type AgentState = "ready" | "signed_out" | "not_installed" | "offline" | "error";
@@ -1629,3 +1629,17 @@ export interface OfficeRequirement { id: string; text: string; status: "open" | 
 export interface OfficeGoal { id: string; objective: string; status: string; requirements: OfficeRequirement[]; progress: number }
 /** GET /office?roomId= (roomId left out: every room). The apps recompute it from events, so it carries no history. */
 export interface OfficeState { at: number; roomId?: string; agents: OfficeAgent[]; goal?: OfficeGoal; pendingApprovals: number }
+// ---- 4.6 A2A agent card and ACP agents
+/** Keys made for outside A2A agents carry this scope. An "a2a" key opens POST /a2a and nothing else; an ordinary MCP key never opens /a2a. */
+export interface McpTokenInfo { scope?: "a2a" }
+/** GET /a2a/settings. `funnel`: also serve the agent card and POST /a2a through Tailscale Funnel (off until the owner turns it on). */
+export interface A2aSettings { funnel: boolean }
+/** GET /a2a/status: what outside agents are told to use. */
+export interface A2aStatus {
+  settings: A2aSettings;
+  /** The agent card's address, and the A2A endpoint the card points at. */
+  cardUrl: string;
+  endpointUrl: string;
+  /** Where the endpoint is reachable from: this Mac only, the tailnet, or the public internet (Funnel). */
+  reach: "local" | "tailnet" | "funnel";
+}

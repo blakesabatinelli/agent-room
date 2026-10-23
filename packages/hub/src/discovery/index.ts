@@ -4,6 +4,7 @@ import { probeCodex } from "./codex.js";
 import { defaultEnv, type DiscoveryEnv } from "./env.js";
 import { probeHermes, type HermesInfo } from "./hermes.js";
 import { probeServers } from "./servers.js";
+import { probeAcpAgents } from "../interop/acpDiscovery.js"; // 4.6
 
 export { defaultEnv, type DiscoveryEnv } from "./env.js";
 export type { HermesInfo } from "./hermes.js";
@@ -47,8 +48,8 @@ export interface Discovered extends DiscoveryResult { hermes?: HermesInfo }
  */
 export async function discover(env: DiscoveryEnv = defaultEnv(), now = Date.now()): Promise<Discovered> {
   const servers = await probeServers(env);
-  const [claude, codex, hermes] = await Promise.all([probeClaude(env), probeCodex(env), probeHermes(env, servers)]);
+  const [claude, codex, hermes, acp] = await Promise.all([probeClaude(env), probeCodex(env), probeHermes(env, servers), probeAcpAgents(env)]);
   if (hermes.server) { const s = servers.find((x) => x.id === hermes.server!.id && x.port === hermes.server!.port); if (s) s.usedBy = "hermes"; }
-  const agents: DiscoveredAgent[] = [claude, codex, hermes.agent, ...servers.filter((s) => !s.usedBy && s.models.length).map(serverAgent)];
+  const agents: DiscoveredAgent[] = [claude, codex, hermes.agent, ...acp, ...servers.filter((s) => !s.usedBy && s.models.length).map(serverAgent)];
   return { at: now, agents, servers, summary: summarize(agents, servers), hermes: hermes.info };
 }

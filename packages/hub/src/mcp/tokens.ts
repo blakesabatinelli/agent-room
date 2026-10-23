@@ -17,12 +17,13 @@ const KEY = "mcp_tokens_v2";
 const LEGACY_KEY = "mcp_tokens"; // plaintext key -> { agentId, name }, used before 1.1
 const TOUCH_EVERY_MS = 60_000;
 
-export interface TokenRecord { id: string; hash: string; agentId: string; name: string; roomId?: string; createdAt: number; expiresAt?: number; lastUsedAt?: number }
+export interface TokenRecord { id: string; hash: string; agentId: string; name: string; roomId?: string; createdAt: number; expiresAt?: number; lastUsedAt?: number; /** 4.6: "a2a" keys open POST /a2a only; unscoped keys are MCP keys */ scope?: "a2a" }
 
 export const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
 const info = (r: TokenRecord, at = now()): McpTokenInfo => ({
   id: r.id, agentId: r.agentId, name: r.name, roomId: r.roomId, createdAt: r.createdAt, expiresAt: r.expiresAt, lastUsedAt: r.lastUsedAt,
   expired: !!r.expiresAt && r.expiresAt <= at,
+  ...(r.scope ? { scope: r.scope } : {}),
 });
 
 export class McpTokens {
@@ -61,9 +62,9 @@ export class McpTokens {
   /** The key for a record, only while the hub that made it is still running. */
   plaintext(tokenId: string): string | undefined { return this.shown.get(tokenId); }
 
-  create(o: { agentId: string; name: string; roomId?: string; expiresAt?: number }, actor = "owner"): { token: string; info: McpTokenInfo } {
+  create(o: { agentId: string; name: string; roomId?: string; expiresAt?: number; scope?: "a2a" }, actor = "owner"): { token: string; info: McpTokenInfo } {
     const t = token();
-    const r: TokenRecord = { id: id("mtk"), hash: hashToken(t), agentId: o.agentId, name: o.name, roomId: o.roomId || undefined, createdAt: now(), expiresAt: o.expiresAt };
+    const r: TokenRecord = { id: id("mtk"), hash: hashToken(t), agentId: o.agentId, name: o.name, roomId: o.roomId || undefined, createdAt: now(), expiresAt: o.expiresAt, ...(o.scope ? { scope: o.scope } : {}) };
     this.save([...this.all(), r]);
     this.shown.set(r.id, t);
     this.store.audit(actor, "mcp.token.created", this.describe(r));
@@ -100,11 +101,15 @@ export class McpTokens {
     return mine.length;
   }
 
-  /** The record a presented key belongs to, with whether it has expired. Looks the key up by its hash. */
-  lookup(presented: string): { record: McpTokenInfo; expired: boolean } | undefined {
+  /**
+   * The record a presented key belongs to, with whether it has expired. Looks the key up by its hash.
+   * 4.6: a key only matches in its own scope. The default is the MCP scope (keys made before 4.6 have none), so an "a2a" key
+   * never opens /mcp, and a caller that wants A2A keys asks for them: lookup(key, "a2a").
+   */
+  lookup(presented: string, scope: "mcp" | "a2a" = "mcp"): { record: McpTokenInfo; expired: boolean } | undefined {
     if (!presented || presented.length > 512) return undefined;
     const hash = hashToken(presented);
-    const r = this.all().find((x) => x.hash === hash);
+    const r = this.all().find((x) => x.hash === hash && (x.scope ?? "mcp") === scope);
     if (!r) return undefined;
     const i = info(r);
     return { record: i, expired: i.expired };
@@ -121,6 +126,6 @@ export class McpTokens {
   }
 
   private describe(r: TokenRecord) {
-    return `${r.id} agent=${r.agentId} name=${JSON.stringify(r.name.slice(0, 80))} room=${r.roomId ?? "*"} expires=${r.expiresAt ? new Date(r.expiresAt).toISOString() : "never"}`;
+    return `${r.id} agent=${r.agentId} name=${JSON.stringify(r.name.slice(0, 80))} room=${r.roomId ?? "*"}${r.scope ? ` scope=${r.scope}` : ""} expires=${r.expiresAt ? new Date(r.expiresAt).toISOString() : "never"}`;
   }
 }
