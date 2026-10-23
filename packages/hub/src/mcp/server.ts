@@ -63,6 +63,7 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
       source: z.string().max(200).optional().describe("Where you learned it: a goal id, a file, a person, a page."),
     },
   }, async ({ text: t, confidence, expiresInDays, source }) => {
+    if (grant.shadow) return text("Not kept."); // 2.3: a practice run leaves nothing behind
     void orch.proposeMemory(grant.agentId, grant.roomId, t, confidence ?? 0.6, { taskId: grant.taskId, expiresInDays, sourceHint: source });
     return text("Proposal sent to the orchestrator.");
   });
@@ -86,6 +87,7 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
       goalId: z.string().optional().describe("Defaults to the goal of your current task"),
     },
   }, async ({ title, body, status, sources, tags, goalId }) => {
+    if (grant.shadow) return text("NOT SAVED. Put the document in your reply."); // 2.3
     const rid = roomId();
     if (!rid) return text("NOT SAVED. No room exists yet.");
     const gid = goalId ?? (grant.taskId ? store.getTask(grant.taskId)?.goalId : undefined);
@@ -211,6 +213,7 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
     description: "Propose creating or replacing a text file inside a granted folder with the complete new content (max 2 MB). Nothing is written yet: the owner sees the diff and must approve. Afterwards call file_write_status with the returned proposalId to see the outcome.",
     inputSchema: { path: z.string().min(1).max(1024), content: z.string().max(2 * 1024 * 1024), grantId: z.string().optional() },
   }, async ({ path, content, grantId }) => {
+    if (grant.shadow) return denied("Writes to the owner's folders aren't allowed right now."); // 2.3
     const r = orch.files.proposeWrite(grant.agentId, grant.roomId, path, content, grantId);
     if (!r.ok) return denied(r.reason);
     const p = orch.files.proposalFor(grant.agentId, r.proposal.id) ?? r.proposal;

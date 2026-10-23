@@ -7,8 +7,8 @@
   const st = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
-    view: "rooms",          // rooms | room | approvals | diff | permissions | folders | control | subscriptions | remote | personas | persona | pair
-    tools: [], control: null, quota: [], remote: null, firstPass: null, memExport: [],
+    view: "rooms",          // rooms | room | approvals | diff | permissions | folders | control | subscriptions | remote | personas | persona | resumes | pair
+    tools: [], control: null, quota: [], remote: null, firstPass: null, memExport: [], resumes: null, probationCount: 0,
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, working: {}, approvals: [],
     unread: new Set(), readAt: 0, readSent: {}, positioned: "",
     online: false, ws: null, wsDelay: 1000,
@@ -189,6 +189,7 @@
       connectWs(); render(); loadControl().catch(() => {});
       // 1.5: what the hub found about its computer, one line under Settings
       api("/capacity").then((c) => { st.capacity = c; if (st.view === "rooms") renderRooms(); }).catch(() => {});
+      api("/resumes").then((r) => { st.probationCount = r.filter((x) => x.probation.on).length; if (st.view === "rooms") renderRooms(); }).catch(() => {}); // 2.3: "2 on probation" under Résumés
     } catch (err) { if (err.message !== "unpaired") toast(`Can't reach the hub: ${err.message}`); }
   }
 
@@ -233,6 +234,7 @@
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : `# ${room.name}`)
       : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : st.view === "scorecard" ? "Scorecard" : st.view === "personas" ? "Personas" : st.view === "persona" ? (st.agents[st.personas.id]?.name || "Persona") : "Agent Room";
     renderDot(); renderBadge();
+    if (st.view === "resumes") $("#title").textContent = "Résumés"; // 2.3
     if (st.view === "pair") return renderPair();
     if (st.view === "rooms") return renderRooms();
     if (st.view === "approvals") return renderApprovals();
@@ -242,6 +244,7 @@
     if (st.view === "control") return renderControl();
     if (st.view === "subscriptions") return renderSubscriptions();
     if (st.view === "remote") return renderRemote();
+    if (st.view === "resumes") return renderResumes(); // 2.3
     if (st.view === "scorecard") return renderScorecard();
     if (st.view === "personas") return renderPersonas();
     if (st.view === "persona") return renderPersona();
@@ -270,6 +273,7 @@
     const nCtl = st.control ? st.control.notices.length : 0;
     $("#view").innerHTML += `<div class="section">Settings</div><button class="row" data-nav="permissions"><span class="hash">⚙︎</span><span class="name">Permissions</span></button>
       <button class="row" data-nav="folders"><span class="hash">▤</span><span class="name">Folders</span></button>
+      <button class="row" data-nav="resumes"><span class="hash">☰</span><span class="name">Résumés</span>${st.probationCount ? `<span class="sub">${st.probationCount} on probation</span>` : ""}</button>
       <button class="row" data-nav="remote"><span class="hash">⇄</span><span class="name">Remote access</span></button>
       <button class="row" data-nav="subscriptions"><span class="hash">◔</span><span class="name">Subscriptions</span></button>
       <button class="row" data-nav="personas"><span class="hash">☺</span><span class="name">Personas</span></button>
@@ -709,6 +713,34 @@
     for (const el of document.querySelectorAll("[data-h]")) el.style.height = `${el.dataset.h}%`;
   }
 
+  // 2.3 Resumes: where each agent is on probation (3 of 5 graded runs), what it is strong and weak at, and the owner's switch.
+  async function loadResumes() {
+    st.resumes = await api("/resumes");
+    st.probationCount = st.resumes.filter((r) => r.probation.on).length;
+    if (st.view === "resumes") renderResumes();
+  }
+  function renderResumes() {
+    if (!st.resumes) { $("#view").innerHTML = `<div class="empty">Loading…</div>`; return; }
+    const pct = (x) => (x === null ? "no work yet" : `${Math.round(x * 100)}%`);
+    $("#view").innerHTML = st.resumes.map((r) => {
+      const a = st.agents[r.agentId] || {}, pr = r.probation;
+      const tag = pr.on ? '<span class="qtag warn">On probation</span>' : pr.endedAt ? '<span class="qtag">Finished probation</span>' : "";
+      const prog = pr.on ? `<div class="qnote flat">${pr.graded} of ${pr.needed} graded runs. ${esc(r.name)} practises on copies of your tasks and gets no real work until then.</div>
+        <div class="qrow"><span class="qbar"><i data-pct="${Math.min(100, Math.round((pr.graded / Math.max(1, pr.needed)) * 100))}"></i></span></div>`
+        : pr.endedAt ? `<div class="qnote flat">${pr.endedBy === "owner" ? "You ended probation." : `Finished probation${typeof pr.mean === "number" ? `: ${pr.mean.toFixed(2)} over ${pr.graded} graded runs` : ""}.`}</div>` : "";
+      const lines = [...r.strengths.map((l) => `<div class="rline">${esc(l)}</div>`), ...r.weaknesses.map((l) => `<div class="rline warn">${esc(l)}</div>`)].join("")
+        || `<div class="qnote flat">${r.runs ? `${r.runs} graded run${r.runs === 1 ? "" : "s"}, nothing stands out yet.` : "No graded runs yet. A task type needs 3 before it shows here."}</div>`;
+      const sum = r.runs ? `<div class="qnote flat">${r.runs} graded run${r.runs === 1 ? "" : "s"}${r.shadowRuns ? ` (${r.shadowRuns} practice)` : ""}, accepted first time ${pct(r.firstPass)}</div>` : "";
+      return `<div class="qsub">
+        <div class="qhead"><span class="av mini" data-color="${esc(safeColor(a.color))}">${esc((r.name || "?")[0].toUpperCase())}</span><span class="qname">${esc(r.name)}</span>${tag}</div>
+        ${prog}${lines}${sum}
+        <div class="rbtn">${pr.on ? `<button class="btn small plain" data-probation="${esc(r.agentId)}" data-on="0">End probation</button>` : `<button class="btn small ghost" data-probation="${esc(r.agentId)}" data-on="1">Restart probation</button>`}</div>
+      </div>`;
+    }).join("") || `<div class="empty">No agents yet.</div>`;
+    paintColors();
+    for (const el of document.querySelectorAll("[data-pct]")) el.style.width = `${el.dataset.pct}%`;
+  }
+
   // 1.2: Tailscale status, read-only, plus the Funnel switch. Setup of Tailscale itself happens on the Mac.
   function renderRemote() {
     const r = st.remote;
@@ -898,6 +930,13 @@
       if (t.dataset.nav === "scorecard") {
         go("scorecard");
         st.firstPass = await api("/metrics/first-pass?weeks=12"); if (st.view === "scorecard") renderScorecard();
+        return;
+      }
+      if (t.dataset.nav === "resumes") { go("resumes"); await loadResumes(); return; } // 2.3
+      if (t.dataset.probation) { // 2.3: the owner ends or restarts probation
+        t.disabled = true;
+        try { await api(`/agents/${t.dataset.probation}/probation`, { method: "POST", body: { on: t.dataset.on === "1" } }); await loadResumes(); }
+        finally { t.disabled = false; }
         return;
       }
       if (t.dataset.nav === "remote") {

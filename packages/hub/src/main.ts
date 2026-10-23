@@ -53,6 +53,7 @@ if (!demo) {
 // 1.4: drop worktrees left behind by tasks that are no longer open, then pick up any work that was running when the hub last stopped.
 await orch.pruneWorktrees().catch(() => undefined);
 const resumed = orch.recover();
+orch.resumes.sweep(); // 2.3: close practice runs the last stop cut short, graduate agents that have the runs, write missing RESUME.md files
 if (resumed.length) console.log(`Resumed ${resumed.length} goal${resumed.length > 1 ? "s" : ""} after restart.`);
 const tsStatus = await tailscale.status(true, port);
 const ts = remoteHost(tsStatus);

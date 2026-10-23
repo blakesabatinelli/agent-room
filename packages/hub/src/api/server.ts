@@ -34,6 +34,7 @@ import { SignInManager } from "../install/signin.js";
 import { registerInstallRoutes } from "../install/routes.js";
 import { registerJuryRoutes } from "../jury/routes.js"; // 2.2
 import { registerPersonaRoutes } from "../persona/routes.js"; // 3.2
+import { registerResumeRoutes } from "../resume/routes.js"; // 2.3
 import { setupTimer } from "../install/timer.js";
 import { firstPassMetrics, retroDb } from "../retro/index.js"; // 2.1
 import { homedir } from "node:os";
@@ -449,7 +450,12 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   });
   app.get("/agents", async () => store.listAgents());
   app.get("/tools", async () => TOOLS);
-  app.post("/agents", async (req) => { const a = agentSchema.parse(req.body) as AgentConfig; store.saveAgent(a); store.audit("owner", "agent.saved", a.id); return a; });
+  app.post("/agents", async (req) => {
+    const a = agentSchema.parse(req.body) as AgentConfig; const isNew = !store.getAgent(a.id);
+    store.saveAgent(a); store.audit("owner", "agent.saved", a.id);
+    if (isNew) orch.resumes.newAgent(a.id); // 2.3: a new agent starts on probation
+    return a;
+  });
   app.put("/agents/:id", async (req, reply) => {
     const cur = store.getAgent((req.params as { id: string }).id);
     if (!cur) return reply.code(404).send({ error: "Agent not found." });
@@ -657,6 +663,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   app.get("/capacity", async () => orch.governor.snapshot());
   registerJuryRoutes(app, store); // 2.2: GET /juries, GET /jury/stats
   registerPersonaRoutes(app, store, () => orch.control); // 3.2: GET /personas/templates, GET and PUT /agents/:id/persona
+  registerResumeRoutes(app, store, orch.resumes); // 2.3: GET /agents/:id/resume, GET /resumes, POST /agents/:id/probation
   app.put("/settings", async (req) => {
     const s = z.object({
       orchestratorAgentId: z.string(), judgeRotation: z.array(z.string()),
@@ -671,6 +678,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
       jury: z.object({ enabled: z.boolean().optional(), size: z.number().int().min(2).max(5).optional(), requireLocal: z.boolean().optional(), minFamilies: z.number().int().min(2).max(5).optional() }).optional(), // 2.2
       memoryTtlDays: z.object({ fact: z.number().int().min(1).max(3650), preference: z.number().int().min(1).max(3650), status: z.number().int().min(1).max(3650) }).optional(), // 2.5
       memoryExportBytes: z.number().int().min(512).max(65536).optional(), // 2.5
+      probationRuns: z.number().int().min(1).max(50).optional(), // 2.3
       capacity: z.object({
         maxConcurrentTasks: z.number().int().min(1).max(32).optional(),
         localModels: z.enum(["auto", "on", "off"]).optional(),

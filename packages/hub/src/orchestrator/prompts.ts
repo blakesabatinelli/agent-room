@@ -12,10 +12,12 @@ To ask one of them something, use the ask_agent tool, or tag them in your reply 
 specific question. Only tag when you genuinely need something from them. Never tag to hand off or
 split your own work, and never start work you were not given.`;
 
-function track(agents: AgentConfig[], scores: AgentScore[]) {
+/** 2.3: what the planner is told about each agent's résumé (strengths and weaknesses, one short line each), and who is on probation. */
+export interface ResumeNotes { lines: Record<string, string[]>; probation?: string }
+
+function track(agents: AgentConfig[], resumes: ResumeNotes) {
   return agents.map((a) => {
-    const s = scores.filter((x) => x.agentId === a.id && x.runs > 0)
-      .map((x) => `${x.taskType} ${Math.round(x.quality * 100)}/100 over ${x.runs}`).join(", ");
+    const s = (resumes.lines[a.id] ?? []).join("; "); // 2.3: the résumé's lines, not the raw score table
     const ps = profilesOf(a).map((p) => `${p.role} tier ${p.tier} (${profileText(p)})`).join("; ");
     return `- ${handle(a)}: ${a.name} — profiles: ${ps}${capabilityText(a)}${s ? ` — track record: ${s}` : " — no track record yet"}`; // 1.3: capabilityText says what data sources it can reach
   }).join("\n");
@@ -31,7 +33,7 @@ const PLAN_TASK_SCHEMA = `{"key":"t1","owner":"<agent id>","title":"...","role":
   "needs":["data sources or connectors this task must read, e.g. salesforce, gmail, drive, slack, snowflake; [] when none"],
   "taskType":"research","dependsOn":[]}`;
 
-export const planPrompt = (goal: string, agents: AgentConfig[], memory: MemoryEntry[], ownerNotes: string[], conversation = "", scores: AgentScore[] = [], lead?: string, problems: string[] = [], previous?: string, commands = "") => `[[PLAN]]
+export const planPrompt = (goal: string, agents: AgentConfig[], memory: MemoryEntry[], ownerNotes: string[], conversation = "", /** 2.3: no longer shown (résumés replace the raw table); kept so callers needn't change */ _scores: AgentScore[] = [], lead?: string, problems: string[] = [], previous?: string, commands = "", /** 2.3: each agent's résumé lines, and who is on probation */ resumes: ResumeNotes = { lines: {} }) => `[[PLAN]]
 You are the orchestrator of a multi-agent chat room. Decide how to handle the owner's latest message.
 
 Goal: ${goal}
@@ -40,8 +42,8 @@ Recent conversation:
 ${conversation || "(none)"}
 
 Available agents:
-${track(agents, scores)}
-${commands ? `Skills and commands each agent has (an agent whose skill matches a task is a good owner for it):\n${commands}\n` : ""}
+${track(agents, resumes)}
+${resumes.probation ? `${resumes.probation}\n` : ""}${commands ? `Skills and commands each agent has (an agent whose skill matches a task is a good owner for it):\n${commands}\n` : ""}
 Shared memory:
 ${mem(memory)}
 

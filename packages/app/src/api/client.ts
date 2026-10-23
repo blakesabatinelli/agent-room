@@ -1,6 +1,7 @@
 import type {
   AgentConfig, AgentScore, VersionScoreRow, ModelShift, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
-  Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal, JuryCalibration, CommandsResponse, FirstPassMetrics, MemoryExportInfo, PersonaInput, PersonaTemplate, PersonaView,
+  Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription,
+  SubscriptionStatus, Task, WriteProposal, JuryCalibration, CommandsResponse, FirstPassMetrics, MemoryExportInfo, PersonaInput, PersonaTemplate, PersonaView, AgentResume, ProbationStatus,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -89,6 +90,10 @@ export class Hub {
   modelShifts = () => this.req<ModelShift[]>("/model-shifts"); // 2.4, newest first
   firstPass = (weeks = 12) => this.req<FirstPassMetrics>(`/metrics/first-pass?weeks=${weeks}`); // 2.1
   tools = () => this.req<{ id: string; label: string; sensitive: boolean }[]>("/tools");
+  // 2.3: the résumé the orchestrator keeps for an agent, and the owner's switch for probation
+  resume = (id: string) => this.req<AgentResume>(`/agents/${id}/resume`);
+  resumes = () => this.req<AgentResume[]>("/resumes");
+  setProbation = (id: string, on: boolean) => this.send<{ agentId: string; probation: ProbationStatus }>("POST", `/agents/${id}/probation`, { on });
 
   settings = () => this.req<OrchestratorSettings & { calibration: { n: number; absErr: number } }>("/settings");
   saveSettings = (s: Partial<OrchestratorSettings>) => this.send<OrchestratorSettings>("PUT", "/settings", s);

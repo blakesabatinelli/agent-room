@@ -34,7 +34,7 @@ async function mk(t: TestContext, o: { control?: boolean } = {}) {
 }
 
 const git = (root: string, ...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" });
-const commits = (root: string) => git(root, "log", "--format=%an|%s").trim().split("\n").filter(Boolean);
+const commits = (root: string) => git(root, "log", "--format=%an|%s").trim().split("\n").filter(Boolean).filter((l) => !l.includes("|Résumé: ")); // 2.3: the résumé writer's commits are its own
 const read = (root: string, rel: string) => readFileSync(join(root, rel), "utf8");
 const write = (root: string, rel: string, text: string) => { mkdirSync(dirname(join(root, rel)), { recursive: true }); writeFileSync(join(root, rel), text); };
 const bullets = (text: string, type: string) => {
@@ -137,7 +137,8 @@ test("AC1: a finished goal with sent-back tasks writes lessons for the right age
   const log = commits(c.root);
   assert.equal(log.filter((l) => l.includes("Retro for")).length, 1);
   assert.equal(log.find((l) => l.includes("Retro for")), `orchestrator|Retro for ${goal.id}`);
-  assert.match(git(c.root, "show", "--name-only", "--format=", "HEAD"), /LESSONS\.md/);
+  const retroCommit = git(c.root, "log", "--format=%H %s").split("\n").find((l) => l.includes("Retro for"))!.split(" ")[0]; // 2.3: RESUME.md commits can come after it
+  assert.match(git(c.root, "show", "--name-only", "--format=", retroCommit), /LESSONS\.md/);
 
   // Visible: one quiet line in the room, and an audit entry.
   const line = c.store.listMessages(c.room.id).filter((m) => m.text.startsWith("Retro:"));
