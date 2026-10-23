@@ -28,6 +28,8 @@
     tasks: [], taskRoom: "",
     // 4.3 standing rooms: the read-only room info (what ROOM.md says)
     info: { roomId: "", def: null, err: "" },
+    // 4.4 forks: the fork on screen, its tab, a merge waiting for a second tap, and the diffs left open
+    fork: { id: "", roomId: "", v: null, err: "", tab: "a", confirm: "", busy: false, open: {} },
   };
 
   // ---------- helpers
@@ -147,13 +149,14 @@
       case "hello": st.ownerName = e.ownerName; break;
       case "message": {
         const m = e.message;
+        if (m.forkId && m.forkId === st.fork.id) refreshFork(); // 4.4
         if (m.roomId === st.roomId && st.view === "room") {
           if (!st.messages.some((x) => x.id === m.id)) { st.messages.push(m); markRead(m.roomId, m.createdAt); renderMessages(m.author.kind === "human"); }
         } else if (visibleMsg(m) && m.author.kind !== "human") { st.unread.add(m.roomId); if (st.view === "rooms") renderRooms(); }
         break;
       }
       case "task": case "subagent": upsertTask(e.task); break; // 3.3
-      case "goal": st.goals[e.goal.id] = e.goal; if (e.goal.roomId === st.roomId) { renderMessages(); renderComposerState(); } break;
+      case "goal": st.goals[e.goal.id] = e.goal; if (e.goal.roomId === st.roomId) { renderMessages(); renderComposerState(); } if (e.goal.fork && e.goal.fork.id === st.fork.id) refreshFork(); break; // 4.4
       case "task": if (e.task.roomId === st.roomId) { st.tasks[e.task.id] = e.task; if (st.view === "room") renderMessages(); } break; // 3.1: the verdict chips and the goal card
       case "working": {
         const w = (st.working[e.roomId] ||= {});
@@ -169,6 +172,7 @@
         break;
       }
       case "room": {
+        if (e.room.forkId) break; // 4.4: the two lanes of a fork are not rooms to open; the fork card in the room opens them
         const i = st.rooms.findIndex((r) => r.id === e.room.id);
         if (i >= 0) st.rooms[i] = e.room; else st.rooms.push(e.room);
         if (st.view === "rooms") renderRooms();
@@ -262,6 +266,7 @@
     $("#officeBtn").hidden = st.view !== "room"; // 3.4
     if (st.view === "resumes") $("#title").textContent = "Résumés"; // 2.3
     if (st.view === "appearance") $("#title").textContent = "Appearance"; // 3.1
+    if (st.view === "fork") $("#title").textContent = "Fork"; // 4.4
     $("#jumpBtn").hidden = st.view === "pair";
     renderGoal();
     if (st.view === "pair") return renderPair();
@@ -280,6 +285,7 @@
     if (st.view === "persona") return renderPersona();
     if (st.view === "tasks") return renderTasks(); // 3.3
     if (st.view === "roominfo") return renderRoomInfo();
+    if (st.view === "fork") return renderFork(); // 4.4
     renderMessages(); renderComposerState();
   }
 
@@ -423,6 +429,42 @@
       f.template = v.template || ""; toast("Saved");
     } catch (e) { if (e.message === "unpaired") return; p.err = e.message; }
     finally { p.busy = false; if (st.view === "persona") renderPersona(); }
+  }
+
+  // 4.4 Fork: both sides of one goal, side by side, and the blind comparison. Tabs on a phone, two columns when there is room.
+  async function openFork(id) {
+    Object.assign(st.fork, { id, roomId: st.roomId || st.fork.roomId, v: null, err: "", tab: "a", confirm: "", busy: false, open: {} });
+    go("fork");
+    await loadFork();
+  }
+  async function loadFork() {
+    const id = st.fork.id; if (!id) return;
+    try {
+      const v = await api(`/forks/${encodeURIComponent(id)}`);
+      if (st.fork.id !== id) return;
+      st.fork.v = v; st.fork.roomId = v.roomId; st.fork.err = "";
+    } catch (e) { if (e.message === "unpaired") return; st.fork.err = e.message; }
+    if (st.view === "fork") renderFork();
+  }
+  let forkTimer = 0;
+  function refreshFork() { if (st.view !== "fork" || forkTimer) return; forkTimer = setTimeout(() => { forkTimer = 0; void loadFork(); }, 400); }
+  function renderFork() {
+    const f = st.fork, host = $("#view");
+    if (!f.v) { host.replaceChildren(h("div", { class: "empty", text: f.err || "Loading…" })); return; }
+    ARFork.render(host, f.v, f, { safeColor, paint: paintColors, onAct: (kind, side) => void forkAct(kind, side) });
+  }
+  async function forkAct(kind, side) {
+    const f = st.fork; if (f.busy) return;
+    if (kind === "cancel") { f.confirm = ""; renderFork(); return; }
+    if (kind === "merge" && f.confirm !== side) { f.confirm = side; f.err = ""; renderFork(); return; } // a merge takes a second tap
+    f.busy = true; f.err = ""; renderFork();
+    try {
+      if (kind === "merge") { f.v = await api(`/forks/${encodeURIComponent(f.id)}/merge`, { method: "POST", body: { side } }); f.tab = "compare"; toast(`Merged side ${side.toUpperCase()}`); }
+      else if (kind === "plan") await api(`/forks/${encodeURIComponent(f.id)}/plan`, { method: "POST", body: {} });
+      else if (kind === "compare") await api(`/forks/${encodeURIComponent(f.id)}/compare`, { method: "POST", body: {} });
+    } catch (e) { if (e.message === "unpaired") return; f.err = e.message; }
+    f.busy = false; f.confirm = "";
+    if (st.view === "fork") { renderFork(); if (kind !== "merge") void loadFork(); }
   }
 
   // 4.3 Room info: what the room's ROOM.md says. Read only here; the roster and schedule are edited on the Mac.
@@ -1017,7 +1059,7 @@
       html += `<div class="msg${grouped ? "" : " first"}${sys ? " system" : ""}${m.planGoalId ? " plan" : ""}">
         <span class="av${cls ? ` ${cls}` : ""}"${cls ? "" : ` data-color="${esc(safeColor(agent?.color))}"`}>${sys ? "•" : esc(glyph(agent, name))}</span>
         <div class="body">${grouped ? "" : `<div class="who">${esc(sys ? "Agent Room" : name)}<span class="when">${esc(time(m.createdAt))}</span></div>`}
-          <div class="text">${md(m.text)}</div>${actions}</div></div>${chips[m.id] ? verdictRow(st.tasks[chips[m.id]]) : ""}`;
+          <div class="text">${md(m.text)}</div>${actions}${m.forkId ? `<div class="actions"><button class="btn small" data-open-fork="${esc(m.forkId)}">Open fork</button></div>` : ""}</div></div>${chips[m.id] ? verdictRow(st.tasks[chips[m.id]]) : ""}`;
       prev = m;
     }
     view.innerHTML = `<div class="msgs">${html || '<div class="empty">No messages yet. Say what you need.</div>'}</div>`;
@@ -1174,6 +1216,7 @@
       if (t.dataset.themeMode) { window.ARTheme.set(t.dataset.themeMode); renderAppearance(); return; }
       if (t.dataset.nav === "appearance") { go("appearance"); return; }
       if (t.dataset.room) return go("room", t.dataset.room);
+      if (t.dataset.openFork) { void openFork(t.dataset.openFork); return; } // 4.4
       if (t.dataset.nav === "permissions") {
         go("permissions");
         if (!st.tools.length) { st.tools = await api("/tools"); if (st.view === "permissions") renderPermissions(); }
@@ -1319,7 +1362,7 @@
     catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
   });
 
-  $("#back").onclick = () => (st.view === "tasks" ? go("room", st.taskRoom) : st.view === "roominfo" ? go("room", st.info.roomId) : go(st.view === "diff" ? "approvals" : st.view === "persona" ? "personas" : "rooms"));
+  $("#back").onclick = () => (st.view === "tasks" ? go("room", st.taskRoom) : st.view === "roominfo" ? go("room", st.info.roomId) : st.view === "fork" ? go("room", st.fork.roomId) : go(st.view === "diff" ? "approvals" : st.view === "persona" ? "personas" : "rooms"));
   $("#tasksBtn").onclick = () => void openTasks(); // 3.3
   $("#infoBtn").onclick = () => void openRoomInfo(); // 4.3
   $("#jumpNew").onclick = () => {

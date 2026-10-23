@@ -11,6 +11,7 @@ import { TaskVerdict } from "../components/TaskVerdict"; // 3.1
 import { chipMessageIds } from "@agent-room/shared/src/goalview";
 import { HelperBadge, helperStatus, treeRows } from "../components/SubagentTree"; // 3.3
 import { RoomSettings } from "../components/RoomSettings"; // 4.3
+import { ForkPane } from "../components/ForkView"; // 4.4
 import { lift, radius, space, type as t, usePalette } from "../theme";
 
 type Row = { kind: "day"; id: string; at: number } | { kind: "new"; id: string } | { kind: "msg"; id: string; m: Message; grouped: boolean };
@@ -30,6 +31,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
   const [text, setText] = useState("");
   const [details, setDetails] = useState(false);
   const [settings, setSettings] = useState(false); // 4.3: the room's ROOM.md, in the same right-hand pane
+  const [forkId, setForkId] = useState<string>(); // 4.4: the fork open in place of the conversation
   const [height, setHeight] = useState(22);
   const list = useRef<FlatList<Row>>(null);
   const input = useRef<TextInput>(null);
@@ -90,7 +92,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
   // Seeing the room marks it read up to the newest message, on every paired device.
   const newest = messages.at(-1)?.createdAt ?? 0;
   useEffect(() => { if (ready && roomId && newest) void hub?.markRead(roomId, newest).catch(() => {}); }, [ready, roomId, newest]);
-  useEffect(() => { setText(""); setDetails(false); setSettings(false); setFolderId(""); setPickOpen(false); }, [roomId]);
+  useEffect(() => { setText(""); setDetails(false); setSettings(false); setForkId(undefined); setFolderId(""); setPickOpen(false); }, [roomId]);
   useEffect(() => { if (s.composerStamp) input.current?.focus(); }, [s.composerStamp]); // 3.1: "Start a goal" in the ⌘K palette
 
   // 1.1: a goal can work in a folder the owner granted. Only grants that can carry a goal are offered: open to every
@@ -235,6 +237,11 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
               glyph={item.m.author.kind === "human" ? undefined : agents.find((a) => a.id === item.m.author.id)?.avatar}
               onAuthor={(id) => void s.openDm(id)} />
             {chipIds.has(item.m.id) ? <TaskVerdict taskId={chipIds.get(item.m.id)!} /> : null}
+            {item.m.forkId ? (
+              <View style={{ flexDirection: "row", paddingLeft: space(5) + 28 + space(2.5), paddingBottom: space(2) }}>
+                <Button small label="Open fork" onPress={() => setForkId(item.m.forkId)} />
+              </View>
+            ) : null}
             {item.m.planGoalId && goals[item.m.planGoalId]?.status === "awaiting_approval" ? (
               <View style={{ flexDirection: "row", gap: space(2), paddingLeft: space(5) + 28 + space(2.5), paddingBottom: space(2) }}>
                 <Button small label="Approve and start" onPress={() => void hub?.decidePlan(item.m.planGoalId!, "approve").catch((e) => s.setError((e as Error).message))} />
@@ -347,7 +354,8 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
     <View style={{ flex: 1, backgroundColor: p.canvas }}>
       {header}
       <View style={{ flex: 1, flexDirection: "row" }}>
-        {(details || settings) && !wide && width < 700 ? null : <View style={{ flex: 1 }}>{chat}</View>}
+        {forkId ? <View style={{ flex: 1 }}><ForkPane forkId={forkId} onClose={() => setForkId(undefined)} /></View>
+          : (details || settings) && !wide && width < 700 ? null : <View style={{ flex: 1 }}>{chat}</View>}
         {details ? (
           <View style={{ width: width < 700 ? "100%" : 340, borderLeftWidth: 1, borderColor: p.line, backgroundColor: p.canvas }}>
             <Activity log={log} onClose={() => setDetails(false)} />

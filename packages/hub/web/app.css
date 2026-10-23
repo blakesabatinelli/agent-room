@@ -344,3 +344,50 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .tsub { margin-top: 2px; font-size: 13px; color: var(--muted); }
 .tsub.s-done { color: var(--ok); } .tsub.s-failed { color: var(--danger); } .tsub.s-waiting { color: var(--warn); }
 .tag { display: inline-block; margin-left: 4px; padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: 99px; font-size: 11px; font-weight: 600; color: var(--muted); vertical-align: 1px; }
+/* 4.4 fork: two sides of one goal. Tabs on a phone, two columns with the comparison under them on a wide screen. */
+.fork { padding: 12px 16px 32px; display: flex; flex-direction: column; gap: 12px; }
+.fk-goal { border-bottom: 1px solid var(--line); padding-bottom: 10px; font-size: 15px; color: var(--ink-strong); overflow-wrap: anywhere; }
+.fk-label { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.fk-target { margin-top: 4px; font-size: 13px; color: var(--muted); }
+.fk-tabs { display: flex; gap: 6px; }
+.fk-tab { flex: 1; padding: 8px 10px; border-radius: 99px; border: 1px solid var(--line-strong); background: var(--canvas); color: var(--ink); font-size: 14px; font-weight: 600; }
+.fk-tab.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.fk-cols { display: contents; }
+.fk-side, .fk-compare { display: none; flex-direction: column; gap: 6px; min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: var(--canvas); }
+.fork[data-tab="a"] .fk-side[data-side="a"], .fork[data-tab="b"] .fk-side[data-side="b"], .fork[data-tab="compare"] .fk-compare { display: flex; }
+.fk-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fk-title { font-family: var(--display); font-size: 17px; color: var(--ink-strong); }
+.fk-roster { display: flex; flex-wrap: wrap; gap: 8px; font-size: 14px; color: var(--ink); }
+.fk-agent { display: inline-flex; align-items: center; gap: 5px; }
+.fk-status { font-size: 14px; font-weight: 600; color: var(--ink-strong); }
+.fk-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.fk-h { margin-top: 8px; display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.fk-h small { font-weight: 400; text-transform: none; letter-spacing: 0; }
+.fk-summary { font-size: 14px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
+.fk-req { display: flex; gap: 8px; font-size: 14px; color: var(--ink); }
+.fk-req i { font-style: normal; font-weight: 700; flex: none; width: 14px; color: var(--muted); }
+.fk-req.met i { color: var(--ok); } .fk-req.unmet i { color: var(--danger); }
+.fk-row { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; padding: 4px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.fk-row small, .fk-none { font-size: 13px; color: var(--muted); }
+.fk-file { display: inline-flex; gap: 6px; align-items: baseline; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.fk-tag { flex: none; font-size: 11px; font-weight: 600; color: var(--muted); border: 1px solid var(--line-strong); border-radius: 99px; padding: 0 6px; }
+.fk-diff summary { cursor: pointer; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.fk-diff pre { margin: 4px 0 8px; padding: 8px; background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; overflow: auto; max-height: 280px; white-space: pre; }
+.fk-pref { font-size: 15px; color: var(--ink-strong); }
+.fk-reasons { margin: 4px 0; padding-left: 18px; font-size: 14px; color: var(--ink); }
+.fk-grid { display: grid; grid-template-columns: 1fr 28px 28px; gap: 8px; align-items: start; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.fk-grid.head { font-size: 12px; font-weight: 700; color: var(--muted); }
+.fk-reqtext { overflow-wrap: anywhere; }
+.fk-v { text-align: center; font-weight: 700; color: var(--muted); }
+.fk-v.PASS { color: var(--ok); } .fk-v.FAIL { color: var(--danger); }
+.fk-note { font-size: 13px; color: var(--muted); }
+.fk-done { font-size: 14px; font-weight: 600; color: var(--ok); }
+.fk-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.fk-actions button:disabled { opacity: 0.45; }
+@media (min-width: 820px) {
+  .fork { display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
+  .fk-goal, .fk-compare { grid-column: 1 / -1; }
+  .fk-tabs { display: none; }
+  .fk-cols { display: contents; }
+  .fk-side, .fk-compare { display: flex !important; }
+}

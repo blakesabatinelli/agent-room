@@ -38,6 +38,7 @@ import { registerPersonaRoutes } from "../persona/routes.js"; // 3.2
 import { registerResumeRoutes } from "../resume/routes.js"; // 2.3
 import { registerReportRoutes } from "../report/routes.js"; // 2.7
 import { registerOfficeRoutes } from "../office/routes.js"; // 3.4
+import { registerForkRoutes } from "../fork/routes.js"; // 4.4
 import { setupTimer } from "../install/timer.js";
 import { firstPassMetrics, retroDb } from "../retro/index.js"; // 2.1
 import { homedir } from "node:os";
@@ -131,6 +132,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     // 3.4: the office page, its script and style, and the pinned three.js build it imports (the CSP only allows our own origin)
     ["office.html", "text/html; charset=utf-8"], ["office.js", "text/javascript; charset=utf-8"], ["office.css", "text/css; charset=utf-8"],
     ["vendor/three.module.min.js", "text/javascript; charset=utf-8"],
+    ["fork.js", "text/javascript; charset=utf-8"], // 4.4: the fork view (two sides, the blind comparison, merge)
   ] as const) {
     try { webFiles.set(name, { type, body: readFileSync(new URL(name, webDir)) }); } catch { /* missing asset: that route 404s */ }
   }
@@ -350,7 +352,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   registerInteropRoutes(app, { store, orch, tokens: mcpTokens, tailscale, limiter: authLimiter, port: () => port() });
 
   // ---------- rooms & chat
-  app.get("/rooms", async () => store.listRooms());
+  app.get("/rooms", async () => store.listRooms().filter((r) => !r.forkId)); // 4.4: a fork's lanes are rooms the apps reach through the fork, not the sidebar
   app.post("/rooms", async (req) => {
     const b = z.object({ name: z.string().min(1).max(80), topic: z.string().max(250).optional() }).parse(req.body);
     const name = b.name.trim().toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "") || "room";
@@ -685,6 +687,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   registerReportRoutes(app, store); // 2.7: GET /reports/scorecard, /reports/ledger, /reports/kill-review, GET /attention
   registerRoomRoutes(app, () => ({ store, control: () => orch.control, files: orch.files, standing: orch.standing })); // 4.3: GET and PUT /rooms/:id/definition
   registerOfficeRoutes(app, store); // 3.4: GET /office?roomId=
+  registerForkRoutes(app, store, () => orch.forks); // 4.4: POST /goals/fork, GET /forks, GET /forks/:id, POST /forks/:id/merge
   app.put("/settings", async (req) => {
     const s = z.object({
       orchestratorAgentId: z.string(), judgeRotation: z.array(z.string()),

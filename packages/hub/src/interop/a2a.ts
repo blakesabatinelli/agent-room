@@ -221,7 +221,7 @@ export class A2aService {
 
   /** The room a request is for: the key's own room when it has one, else the named room (id, or name with or without #), default "general". */
   private room(rec: McpTokenInfo, asked: unknown) {
-    const rooms = this.store.listRooms().filter((r) => !r.dmAgentId);
+    const rooms = this.store.listRooms().filter((r) => !r.dmAgentId && !r.forkId);
     if (rec.roomId) {
       const r = this.store.getRoom(rec.roomId);
       if (!r) throw new RpcError(RPC.invalidParams, "The room this key is pinned to no longer exists.");

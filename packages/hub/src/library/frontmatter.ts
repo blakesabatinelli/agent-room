@@ -6,7 +6,7 @@ import type { DocFrontMatter, DocStatus } from "@agent-room/shared";
  * arrays inline as `[a, b]`.
  */
 
-export const DOC_STATUSES: readonly DocStatus[] = ["draft", "review", "final"];
+export const DOC_STATUSES: readonly DocStatus[] = ["draft", "review", "final", "superseded"]; // superseded: set by the hub (4.4), never by an agent (the MCP tool takes the first three)
 const KEY_ORDER = ["id", "title", "room", "goal", "status", "authors", "created", "updated", "sources", "tags"] as const;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 // Letters, digits and a few joiners, single spaces inside. No `: `, `#`, quotes, commas or brackets.

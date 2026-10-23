@@ -41,7 +41,7 @@ export interface WorkspaceOptions {
  * 1.1: a goal that works on a folder the owner granted. `path` is the real, granted folder.
  * `write` false (or `revoked`) means nothing is ever written to it: tasks work in a private copy.
  */
-export interface GoalSource { grantId: string; path: string; write: boolean; label?: string; /** git folders: where accepted work lands, agent-room/<goal-id> */ branch: string; revoked?: boolean }
+export interface GoalSource { grantId: string; path: string; write: boolean; label?: string; /** git folders: where accepted work lands, agent-room/<goal-id> */ branch: string; revoked?: boolean; /** 4.4: a branch of the owner's repo to start `branch` from when it does not exist yet (a fork starts from the forked goal's work) */ from?: string }
 export interface GoalRef { id: string; folder: string; /** 1.1 */ source?: GoalSource }
 /** 1.1: what `_source.json` holds for a goal on a granted folder. */
 export interface SourceMeta {
@@ -357,7 +357,8 @@ export class TaskWorkspaces {
     if ((await this.git(clone, ["init", "-q", "--template="])).code !== 0) return fail();
     this.bind(clone, clone);
     const has = await this.gitOk(s.path, ["rev-parse", "--verify", "-q", `refs/heads/${s.branch}`], true);
-    const from = has ? `refs/heads/${s.branch}` : "HEAD";
+    const hasFrom = !has && !!s.from && await this.gitOk(s.path, ["rev-parse", "--verify", "-q", `refs/heads/${s.from}`], true); // 4.4
+    const from = has ? `refs/heads/${s.branch}` : hasFrom ? `refs/heads/${s.from}` : "HEAD";
     const got = await this.git(clone, ["-c", "core.logAllRefUpdates=false", "fetch", "-q", "--no-tags", "--no-recurse-submodules", s.path, `${from}:refs/heads/${s.branch}`]);
     if (got.code !== 0) return fail();
     // fetch records where it fetched from (FETCH_HEAD, reflog): an agent that can read the clone must not learn where the owner's repository is.

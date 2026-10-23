@@ -128,6 +128,29 @@ export class Library {
   }
   get(docId: string) { return this.store.getDocument(docId); }
 
+  /**
+   * 4.4: the hub marks a document (the other side of a merged fork: "superseded"). Only the status line of the file changes, the file stays where it is.
+   * Returns the document, or undefined when it is gone or its file can't be read.
+   */
+  setStatus(docId: string, status: DocStatus, actor = "hub"): LibraryDoc | undefined {
+    const doc = this.store.getDocument(docId);
+    if (!doc || !DOC_STATUSES.includes(status)) return undefined;
+    let text: string;
+    try { text = readFileSync(this.inside(doc.path), "utf8"); } catch { return undefined; }
+    const read = readDocument(text);
+    if (!read) return undefined;
+    if (read.frontMatter.status === status) return doc;
+    const fm: DocFrontMatter = { ...read.frontMatter, status, updated: localDate(now()) };
+    const out = `${emitFrontMatter(fm)}\n${read.body.replace(/^\n+/, "").trimEnd()}\n`;
+    const path = this.inside(doc.path);
+    const tmp = `${path}.${token().slice(0, 8)}.tmp`;
+    try { writeFileSync(tmp, out, "utf8"); renameSync(tmp, path); } catch { rmSync(tmp, { force: true }); return undefined; }
+    const next: LibraryDoc = { ...doc, frontMatter: fm, bytes: Buffer.byteLength(out), indexedAt: now() };
+    this.store.saveDocument(next);
+    this.store.audit(actor, "document.status", `${doc.relPath}: ${status}`);
+    return next;
+  }
+
   /** Refuse any path that does not resolve strictly inside the Library root. */
   private inside(p: string): string {
     const abs = resolve(p);

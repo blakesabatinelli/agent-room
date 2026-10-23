@@ -13,7 +13,7 @@ export const ROOM_COMMANDS: CommandRow[] = [
   { name: "pause", title: "Pause", description: "Pause all work in this room.", kind: "room" },
   { name: "resume", title: "Resume", description: "Pick paused work back up.", kind: "room" },
   { name: "stop", title: "Stop", description: "Stop all work in this room.", kind: "room" },
-  { name: "fork", title: "Fork", description: "Branch this room into a new one.", kind: "room" },
+  { name: "fork", title: "Fork", description: "Run a goal with two rosters, compare the results, merge one.", argsHint: "[goal] | rosterA: a,b | rosterB: c,d", kind: "room" },
   { name: "digest", title: "Digest", description: "Summarize what happened in this room.", kind: "room" },
   { name: "redirect", title: "Redirect", description: "Restart the running work with a change.", argsHint: "[@agent] what to change", kind: "room" },
   { name: "replan", title: "Replan", description: "Change direction and plan the rest again.", argsHint: "what to change", kind: "room" },

@@ -23,7 +23,8 @@ export class GoalSources {
   constructor(private files: FileBroker, private store: Store) {}
 
   /** Can this grant be the folder of a goal started in this room? */
-  usable(grantId: string, roomId: string): { ok: true } | { ok: false; reason: string } {
+  usable(grantId: string, roomIn: string): { ok: true } | { ok: false; reason: string } {
+    const roomId = this.store.getRoom(roomIn)?.forkOf ?? roomIn; // 4.4: a fork's lane is the room it was started in, for folders
     const g = this.files.grant(grantId);
     if (!g) return { ok: false, reason: "That folder grant doesn't exist." };
     if (g.roomId && g.roomId !== roomId) return { ok: false, reason: "That folder is granted to a different room." };
@@ -44,7 +45,7 @@ export class GoalSources {
     const g = this.files.grant(goal.sourceGrantId);
     const branch = goal.sourceBranch ?? branchFor(goal.id);
     if (!g || !this.usable(goal.sourceGrantId, goal.roomId).ok) return { id: goal.id, folder, source: { grantId: goal.sourceGrantId, path: "", write: false, branch, revoked: true } };
-    return { id: goal.id, folder, source: { grantId: g.id, path: g.path, write: g.write, label: g.label ?? basename(g.path), branch } };
+    return { id: goal.id, folder, source: { grantId: g.id, path: g.path, write: g.write, label: g.label ?? basename(g.path), branch, ...(goal.sourceFrom ? { from: goal.sourceFrom } : {}) } };
   }
 
   /** True when this goal works on a folder grant that no longer covers it (removed, narrowed to other agents or rooms, or no longer readable). */
