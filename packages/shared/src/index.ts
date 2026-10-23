@@ -552,3 +552,60 @@ export interface RoutingRecord {
   failureNote?: string;
   completedAt?: number;
 }
+
+// ---- 1.5 Scheduling that adapts to the hardware
+export type CapacityTier = "small" | "medium" | "large";
+/** How heavy an agent is on this machine. local-cli: a CLI process whose model runs in the cloud. */
+export type AgentLocality = "local-model" | "local-cli" | "remote";
+
+/** Owner overrides (OrchestratorSettings.capacity). Anything unset follows the detected hardware. */
+export interface CapacitySettings {
+  /** Most local tasks at once (local models and local CLIs; cloud agents don't count). */
+  maxConcurrentTasks?: number;
+  /** auto: on when the machine has room. */
+  localModels?: "auto" | "on" | "off";
+  /** Local CLI agents (Claude Code, Codex) running at once. */
+  maxLocalCliAgents?: number;
+  /** Biggest local model, in GB, the hub will start. */
+  localModelMaxGB?: number;
+  /** Free memory, in GB, a local model needs before it starts. */
+  minFreeGB?: number;
+  /** Total memory below this (GB) is a small machine. Default 12. */
+  smallBelowGB?: number;
+  /** Total memory at or above this (GB) is a large machine. Default 28. */
+  largeFromGB?: number;
+}
+export interface OrchestratorSettings { capacity?: CapacitySettings }
+
+export interface HardwareInfo {
+  /** Memory in GiB, one decimal. */
+  totalGB: number;
+  freeGB: number;
+  cores: number;
+  /** Performance cores (Apple silicon). */
+  perfCores?: number;
+  appleSilicon: boolean;
+  chip?: string;
+  /** Marketing family when known, e.g. "MacBook Pro". */
+  machine?: string;
+}
+
+export interface CapacityPlan {
+  tier: CapacityTier;
+  maxConcurrentTasks: number;
+  maxLocalCliAgents: number;
+  localModelsAllowed: boolean;
+  localModelMaxGB: number;
+  minFreeGB: number;
+  reason: string;
+}
+
+export interface CapacitySnapshot {
+  hardware: HardwareInfo;
+  plan: CapacityPlan;
+  running: { total: number; localModel: number; localCli: number; remote: number };
+  /** Local work is at its limit: new tasks go to cloud agents. */
+  atLimit: boolean;
+  /** One line for the apps. */
+  summary: string;
+}

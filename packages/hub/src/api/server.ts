@@ -399,7 +399,9 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
       .header("content-disposition", `attachment; filename="agent-room-routing-${new Date().toISOString().slice(0, 10)}.jsonl"`)
       .send(routingJsonl(rows));
   });
-  app.get("/settings", async () => ({ ...store.getSettings(), calibration: store.getKV("judge_calibration", { n: 0, absErr: 0 }) }));
+  // 1.5: `capacity` holds the owner's overrides; `capacityProfile` is what was detected and what is running now.
+  app.get("/settings", async () => ({ ...store.getSettings(), calibration: store.getKV("judge_calibration", { n: 0, absErr: 0 }), capacityProfile: orch.governor.snapshot() }));
+  app.get("/capacity", async () => orch.governor.snapshot());
   app.put("/settings", async (req) => {
     const s = z.object({
       orchestratorAgentId: z.string(), judgeRotation: z.array(z.string()),
@@ -411,6 +413,15 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
       planApproval: z.enum(["always", "big", "never"]).optional(),
       autoRunChecks: z.boolean().optional(),
       autoResume: z.boolean().optional(),
+      capacity: z.object({
+        maxConcurrentTasks: z.number().int().min(1).max(32).optional(),
+        localModels: z.enum(["auto", "on", "off"]).optional(),
+        maxLocalCliAgents: z.number().int().min(1).max(32).optional(),
+        localModelMaxGB: z.number().min(0).max(512).optional(),
+        minFreeGB: z.number().min(0).max(512).optional(),
+        smallBelowGB: z.number().min(1).max(512).optional(),
+        largeFromGB: z.number().min(1).max(512).optional(),
+      }).optional(),
     }).parse({ ...store.getSettings(), ...(req.body as object) });
     store.setSettings(s); store.audit("owner", "settings.updated", JSON.stringify(s)); return s;
   });

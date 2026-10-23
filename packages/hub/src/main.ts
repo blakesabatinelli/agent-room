@@ -25,6 +25,10 @@ seed(store, demo);
 const approvals = new Approvals(store);
 const orch = new Orchestrator(store, approvals, { dataDir, mcpUrl: () => `http://127.0.0.1:${port}/mcp` });
 const app = await buildServer({ store, orch, approvals, ownerName });
+// 1.5: record what the hub found, so a surprising schedule can be explained later.
+const cap = orch.governor.snapshot();
+store.audit("hub", "capacity.detected", `${cap.summary}. ${cap.plan.reason}`);
+console.log(`Capacity: ${cap.summary}`);
 
 await app.listen({ host: "0.0.0.0", port });
 // Pick up any work that was running when the hub last stopped.

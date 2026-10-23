@@ -1,7 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
 import React, { useEffect, useState } from "react";
 import { Platform, ScrollView, Text, View } from "react-native";
-import type { AuditEntry, OrchestratorSettings } from "@agent-room/shared";
+import type { AuditEntry, CapacitySnapshot, OrchestratorSettings } from "@agent-room/shared";
 import type { SetupInfo } from "../api/client";
 import { useRoom } from "../state/store";
 import { Button, Field, Screen, Section, Toggle } from "../components/ui";
@@ -14,6 +14,8 @@ export function SettingsScreen() {
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [mcp, setMcp] = useState<string>();
   const [setup, setSetup] = useState<SetupInfo>();
+  const [cap, setCap] = useState<CapacitySnapshot>();
+  useEffect(() => { hub?.capacity().then(setCap).catch(() => {}); }, [hub]);
   const loadSetup = () => { hub?.setup().then(setSetup).catch(() => {}); };
   useEffect(loadSetup, [hub]);
   useEffect(() => { hub?.settings().then(setS).catch(() => {}); hub?.audit().then(setAudit).catch(() => {}); }, [hub]);
@@ -84,6 +86,13 @@ export function SettingsScreen() {
               </View>
             </Section>
           </>
+        ) : null}
+        {cap ? (
+          <Section title="This computer">
+            <View style={{ padding: space(4), gap: space(1) }}>
+              <Text style={[t.body, { color: p.ink }]}>{cap.summary}</Text>
+            </View>
+          </Section>
         ) : null}
         {setup ? (
           <Section title="Practice mode">
