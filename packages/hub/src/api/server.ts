@@ -14,6 +14,7 @@ import { openSignIn, signInLog } from "../setup.js";
 import { pairingCode, token } from "../util.js";
 import { listFiles } from "../orchestrator/workspace.js";
 import { runProc } from "../adapters/proc.js";
+import { PathDenied } from "../files/paths.js";
 
 export interface ServerDeps { store: Store; orch: Orchestrator; approvals: Approvals; ownerName: string; restrictInterfaces?: boolean }
 
@@ -429,6 +430,34 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     return a ?? reply.code(404).send({ error: "Approval not found." });
   });
   app.get("/audit", async () => store.listAudit());
+
+  // ---------- 0.3 spike: folder grants and write proposals (owner only; agents reach files through MCP)
+  app.get("/folder-grants", async () => orch.files.listGrants());
+  app.post("/folder-grants", async (req, reply) => {
+    const parsed = z.object({
+      path: z.string().min(1).max(4096), label: z.string().max(80).optional(), roomId: z.string().optional(),
+      agentId: z.string().min(1).max(80), read: z.boolean().default(true), write: z.boolean().default(false),
+    }).safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Send path (an absolute folder) and agentId, plus read/write." });
+    const b = parsed.data;
+    if (b.roomId && !store.getRoom(b.roomId)) return reply.code(400).send({ error: "Room not found." });
+    if (b.agentId !== "*" && !store.getAgent(b.agentId)) return reply.code(400).send({ error: "Agent not found." });
+    try {
+      const g = orch.files.addGrant(b);
+      store.audit("owner", "grant.added", `${g.id} ${g.path} agent=${g.agentId} room=${g.roomId ?? "*"} read=${g.read} write=${g.write}`);
+      return g;
+    } catch (e) {
+      if (e instanceof PathDenied) return reply.code(400).send({ error: e.message });
+      throw e;
+    }
+  });
+  app.delete("/folder-grants/:id", async (req, reply) => {
+    const g = orch.files.removeGrant((req.params as { id: string }).id);
+    if (!g) return reply.code(404).send({ error: "Grant not found." });
+    store.audit("owner", "grant.removed", `${g.id} ${g.path} agent=${g.agentId}`);
+    return { ok: true };
+  });
+  app.get("/write-proposals", async () => orch.files.proposals());
   app.get("/devices", async () => store.listDevices());
 
   // ---------- live events

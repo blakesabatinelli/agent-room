@@ -423,4 +423,41 @@ export interface LibraryDoc {
   frontMatter: DocFrontMatter;
   bytes: number;
   indexedAt: number;
+
+// ---- 0.3 File access (spike)
+
+/** A folder the owner lets an agent use. The hub is the only thing that touches the disk. */
+export interface FolderGrant {
+  id: string;
+  /** Absolute, realpath-resolved. */
+  path: string;
+  label?: string;
+  /** undefined = every room. */
+  roomId?: string;
+  /** "*" = any agent. */
+  agentId: string;
+  read: boolean;
+  write: boolean;
+  createdAt: number;
+}
+
+/** A write an agent asked for. Nothing touches the disk until the owner approves it. */
+export interface WriteProposal {
+  id: string;
+  grantId: string;
+  agentId: string;
+  roomId?: string;
+  relPath: string;
+  /** SHA-256 of the file as it was when proposed; null = new file. */
+  baseSha256: string | null;
+  newSha256: string;
+  /** Unified diff (stored truncated if very large). */
+  diff: string;
+  bytes: number;
+  status: "pending" | "applied" | "rejected" | "conflict" | "expired";
+  approvalId?: string;
+  /** Why it ended in a state other than applied (revoked grant, hub restart, I/O error, ...). */
+  reason?: string;
+  createdAt: number;
+  decidedAt?: number;
 }
