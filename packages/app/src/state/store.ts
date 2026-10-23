@@ -6,7 +6,7 @@ import { launcher, LOCAL_HUB, readLocalPairSecret } from "../native/hub";
 
 const KEY = "agent-room.connection";
 
-export type Page = "agents" | "approvals" | "memory" | "permissions" | "folders" | "settings" | "scorecard" | "resumes"; // 3.1: scorecard and resumes are screens of their own (3.4 adds "office")
+export type Page = "agents" | "approvals" | "memory" | "permissions" | "folders" | "settings" | "scorecard" | "resumes" | "office"; // 3.1: scorecard and resumes are screens of their own; 3.4: the office
 /** What the main pane shows: a room or direct message, or one of the workspace pages. */
 export type View = { kind: "room" } | { kind: "page"; page: Page };
 

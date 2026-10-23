@@ -102,6 +102,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       <ScrollView contentContainerStyle={{ paddingVertical: space(2) }}>
         <Row label="Approvals" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>✓</Text>} active={isPage("approvals")} bold={approvals.length > 0} badge={approvals.length || undefined} onPress={() => page("approvals")} />
         <Row label="Memory" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>◇</Text>} active={isPage("memory")} badge={s.proposals.length || undefined} onPress={() => page("memory")} />
+        <Row label="Office" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>▦</Text>} active={isPage("office")} onPress={() => page("office")} />
 
         <Heading label="Rooms" open={openCh} toggle={() => setOpenCh(!openCh)} onAdd={() => { setOpenCh(true); setCreating(true); }} />
         {openCh ? channels.map((r) => (

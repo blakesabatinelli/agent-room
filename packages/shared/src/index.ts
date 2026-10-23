@@ -1608,3 +1608,24 @@ export interface RoomDefinitionInput {
   standingGoal?: string | null;
   catchUpHours?: number | null;
 }
+// ---- 3.4 The 3D office
+/** What an agent is doing right now, as the office shows it. Priority when several apply: waiting_approval, judged, working, idle. */
+export type OfficeAgentState = "working" | "waiting_approval" | "idle" | "judged" | "offline";
+/** A subagent standing at its parent's desk. `id` is the subagent's task id; `agentId` is the agent running it (it may be another vendor). */
+export interface OfficeHelper { id: string; agentId: string; readOnly: boolean; state: Exclude<OfficeAgentState, "offline">; title?: string }
+export interface OfficeAgent {
+  id: string;
+  name: string;
+  color: string;
+  /** One letter or emoji (the persona's avatar, else the first letter of the name). */
+  avatar: string;
+  state: OfficeAgentState;
+  /** The task or activity that explains the state. */
+  taskTitle?: string;
+  helpers: OfficeHelper[];
+}
+export interface OfficeRequirement { id: string; text: string; status: "open" | "met" | "unmet" }
+/** The whiteboard: the goal's "Done means" list. */
+export interface OfficeGoal { id: string; objective: string; status: string; requirements: OfficeRequirement[]; progress: number }
+/** GET /office?roomId= (roomId left out: every room). The apps recompute it from events, so it carries no history. */
+export interface OfficeState { at: number; roomId?: string; agents: OfficeAgent[]; goal?: OfficeGoal; pendingApprovals: number }

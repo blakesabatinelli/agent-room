@@ -1,0 +1,11 @@
+{
+  "three": {
+    "version": "0.170.0",
+    "file": "three.module.min.js",
+    "sha256": "08fd7545d13d2c7fb65ab691530a802dafefd638596501854f267d0fb13c39e7",
+    "source": "build/three.module.min.js from the three npm package, version 0.170.0",
+    "npmIntegrity": "sha512-FQK+LEpYc0fBD+J8g6oSEyyNzjp+Q7Ks1C568WWaoMRLW+TkNNWmenWeGgJjV105Gd+p/2ql1ZcjYvNiPZBhuQ==",
+    "license": "MIT (three.LICENSE)",
+    "update": "npm pack three@<version>, copy build/three.module.min.js here, then update version and sha256 together. packages/hub/test/office.test.ts fails until they agree."
+  }
+}

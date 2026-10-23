@@ -37,6 +37,7 @@ import { registerRoomRoutes } from "../rooms/routes.js"; // 4.3
 import { registerPersonaRoutes } from "../persona/routes.js"; // 3.2
 import { registerResumeRoutes } from "../resume/routes.js"; // 2.3
 import { registerReportRoutes } from "../report/routes.js"; // 2.7
+import { registerOfficeRoutes } from "../office/routes.js"; // 3.4
 import { setupTimer } from "../install/timer.js";
 import { firstPassMetrics, retroDb } from "../retro/index.js"; // 2.1
 import { homedir } from "node:os";
@@ -122,6 +123,9 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     ["favicon-32.png", "image/png"],
     ["diff.js", "text/javascript; charset=utf-8"], // 1.1: reads the full diff of a file write
     ["goalview.js", "text/javascript; charset=utf-8"], ["theme.js", "text/javascript; charset=utf-8"], // 3.1: goal card, verdict chips, jump sheet; Appearance
+    // 3.4: the office page, its script and style, and the pinned three.js build it imports (the CSP only allows our own origin)
+    ["office.html", "text/html; charset=utf-8"], ["office.js", "text/javascript; charset=utf-8"], ["office.css", "text/css; charset=utf-8"],
+    ["vendor/three.module.min.js", "text/javascript; charset=utf-8"],
   ] as const) {
     try { webFiles.set(name, { type, body: readFileSync(new URL(name, webDir)) }); } catch { /* missing asset: that route 404s */ }
   }
@@ -131,7 +135,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     const host = (req.headers.host ?? "").replace(/[^A-Za-z0-9.:\-[\]]/g, "");
     return reply
       .header("content-type", f.type)
-      .header("cache-control", name === "index.html" ? "no-cache" : "no-cache, max-age=0")
+      .header("cache-control", name === "index.html" ? "no-cache" : name.startsWith("vendor/") ? "public, max-age=86400" : "no-cache, max-age=0")
       .header("x-content-type-options", "nosniff")
       .header("referrer-policy", "no-referrer")
       .header("x-frame-options", "DENY")
@@ -142,6 +146,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   };
   app.get("/", async (req, reply) => sendWeb("index.html", req, reply));
   app.get("/web/:file", async (req, reply) => sendWeb((req.params as { file: string }).file, req, reply));
+  app.get("/web/vendor/:file", async (req, reply) => sendWeb(`vendor/${(req.params as { file: string }).file}`, req, reply)); // 3.4
 
   app.post("/pair", async (req, reply) => {
     const b = z.object({ code: z.string(), deviceName: z.string().min(1).max(80) }).safeParse(req.body);
@@ -669,6 +674,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   registerResumeRoutes(app, store, orch.resumes); // 2.3: GET /agents/:id/resume, GET /resumes, POST /agents/:id/probation
   registerReportRoutes(app, store); // 2.7: GET /reports/scorecard, /reports/ledger, /reports/kill-review, GET /attention
   registerRoomRoutes(app, () => ({ store, control: () => orch.control, files: orch.files, standing: orch.standing })); // 4.3: GET and PUT /rooms/:id/definition
+  registerOfficeRoutes(app, store); // 3.4: GET /office?roomId=
   app.put("/settings", async (req) => {
     const s = z.object({
       orchestratorAgentId: z.string(), judgeRotation: z.array(z.string()),

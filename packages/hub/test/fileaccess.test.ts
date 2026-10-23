@@ -652,7 +652,7 @@ test("AC3: no route but /mcp answers a proxied request, and every route needs a 
   const b = await boot();
   const routes = (b.app as unknown as { routeTable: () => { method: string; url: string }[] }).routeTable();
   assert.ok(routes.length > 60, `saw ${routes.length} routes`);
-  const open = new Set(["/health", "/pair", "/pair/local", "/mcp", "/", "/web/:file"]);
+  const open = new Set(["/health", "/pair", "/pair/local", "/mcp", "/", "/web/:file", "/web/vendor/:file"]);
   let checked = 0;
   for (const r of routes) {
     if (r.url.includes("*")) continue;

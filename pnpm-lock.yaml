@@ -29,6 +29,9 @@ importers:
       react-native-macos:
         specifier: 0.79.1
         version: 0.79.1(@babel/core@7.29.7)(@react-native-community/cli@18.0.0(typescript@5.9.3))(@types/react@19.3.0)(react-native@0.79.6(@babel/core@7.29.7)(@react-native-community/cli@18.0.0(typescript@5.9.3))(@types/react@19.3.0)(react@19.0.0))(react@19.0.0)
+      react-native-webview:
+        specifier: 13.15.0
+        version: 13.15.0(react-native@0.79.6(@babel/core@7.29.7)(@react-native-community/cli@18.0.0(typescript@5.9.3))(@types/react@19.3.0)(react@19.0.0))(react@19.0.0)
       zustand:
         specifier: ^5.0.2
         version: 5.0.16(@types/react@19.3.0)(react@19.0.0)
@@ -2503,6 +2506,12 @@ packages:
       '@types/react':
         optional: true
 
+  react-native-webview@13.15.0:
+    resolution: {integrity: sha512-Vzjgy8mmxa/JO6l5KZrsTC7YemSdq+qB01diA0FqjUTaWGAGwuykpJ73MDj3+mzBSlaDxAEugHzTtkUQkQEQeQ==}
+    peerDependencies:
+      react: '*'
+      react-native: '*'
+
   react-native@0.79.6:
     resolution: {integrity: sha512-kvIWSmf4QPfY41HC25TR285N7Fv0Pyn3DAEK8qRL9dA35usSaxsJkHfw+VqnonqJjXOaoKCEanwudRAJ60TBGA==}
     engines: {node: '>=18'}
@@ -4098,7 +4107,9 @@ snapshots:
       metro-runtime: 0.82.5
     transitivePeerDependencies:
       - '@babel/core'
+      - bufferutil
       - supports-color
+      - utf-8-validate
 
   '@react-native/normalize-colors@0.79.6': {}
 
@@ -5883,6 +5894,13 @@ snapshots:
       - bufferutil
       - supports-color
       - utf-8-validate
+
+  react-native-webview@13.15.0(react-native@0.79.6(@babel/core@7.29.7)(@react-native-community/cli@18.0.0(typescript@5.9.3))(@types/react@19.3.0)(react@19.0.0))(react@19.0.0):
+    dependencies:
+      escape-string-regexp: 4.0.0
+      invariant: 2.2.4
+      react: 19.0.0
+      react-native: 0.79.6(@babel/core@7.29.7)(@react-native-community/cli@18.0.0(typescript@5.9.3))(@types/react@19.3.0)(react@19.0.0)
 
   react-native@0.79.6(@babel/core@7.29.7)(@react-native-community/cli@18.0.0(typescript@5.9.3))(@types/react@19.3.0)(react@19.0.0):
     dependencies:

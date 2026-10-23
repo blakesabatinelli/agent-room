@@ -13,6 +13,7 @@ import { SettingsScreen } from "./screens/SettingsScreen";
 import { ScorecardScreen } from "./screens/ScorecardScreen"; // 3.1
 import { ResumesScreen } from "./screens/ResumesScreen"; // 3.1
 import { OnboardingScreen } from "./screens/OnboardingScreen";
+import { OfficeScreen } from "./screens/OfficeScreen"; // 3.4
 import { Sidebar } from "./components/Sidebar";
 import { Button } from "./components/ui";
 import { CommandPalette } from "./components/CommandPalette"; // 3.1
@@ -55,7 +56,7 @@ export default function App() {
   const pages: Record<Page, React.ReactNode> = {
     agents: <AgentsScreen onBack={back} />, approvals: <ApprovalsScreen />, memory: <MemoryScreen />,
     permissions: <PermissionsScreen />, folders: <FoldersScreen />, settings: <SettingsScreen />,
-    scorecard: <ScorecardScreen />, resumes: <ResumesScreen />,
+    scorecard: <ScorecardScreen />, resumes: <ResumesScreen />, office: <OfficeScreen />, // 3.4
   };
   const main = view.kind === "room" ? <RoomScreen onBack={back} /> : pages[view.page];
 
