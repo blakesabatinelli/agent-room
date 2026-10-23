@@ -76,6 +76,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   for (const [name, type] of [
     ["index.html", "text/html; charset=utf-8"], ["app.js", "text/javascript; charset=utf-8"], ["app.css", "text/css; charset=utf-8"],
     ["manifest.webmanifest", "application/manifest+json"], ["icon-180.png", "image/png"], ["icon-512.png", "image/png"],
+    ["favicon-32.png", "image/png"],
   ] as const) {
     try { webFiles.set(name, { type, body: readFileSync(new URL(name, webDir)) }); } catch { /* missing asset: that route 404s */ }
   }
