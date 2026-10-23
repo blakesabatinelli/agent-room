@@ -7,8 +7,8 @@
   const st = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
-    view: "rooms",          // rooms | room | approvals | permissions | pair
-    tools: [],
+    view: "rooms",          // rooms | room | approvals | permissions | control | pair
+    tools: [], control: null,
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, working: {}, approvals: [],
     unread: new Set(), readAt: 0, readSent: {}, positioned: "",
     online: false, ws: null, wsDelay: 1000,
@@ -156,6 +156,7 @@
         break;
       case "agent": st.agents[e.agent.id] = e.agent; if (st.view === "permissions") renderPermissions(); break;
       case "read": if (st.unread.delete(e.roomId) && st.view === "rooms") renderRooms(); break;
+      case "control": loadControl().catch(() => {}); break;
     }
   }
 
@@ -173,7 +174,7 @@
     try {
       const [rooms, agents, approvals] = await Promise.all([api("/rooms"), api("/agents"), api("/approvals?status=pending")]);
       st.rooms = rooms; st.agents = Object.fromEntries(agents.map((a) => [a.id, a])); st.approvals = approvals;
-      connectWs(); render();
+      connectWs(); render(); loadControl().catch(() => {});
     } catch (err) { if (err.message !== "unpaired") toast(`Can't reach the hub: ${err.message}`); }
   }
 
@@ -214,12 +215,13 @@
     $("#composer").hidden = st.view !== "room";
     const room = st.rooms.find((r) => r.id === st.roomId);
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : `# ${room.name}`)
-      : st.view === "approvals" ? "Approvals" : st.view === "permissions" ? "Permissions" : "Agent Room";
+      : st.view === "approvals" ? "Approvals" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : "Agent Room";
     renderDot(); renderBadge();
     if (st.view === "pair") return renderPair();
     if (st.view === "rooms") return renderRooms();
     if (st.view === "approvals") return renderApprovals();
     if (st.view === "permissions") return renderPermissions();
+    if (st.view === "control") return renderControl();
     renderMessages(); renderComposerState();
   }
 
@@ -242,8 +244,36 @@
       ? `${channels.length ? `<div class="section">Channels</div>${channels.map(row).join("")}` : ""}
          ${dms.length ? `<div class="section">Direct messages</div>${dms.map(row).join("")}` : ""}`
       : `<div class="empty">No rooms yet. Make one on the Mac.</div>`;
-    $("#view").innerHTML += `<div class="section">Settings</div><button class="row" data-nav="permissions"><span class="hash">⚙︎</span><span class="name">Permissions</span></button>`;
+    const nCtl = st.control ? st.control.notices.length : 0;
+    $("#view").innerHTML += `<div class="section">Settings</div><button class="row" data-nav="permissions"><span class="hash">⚙︎</span><span class="name">Permissions</span></button>
+      <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>`;
     paintColors();
+  }
+
+  // The control folder (CONTROL.md): where the rules, personas and permissions live as plain files on the Mac.
+  function renderControl() {
+    const c = st.control;
+    if (!c) { $("#view").innerHTML = `<div class="empty">Loading…</div>`; return; }
+    const when = c.lastLoad ? new Date(c.lastLoad).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "not yet";
+    const notes = c.notices.length ? c.notices.map((n) => `
+      <div class="card">
+        <div class="what">${esc(n.file)}${n.line ? `, line ${esc(n.line)}` : ""}</div>
+        <div class="detail">${esc(n.message)}</div>
+      </div>`).join("") : `<div class="empty">No problems in the control files.</div>`;
+    $("#view").innerHTML = `
+      <div class="card">
+        <div class="what">Folder on your Mac</div>
+        <div class="detail">${esc(c.root)}\n\nLast read ${esc(when)}. ${c.git ? "Every change is saved in its history." : "History is off because git isn't installed."}</div>
+        <div class="actions"><button class="btn small plain" data-control="lint">Check files</button></div>
+      </div>
+      <div class="section">${c.notices.length ? `Needs a look (${c.notices.length})` : "Notices"}</div>${notes}`;
+  }
+
+  async function loadControl() {
+    try {
+      st.control = await api("/control/status");
+      if (st.view === "control") renderControl(); else if (st.view === "rooms") renderRooms();
+    } catch (e) { if (e.message === "unpaired") throw e; /* older hub without control files */ }
   }
 
   function renderApprovals() {
@@ -353,6 +383,16 @@
       if (t.dataset.nav === "permissions") {
         go("permissions");
         if (!st.tools.length) { st.tools = await api("/tools"); if (st.view === "permissions") renderPermissions(); }
+        return;
+      }
+      if (t.dataset.nav === "control") { go("control"); loadControl().catch(() => {}); return; }
+      if (t.dataset.control === "lint") {
+        t.disabled = true;
+        try {
+          const r = await api("/control/lint", { method: "POST", body: {} });
+          toast(r.blocks.length + r.flags.length ? `${r.blocks.length} blocked, ${r.flags.length} flagged` : "No problems found");
+          await loadControl();
+        } finally { t.disabled = false; }
         return;
       }
       if (t.dataset.plan) {

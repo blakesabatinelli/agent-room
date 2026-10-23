@@ -17,6 +17,7 @@ import { addFailure, classifyFailure, parseFailureCategory, type FailureEvidence
 import { Library, defaultLibraryRoot } from "../library/library.js";
 import { FileBroker } from "../files/broker.js";
 import { TaskWorkspaces, type TaskWorkspace, type WorkspaceHookContext, type WorkspaceHooks } from "./worktree.js";
+import type { ControlFolder } from "../control/folder.js"; // 1.9
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -43,6 +44,8 @@ export interface OrchestratorOptions {
   libraryDir?: string;
   /** 1.4: git binary for task worktrees (default $AGENT_ROOM_GIT or "git"). A failing one makes tasks use folder copies. */
   gitBin?: string;
+  /** 1.9: the control folder (rules, personas, permissions, scope as Markdown files). */
+  control?: ControlFolder;
 }
 
 type PlanTask = RawPlanTask;
@@ -77,11 +80,14 @@ export class Orchestrator {
   workspaceHooks: WorkspaceHooks = {};
   /** Worktree clean-ups in flight (stop/replan are synchronous callers); idle() waits for them. */
   private cleanups = new Set<Promise<unknown>>();
+  /** 1.9: the control folder; undefined when the hub runs without one (most tests). */
+  control?: ControlFolder;
 
   constructor(private store: Store, private approvals: Approvals, private opts: OrchestratorOptions) {
     this.library = new Library(store, opts.libraryDir ?? defaultLibraryRoot());
     this.files = new FileBroker(store, approvals);
     this.workspaces = new TaskWorkspaces({ dataDir: opts.dataDir, git: opts.gitBin });
+    this.control = opts.control; // 1.9
   }
 
   private cfg(): Required<OrchestratorSettings> {

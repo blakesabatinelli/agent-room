@@ -443,6 +443,26 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   });
   app.get("/audit", async () => store.listAudit());
 
+  // ---------- 1.9 control files (the ~/Agent Room folder: rules, personas, permissions, scope)
+  const control = () => orch.control;
+  const noControl = (reply: { code: (n: number) => { send: (b: unknown) => unknown } }) => reply.code(404).send({ error: "The control folder isn't available on this hub." });
+  app.get("/control/status", async (_req, reply) => control() ? control()!.status() : noControl(reply));
+  app.get("/control/history", async (req, reply) => {
+    if (!control()) return noControl(reply);
+    const path = (req.query as { path?: string }).path;
+    try { return await control()!.history(path || undefined); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+  });
+  app.post("/control/revert/:commit", async (req, reply) => {
+    if (!control()) return noControl(reply);
+    const commit = (req.params as { commit: string }).commit;
+    try {
+      const r = await control()!.revert(commit);
+      store.audit("owner", "control.revert", `${commit} -> ${r.commit}: ${r.files.join(", ")}`);
+      return { ok: true, ...r };
+    } catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
+  });
+  app.post("/control/lint", async (_req, reply) => control() ? control()!.lint() : noControl(reply));
+
   // ---------- 0.3 spike: folder grants and write proposals (owner only; agents reach files through MCP)
   app.get("/folder-grants", async () => orch.files.listGrants());
   app.post("/folder-grants", async (req, reply) => {

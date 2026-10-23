@@ -395,7 +395,9 @@ export type ServerEvent =
   /** An agent started or stopped working in a room (drives the "is working" line). */
   | { type: "working"; roomId: string; agentId: string; label?: string; active: boolean }
   /** The owner has read a room up to this time (synced across the Mac and phone). */
-  | { type: "read"; roomId: string; at: number };
+  | { type: "read"; roomId: string; at: number }
+  /** A control file changed on disk or in the app and was loaded (1.9). */
+  | { type: "control"; at: number; changed: string[]; notices: ControlNotice[] };
 
 // ---- 0.4 Document standard
 export type DocStatus = "draft" | "review" | "final";
@@ -551,4 +553,28 @@ export interface RoutingRecord {
   failureTag?: FailureTag;
   failureNote?: string;
   completedAt?: number;
+}
+
+// ---- 1.9 Control files
+
+/** One thing the linter or loader wants the owner to know about a control file. */
+export interface ControlNotice {
+  level: "block" | "flag";
+  /** Path relative to the control folder, e.g. "agents/claude/SOUL.md". */
+  file: string;
+  /** 1-based line in that file, when known. */
+  line?: number;
+  message: string;
+}
+
+/** A change in the control folder's history. */
+export interface ControlCommit { commit: string; author: string; at: string; message: string }
+
+export interface ControlStatus {
+  root: string;
+  git: boolean;
+  /** ISO time of the last load, or null before the first. */
+  lastLoad: string | null;
+  notices: ControlNotice[];
+  lint: { blocks: ControlNotice[]; flags: ControlNotice[] };
 }

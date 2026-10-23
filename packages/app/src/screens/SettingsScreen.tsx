@@ -1,7 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
 import React, { useEffect, useState } from "react";
 import { Platform, ScrollView, Text, View } from "react-native";
-import type { AuditEntry, OrchestratorSettings } from "@agent-room/shared";
+import type { AuditEntry, ControlCommit, ControlStatus, OrchestratorSettings } from "@agent-room/shared";
 import type { SetupInfo } from "../api/client";
 import { useRoom } from "../state/store";
 import { Button, Field, Screen, Section, Toggle } from "../components/ui";
@@ -9,7 +9,21 @@ import { space, type as t, usePalette } from "../theme";
 
 export function SettingsScreen() {
   const p = usePalette();
-  const { hub, agents, unpair } = useRoom(useShallow((s) => ({ hub: s.hub, agents: s.agents, unpair: s.unpair })));
+  const { hub, agents, unpair, controlStamp } = useRoom(useShallow((s) => ({ hub: s.hub, agents: s.agents, unpair: s.unpair, controlStamp: s.controlStamp })));
+  const [ctl, setCtl] = useState<ControlStatus>();
+  const [ctlHistory, setCtlHistory] = useState<ControlCommit[]>([]);
+  const [ctlMsg, setCtlMsg] = useState<string>();
+  const loadCtl = () => { hub?.controlStatus().then(setCtl).catch(() => {}); hub?.controlHistory().then((h) => setCtlHistory(h.slice(0, 8))).catch(() => {}); };
+  useEffect(loadCtl, [hub, controlStamp]);
+  const checkCtl = async () => {
+    const r = await hub?.controlLint().catch((e: Error) => { setCtlMsg(e.message); return undefined; });
+    if (r) setCtlMsg(r.blocks.length + r.flags.length ? `${r.blocks.length} blocked, ${r.flags.length} flagged.` : "No problems found.");
+    loadCtl();
+  };
+  const undoCtl = async (commit: string) => {
+    try { await hub?.controlRevert(commit); setCtlMsg("Undone."); } catch (e) { setCtlMsg((e as Error).message); }
+    loadCtl();
+  };
   const [s, setS] = useState<OrchestratorSettings & { calibration: { n: number; absErr: number } }>();
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [mcp, setMcp] = useState<string>();
@@ -114,6 +128,40 @@ export function SettingsScreen() {
               <Button kind="plain" label="Create connection" onPress={makeMcp} />
               {mcp ? <Text selectable style={[t.small, { color: p.ink, fontFamily: "Menlo" }]}>{mcp}</Text> : null}
             </View>
+          </Section>
+        ) : null}
+        {ctl ? (
+          <Section title="Control files" hint="Your rules, personas and permissions are plain files in this folder. Edit them here or in any text editor; both stay in step.">
+            <View style={{ padding: space(4), gap: space(2) }}>
+              <Text selectable style={[t.body, { color: p.ink }]}>{ctl.root}</Text>
+              <Text style={[t.small, { color: p.muted }]}>
+                {ctl.lastLoad ? `Last read ${new Date(ctl.lastLoad).toLocaleTimeString()}. ` : ""}{ctl.git ? "Every change is kept in the folder's history." : "History is off because git isn't installed."}
+              </Text>
+              {ctl.notices.length ? ctl.notices.map((n, i) => (
+                <View key={`${n.file}:${i}`} style={{ paddingTop: space(1) }}>
+                  <Text style={[t.small, { color: n.level === "block" ? p.danger : p.ink }]}>{n.file}{n.line ? `, line ${n.line}` : ""}</Text>
+                  <Text style={[t.small, { color: p.muted }]}>{n.message}</Text>
+                </View>
+              )) : <Text style={[t.small, { color: p.muted }]}>No problems in the control files.</Text>}
+              <View style={{ flexDirection: "row", gap: space(2), alignItems: "center" }}>
+                <Button kind="plain" label="Check files" onPress={checkCtl} />
+                {ctlMsg ? <Text style={[t.small, { color: p.muted }]}>{ctlMsg}</Text> : null}
+              </View>
+            </View>
+            {ctlHistory.length ? (
+              <View style={{ borderTopWidth: 1, borderColor: p.line }}>
+                <Text style={[t.small, { color: p.muted, paddingHorizontal: space(4), paddingTop: space(3) }]}>Recent changes. Undo adds a new change that reverses it.</Text>
+                {ctlHistory.map((h) => (
+                  <View key={h.commit} style={{ paddingHorizontal: space(4), paddingVertical: space(2), flexDirection: "row", alignItems: "center", gap: space(2) }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[t.small, { color: p.ink }]} numberOfLines={2}>{h.message}</Text>
+                      <Text style={[t.small, { color: p.muted }]}>{h.author}, {new Date(h.at).toLocaleString()}</Text>
+                    </View>
+                    <Button small kind="plain" label="Undo" onPress={() => undoCtl(h.commit)} />
+                  </View>
+                ))}
+              </View>
+            ) : null}
           </Section>
         ) : null}
         <Section title="Setup">

@@ -1,0 +1,179 @@
+import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import type { ControlNotice } from "@agent-room/shared";
+import { contradicts, expired, parseFacts } from "./facts.js";
+import { checkFrontMatter, parseDoc, type ParsedDoc } from "./parse.js";
+import { agentLevel, looser, platformLevel, policyLevel, scopesOverlap } from "./permissions.js";
+import { CAPS, KNOWN_NAMES, classify, todayString, type Fm, type FileMeta, type Kind } from "./schema.js";
+
+/**
+ * The linter (CONTROL.md section 7). Blocks: the file is not loaded and the last good version stays.
+ * Flags: the file loads, the owner is told, and the looser line is ignored by the permission code.
+ */
+export type Issue = ControlNotice;
+
+export interface FileResult {
+  rel: string;
+  meta: FileMeta;
+  text: string;
+  bytes: number;
+  /** Validated front matter; undefined when the file has a block. */
+  fm?: Fm<Kind>;
+  body: string;
+  bodyLine: number;
+  parsed?: ParsedDoc;
+  blocks: Issue[];
+  flags: Issue[];
+}
+
+export interface Analysis {
+  files: Map<string, FileResult>;
+  /** Folder names under agents/, whether or not the files in them are valid. */
+  agentIds: Set<string>;
+  blocks: Issue[];
+  flags: Issue[];
+}
+
+export interface LintOptions { today?: string }
+
+export function walk(root: string, dir = ""): string[] {
+  let names: import("node:fs").Dirent[] = [];
+  try { names = readdirSync(join(root, dir), { withFileTypes: true }); } catch { return []; }
+  const out: string[] = [];
+  for (const d of names) {
+    if (d.name.startsWith(".") || (dir === "" && d.name === "Library")) continue;
+    const rel = dir ? `${dir}/${d.name}` : d.name;
+    if (d.isDirectory()) out.push(...walk(root, rel));
+    else if (d.isFile()) out.push(rel);
+  }
+  return out;
+}
+
+const block = (file: string, message: string, line?: number): Issue => ({ level: "block", file, line, message });
+const flag = (file: string, message: string, line?: number): Issue => ({ level: "flag", file, line, message });
+
+/** Check one file on its own: size cap, front matter, schema. Cross-file checks happen in analyzeFolder. */
+export function checkFile(rel: string, meta: FileMeta, text: string): FileResult {
+  const bytes = Buffer.byteLength(text);
+  const r: FileResult = { rel, meta, text, bytes, body: "", bodyLine: 1, blocks: [], flags: [] };
+  const cap = CAPS[meta.kind];
+  if (cap !== undefined && bytes > cap) {
+    r.blocks.push(block(rel, `file is ${bytes} bytes, over its ${cap} byte limit; shorten it`, 1));
+    return r;
+  }
+  const parsed = parseDoc(text);
+  r.parsed = parsed; r.body = parsed.body; r.bodyLine = parsed.bodyLine;
+  if (parsed.problems.length) { r.blocks.push(...parsed.problems.map((p) => block(rel, p.message, p.line))); return r; }
+  const checked = checkFrontMatter(parsed, meta.kind);
+  if (checked.problems.length) { r.blocks.push(...checked.problems.map((p) => block(rel, p.message, p.line))); return r; }
+  r.fm = checked.fm;
+  return r;
+}
+
+/** Read every file in the folder and report what is wrong with each. Never throws on bad content. */
+export function analyzeFolder(root: string, opts: LintOptions = {}): Analysis {
+  const today = opts.today ?? todayString();
+  const files = new Map<string, FileResult>();
+  const agentIds = new Set<string>();
+  const loose: Issue[] = []; // issues for files that are not control files
+
+  for (const rel of walk(root).sort()) {
+    const c = classify(rel);
+    if ("ignored" in c) continue;
+    if ("unknown" in c) {
+      const name = rel.split("/").pop() ?? rel;
+      const hint = KNOWN_NAMES.find((k) => k.toLowerCase() === name.toLowerCase() && k !== name);
+      loose.push(flag(rel, hint ? `unknown file; did you mean ${hint}? It is ignored until the name matches` : "isn't part of the control folder layout, so it is ignored"));
+      continue;
+    }
+    const meta = c.meta;
+    if (meta.agent) agentIds.add(meta.agent);
+    let text = "";
+    try { if (lstatSync(join(root, rel)).isFile()) text = readFileSync(join(root, rel), "utf8"); } catch { continue; }
+    files.set(rel, checkFile(rel, meta, text));
+  }
+
+  // ---- blocks that need other files
+  for (const r of files.values()) {
+    if (!r.fm) continue;
+    if (r.meta.kind === "room") {
+      const fm = r.fm as Fm<"room">;
+      fm.roster.forEach((a, i) => {
+        if (!agentIds.has(a)) r.blocks.push(block(r.rel, `roster names "${a}", but there is no agents/${a}/ folder`, r.parsed?.lineOf(["roster", i])));
+      });
+    }
+    if (r.meta.kind === "goal") {
+      const fm = r.fm as Fm<"goal">;
+      if (fm.id !== r.meta.goal) r.blocks.push(block(r.rel, `id "${fm.id}" doesn't match its folder goals/${r.meta.goal}/`, r.parsed?.lineOf(["id"])));
+    }
+    if (r.blocks.length) r.fm = undefined;
+  }
+
+  // ---- flags (only on files that loaded)
+  const ok = <K extends Kind>(rel: string) => { const r = files.get(rel); return r?.fm ? (r as FileResult & { fm: Fm<K> }) : undefined; };
+  const policyFile = ok<"policy">("POLICY.md");
+  const policy = policyFile?.fm;
+
+  if (policyFile && policy) {
+    const rules = policy.rules;
+    rules.forEach((r, i) => {
+      if (r.expires && r.expires < today) policyFile.flags.push(flag("POLICY.md", `rule "${r.id}" expired on ${r.expires}; it no longer applies`, policyFile.parsed?.lineOf(["rules", i, "expires"])));
+    });
+    for (let i = 0; i < rules.length; i++) for (let j = i + 1; j < rules.length; j++) {
+      const a = rules[i], b = rules[j];
+      const opposite = (a.effect === "allow" && b.effect === "deny") || (a.effect === "deny" && b.effect === "allow");
+      if (opposite && a.tool === b.tool && a.match === b.match && scopesOverlap(a.scope, b.scope)) {
+        policyFile.flags.push(flag("POLICY.md", `rules "${a.id}" and "${b.id}" ${a.effect} and ${b.effect} the same ${a.tool} actions; the stricter one wins`, policyFile.parsed?.lineOf(["rules", j])));
+      }
+    }
+  }
+
+  const toolsOf = (id: string) => ok<"tools">(`agents/${id}/TOOLS.md`);
+  for (const r of files.values()) {
+    if (!r.fm) continue;
+    if (r.meta.kind === "tools") {
+      const t = r.fm as Fm<"tools">; const agent = r.meta.agent!;
+      for (const [tool, v] of Object.entries(t.room_allows)) {
+        const cap = [{ from: "POLICY.md", l: policyLevel(policy, tool, agent, undefined, today) }, { from: "the platform", l: platformLevel(t, tool) }].find((b) => looser(v, b.l));
+        if (cap) r.flags.push(flag(r.rel, `room_allows sets ${tool}: ${v}, but ${cap.from} says ${cap.l}; the stricter setting applies and this line is ignored`, r.parsed?.lineOf(["room_allows", tool])));
+      }
+    }
+    if (r.meta.kind === "room") {
+      const room = r.fm as Fm<"room">; const slug = r.meta.room!;
+      for (const [tool, v] of Object.entries(room.tools)) {
+        let cap: { from: string; l: ReturnType<typeof policyLevel> } | undefined;
+        const p = policyLevel(policy, tool, undefined, slug, today);
+        if (looser(v, p)) cap = { from: "POLICY.md", l: p };
+        for (const a of room.roster) {
+          if (cap) break;
+          const base = agentLevel(policy, toolsOf(a)?.fm, a, tool, today, slug);
+          if (looser(v, base)) cap = { from: `agents/${a}/TOOLS.md`, l: base };
+        }
+        if (cap) r.flags.push(flag(r.rel, `tools sets ${tool}: ${v}, but ${cap.from} says ${cap.l}; a room can only tighten, so the stricter setting applies`, r.parsed?.lineOf(["tools", tool])));
+      }
+    }
+    if (r.meta.kind === "room-memory") {
+      const facts = parseFacts(r.body, r.bodyLine);
+      const live = facts.filter((f) => !expired(f, today));
+      for (const f of facts) if (expired(f, today)) r.flags.push(flag(r.rel, `fact expired on ${f.expires}: "${f.text.slice(0, 80)}"`, f.line));
+      for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) {
+        if (contradicts(live[i].text, live[j].text)) r.flags.push(flag(r.rel, `contradicts the fact on line ${live[i].line}: "${live[j].text.slice(0, 80)}"`, live[j].line));
+      }
+    }
+  }
+
+  const blocks: Issue[] = [], flags: Issue[] = [...loose];
+  for (const r of files.values()) { blocks.push(...r.blocks); flags.push(...r.flags); }
+  return { files, agentIds, blocks, flags };
+}
+
+/** Lint a control folder from disk. */
+export function lint(root: string, opts: LintOptions = {}): { blocks: Issue[]; flags: Issue[] } {
+  const a = analyzeFolder(root, opts);
+  return { blocks: a.blocks, flags: a.flags };
+}
+
+/** One line per issue, for the CLI. */
+export function formatIssue(i: Issue): string {
+  return `${i.level === "block" ? "BLOCK" : "flag "} ${i.file}${i.line ? `:${i.line}` : ""}  ${i.message}`;
+}

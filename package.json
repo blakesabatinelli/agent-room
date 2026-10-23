@@ -6,7 +6,8 @@
     "hub": "pnpm --filter @agent-room/hub dev",
     "hub:start": "pnpm --filter @agent-room/hub start",
     "test": "pnpm -r --if-present test",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "control:lint": "pnpm --filter @agent-room/hub exec tsx src/control/cli.ts lint"
   },
   "packageManager": "pnpm@9.15.9"
 }
