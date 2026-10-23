@@ -33,6 +33,7 @@ import { commandGroups, loadCommandIndex } from "../commands/index.js"; // 2.6
 import { SignInManager } from "../install/signin.js";
 import { registerInstallRoutes } from "../install/routes.js";
 import { registerJuryRoutes } from "../jury/routes.js"; // 2.2
+import { registerPersonaRoutes } from "../persona/routes.js"; // 3.2
 import { setupTimer } from "../install/timer.js";
 import { firstPassMetrics, retroDb } from "../retro/index.js"; // 2.1
 import { homedir } from "node:os";
@@ -437,7 +438,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   const agentSchema = z.object({
     id: z.string().regex(/^[a-z0-9-]+$/), name: z.string(), provider: z.string(),
     adapter: z.enum(["claude-code", "codex", "mcp", "command", "openai-api", "mock"]), enabled: z.boolean(),
-    color: z.string(), settings: z.record(z.unknown()), tools: z.record(z.boolean()), canBeOrchestrator: z.boolean().optional(),
+    color: z.string(), settings: z.record(z.unknown()), tools: z.record(z.boolean()), canBeOrchestrator: z.boolean().optional(), avatar: z.string().max(40).optional(),
     profiles: z.array(z.object({
       id: z.string().regex(/^[a-z0-9-]+$/).max(40), label: z.string().min(1).max(60),
       role: z.enum(["explorer", "researcher", "worker", "reviewer"]),
@@ -655,6 +656,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   app.get("/settings", async () => ({ ...store.getSettings(), calibration: store.getKV("judge_calibration", { n: 0, absErr: 0 }), capacityProfile: orch.governor.snapshot() }));
   app.get("/capacity", async () => orch.governor.snapshot());
   registerJuryRoutes(app, store); // 2.2: GET /juries, GET /jury/stats
+  registerPersonaRoutes(app, store, () => orch.control); // 3.2: GET /personas/templates, GET and PUT /agents/:id/persona
   app.put("/settings", async (req) => {
     const s = z.object({
       orchestratorAgentId: z.string(), judgeRotation: z.array(z.string()),

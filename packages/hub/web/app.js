@@ -7,7 +7,7 @@
   const st = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
-    view: "rooms",          // rooms | room | approvals | diff | permissions | folders | control | subscriptions | remote | pair
+    view: "rooms",          // rooms | room | approvals | diff | permissions | folders | control | subscriptions | remote | personas | persona | pair
     tools: [], control: null, quota: [], remote: null, firstPass: null, memExport: [],
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, working: {}, approvals: [],
     unread: new Set(), readAt: 0, readSent: {}, positioned: "",
@@ -19,11 +19,15 @@
     gform: { path: "", label: "", roomId: "", agentId: "*", read: true, write: false, err: "", busy: false, override: null },
     // a goal can work in a granted folder: the grants this room can use, the one picked, and whether the picker is open
     roomGrants: [], folderId: "", folderOpen: false,
+    // 3.2 personas: the starter templates, the agent being edited and its form
+    personas: { templates: [], id: "", form: null, err: "", busy: false },
   };
 
   // ---------- helpers
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const safeColor = (c) => (/^#[0-9a-f]{3,8}$/i.test(c || "") ? c : "#5e6875");
+  // 3.2: the avatar is the persona's letter or emoji; without one, the first letter of the name
+  const glyph = (a, name) => (a && a.avatar) || (name || (a && a.name) || "?")[0].toUpperCase();
   const time = (t) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const dayLabel = (t) => {
     const d = new Date(t), today = new Date(); const y = new Date(); y.setDate(today.getDate() - 1);
@@ -162,7 +166,7 @@
         st.rooms = st.rooms.filter((r) => r.id !== e.roomId);
         if (st.roomId === e.roomId) go("rooms"); else if (st.view === "rooms") renderRooms();
         break;
-      case "agent": st.agents[e.agent.id] = e.agent; if (st.view === "permissions") renderPermissions(); break;
+      case "agent": st.agents[e.agent.id] = e.agent; if (st.view === "permissions") renderPermissions(); else if (st.view === "personas") renderPersonas(); break;
       case "read": if (st.unread.delete(e.roomId) && st.view === "rooms") renderRooms(); break;
       case "control": loadControl().catch(() => {}); break;
     }
@@ -227,7 +231,7 @@
     $("#composer").hidden = st.view !== "room";
     const room = st.rooms.find((r) => r.id === st.roomId);
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : `# ${room.name}`)
-      : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : st.view === "scorecard" ? "Scorecard" : "Agent Room";
+      : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : st.view === "scorecard" ? "Scorecard" : st.view === "personas" ? "Personas" : st.view === "persona" ? (st.agents[st.personas.id]?.name || "Persona") : "Agent Room";
     renderDot(); renderBadge();
     if (st.view === "pair") return renderPair();
     if (st.view === "rooms") return renderRooms();
@@ -239,6 +243,8 @@
     if (st.view === "subscriptions") return renderSubscriptions();
     if (st.view === "remote") return renderRemote();
     if (st.view === "scorecard") return renderScorecard();
+    if (st.view === "personas") return renderPersonas();
+    if (st.view === "persona") return renderPersona();
     renderMessages(); renderComposerState();
   }
 
@@ -254,7 +260,7 @@
     const dms = st.rooms.filter((r) => r.dmAgentId).sort((a, b) => roomName(a).localeCompare(roomName(b)));
     const row = (r) => {
       const a = r.dmAgentId ? st.agents[r.dmAgentId] : null;
-      const lead = a ? `<span class="av" data-color="${esc(safeColor(a.color))}">${esc((a.name || "?")[0].toUpperCase())}</span>` : `<span class="hash">#</span>`;
+      const lead = a ? `<span class="av" data-color="${esc(safeColor(a.color))}">${esc(glyph(a))}</span>` : `<span class="hash">#</span>`;
       return `<button class="row" data-room="${esc(r.id)}">${lead}<span class="name">${esc(roomName(r))}</span>${r.paused ? '<span class="sub">paused</span>' : ""}${st.unread.has(r.id) ? '<span class="unread"></span>' : ""}</button>`;
     };
     $("#view").innerHTML = st.rooms.length
@@ -266,9 +272,64 @@
       <button class="row" data-nav="folders"><span class="hash">▤</span><span class="name">Folders</span></button>
       <button class="row" data-nav="remote"><span class="hash">⇄</span><span class="name">Remote access</span></button>
       <button class="row" data-nav="subscriptions"><span class="hash">◔</span><span class="name">Subscriptions</span></button>
+      <button class="row" data-nav="personas"><span class="hash">☺</span><span class="name">Personas</span></button>
       <button class="row" data-nav="scorecard"><span class="hash">▥</span><span class="name">Scorecard</span></button>
       <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>${st.capacity ? `<div class="capline">${esc(st.capacity.summary)}</div>` : ""}`;
     paintColors();
+  }
+
+  // 3.2 Personas: how each agent sounds. The hub keeps it in the agent's SOUL.md (or in the agent's record when there is no control folder).
+  // It shapes the agent's messages and is left out when its work is judged.
+  function renderPersonas() {
+    const agents = Object.values(st.agents).sort((a, b) => a.name.localeCompare(b.name));
+    $("#view").innerHTML = `<div class="card"><div class="what">How each agent sounds</div><div class="detail">A persona shapes how an agent writes in the room. It is left out when its work is judged, so it never changes a score.</div></div>`
+      + (agents.length ? agents.map((a) => `<button class="row" data-persona="${esc(a.id)}"><span class="av" data-color="${esc(safeColor(a.color))}">${esc(glyph(a))}</span><span class="name">${esc(a.name)}</span></button>`).join("") : `<div class="empty">No agents yet.</div>`);
+    paintColors();
+  }
+
+  async function openPersona(id) {
+    const p = st.personas;
+    Object.assign(p, { id, form: null, err: "", busy: false });
+    go("persona");
+    try {
+      const [view, templates] = await Promise.all([api(`/agents/${encodeURIComponent(id)}/persona`), p.templates.length ? p.templates : api("/personas/templates")]);
+      p.templates = templates;
+      if (p.id !== id) return;
+      p.form = { name: view.name, color: safeColor(view.color).length === 7 ? safeColor(view.color) : "#5e6875", avatar: view.avatar || "", role: view.role, tone: view.tone, body: (view.body || "").trim(), template: view.template || "" };
+      if (st.view === "persona") renderPersona();
+    } catch (e) { if (e.message !== "unpaired") toast(e.message); }
+  }
+
+  function renderPersona() {
+    const p = st.personas, f = p.form;
+    if (!f) { $("#view").innerHTML = `<div class="empty">Loading…</div>`; return; }
+    const field = (id, label, input) => h("div", { class: "field" }, h("label", { for: id, text: label }), input);
+    const inp = (key, extra) => h("input", { ...extra, id: `pf_${key}`, "data-pform": key, value: f[key], autocomplete: "off" }); // type first, so a colour input keeps its value
+    const tpl = h("select", { id: "pf_template", "data-pform": "template" },
+      h("option", { value: "", text: "Start from a template…", selected: !f.template }),
+      p.templates.map((t) => h("option", { value: t.id, text: `${t.label}: ${t.summary}`, selected: t.id === f.template })));
+    const form = h("form", { class: "gform", id: "personaForm", autocomplete: "off" },
+      field("pf_template", "Template", tpl),
+      field("pf_name", "Name", inp("name", { maxLength: 60 })),
+      field("pf_color", "Colour", inp("color", { type: "color" })),
+      field("pf_avatar", "Avatar (a letter or an emoji)", inp("avatar", { maxLength: 8, placeholder: "Leave empty for the first letter" })),
+      field("pf_role", "Role", inp("role", { maxLength: 200, placeholder: "What it does, in a few words" })),
+      field("pf_tone", "Tone", inp("tone", { maxLength: 200, placeholder: "How it sounds, in a few words" })),
+      field("pf_body", "Bio and voice notes", h("textarea", { id: "pf_body", "data-pform": "body", rows: 9, value: f.body, maxLength: 6000, placeholder: "Describe how this agent writes. Voice only: it never changes what a task asks for." })),
+      h("div", { class: "err", id: "pfErr", role: "alert", text: p.err }),
+      h("button", { class: "btn", type: "submit", id: "pfSave", text: p.busy ? "Saving…" : "Save", disabled: p.busy }));
+    $("#view").replaceChildren(form);
+  }
+
+  async function savePersona() {
+    const p = st.personas, f = p.form; if (!f || p.busy) return;
+    p.busy = true; p.err = ""; const b = $("#pfSave"); if (b) { b.disabled = true; b.textContent = "Saving…"; }
+    try {
+      const v = await api(`/agents/${encodeURIComponent(p.id)}/persona`, { method: "PUT", body: { name: f.name, color: f.color, avatar: f.avatar, role: f.role, tone: f.tone, body: f.body } });
+      st.agents[p.id] = { ...st.agents[p.id], name: v.name, color: v.color, avatar: v.avatar || undefined };
+      f.template = v.template || ""; toast("Saved");
+    } catch (e) { if (e.message === "unpaired") return; p.err = e.message; }
+    finally { p.busy = false; if (st.view === "persona") renderPersona(); }
   }
 
   // The control folder (CONTROL.md): where the rules, personas and permissions live as plain files on the Mac.
@@ -595,7 +656,7 @@
         ${sw(a, kind, tool, on, label)}
       </label>`;
     $("#view").innerHTML = !st.tools.length ? `<div class="empty">Loading…</div>` : agents.map((a) => `
-      <div class="section"><span class="av mini" data-color="${esc(safeColor(a.color))}">${esc((a.name || "?")[0].toUpperCase())}</span>${esc(a.name)}</div>
+      <div class="section"><span class="av mini" data-color="${esc(safeColor(a.color))}">${esc(glyph(a))}</span>${esc(a.name)}</div>
       ${st.tools.map((tool) => {
         const on = !!a.tools?.[tool.id], auto = !!a.autoApprove?.[tool.id];
         const main = row(a, "tool", tool.id, on, tool.label, tool.sensitive ? (auto ? "Runs without asking" : "Asks you before each use") : "");
@@ -701,7 +762,7 @@
           <button class="btn small ghost" data-plan="${esc(plan.id)}" data-decision="cancel">Cancel</button>
         </div>` : "";
       html += `<div class="msg${grouped ? "" : " first"}${sys ? " system" : ""}${m.planGoalId ? " plan" : ""}">
-        <span class="av" data-color="${esc(color)}">${sys ? "•" : esc((name || "?")[0].toUpperCase())}</span>
+        <span class="av" data-color="${esc(color)}">${sys ? "•" : esc(glyph(agent, name))}</span>
         <div class="body">${grouped ? "" : `<div class="who">${esc(sys ? "Agent Room" : name)}<span class="when">${esc(time(m.createdAt))}</span></div>`}
           <div class="text">${md(m.text)}</div>${actions}</div></div>`;
       prev = m;
@@ -810,6 +871,8 @@
         return;
       }
       if (t.dataset.nav === "folders") { st.grants = null; go("folders"); void loadGrants(); return; }
+      if (t.dataset.nav === "personas") { go("personas"); return; }
+      if (t.dataset.persona) { void openPersona(t.dataset.persona); return; }
       if (t.dataset.review) { st.reviewId = t.dataset.review; go("diff"); return; }
       if (t.dataset.reload === "proposals") { triedProposals.clear(); st.fullErr = {}; if (st.view === "approvals") renderApprovals(); else renderReview(); return; }
       if (t.dataset.grantRemove) { await removeGrant(t); return; }
@@ -918,6 +981,15 @@
     }
   });
   document.addEventListener("submit", (e) => { if (e.target.id === "grantForm") { e.preventDefault(); void addGrant(); } });
+  // 3.2: the persona form keeps what is typed; picking a template fills role, tone and bio (nothing is saved until Save)
+  document.addEventListener("input", (e) => { const k = e.target.dataset?.pform; if (k && k !== "template" && st.personas.form) st.personas.form[k] = e.target.value; });
+  document.addEventListener("change", (e) => {
+    if (e.target.dataset?.pform !== "template" || !st.personas.form) return;
+    const t = st.personas.templates.find((x) => x.id === e.target.value); if (!t) return;
+    Object.assign(st.personas.form, { role: t.role, tone: t.tone, body: t.body.trim(), template: t.id });
+    renderPersona();
+  });
+  document.addEventListener("submit", (e) => { if (e.target.id === "personaForm") { e.preventDefault(); void savePersona(); } });
 
   // Funnel switch (1.2). Turning it on asks first; the hub does the work and tells us what Tailscale ended up doing.
   document.addEventListener("change", async (e) => {
@@ -928,7 +1000,7 @@
     catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
   });
 
-  $("#back").onclick = () => go(st.view === "diff" ? "approvals" : "rooms");
+  $("#back").onclick = () => go(st.view === "diff" ? "approvals" : st.view === "persona" ? "personas" : "rooms");
   $("#jumpNew").onclick = () => {
     const line = $("#newLine"), view = $("#view");
     if (line) view.scrollTo({ top: Math.max(0, line.offsetTop - view.offsetTop - 8), behavior: "smooth" });

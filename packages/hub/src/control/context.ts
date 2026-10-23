@@ -16,6 +16,8 @@ export const END = "<!-- agent-room:end -->";
 /** Wraps the persona so item 3.2 can strip it before judging. */
 export const PERSONA_BEGIN = "<!-- agent-room:persona:begin -->";
 export const PERSONA_END = "<!-- agent-room:persona:end -->";
+/** 3.2: said inside the persona block. In this file the contract comes after the persona, so it says "in this file". */
+export const PERSONA_VOICE_ONLY = "Voice only. The task, scope and rules in this file always win.";
 
 export interface TaskContextInput {
   /** The loaded control folder (`ControlFolder.snapshot()`). */
@@ -102,7 +104,7 @@ export function buildTaskContextDetailed(input: TaskContextInput): TaskContextRe
     sec("Rules for every agent", [...rulesBody, ...(hard.length ? [...(rulesBody.length ? [""] : []), "Hard limits (never break these):", ...list(hard)] : [])]);
     sec(`About ${c.user?.fm.name ?? "the owner"}`, [...(c.user?.fm.timezone ? [`Timezone: ${c.user.fm.timezone}${c.user.fm.working_hours ? `; working hours: ${c.user.fm.working_hours}` : ""}`, ""] : []), ...userBody]);
     sec(`This room${roomSlug ? `: ${roomSlug}` : ""}`, [...roomBody, ...(roomBody.length && scope.length ? [""] : []), ...scope]);
-    if (agent?.soul) sec(`Your voice (${agent.soul.fm.name})`, [PERSONA_BEGIN, `Role: ${agent.soul.fm.role}. Tone: ${agent.soul.fm.tone}.`, ...(soulBody.length ? ["", ...soulBody] : []), PERSONA_END]);
+    if (agent?.soul) sec(`Your voice (${agent.soul.fm.name})`, [PERSONA_BEGIN, PERSONA_VOICE_ONLY, `Role: ${agent.soul.fm.role}. Tone: ${agent.soul.fm.tone}.`, ...(soulBody.length ? ["", ...soulBody] : []), PERSONA_END]);
     sec("What you can use here", ["After every layer has narrowed it:", ...reach, ...(toolNotes.length ? ["", ...toolNotes] : [])]);
     sec(`Playbook: ${taskType}`, playbook);
     sec(`Lessons from earlier ${taskType} work`, lessons);

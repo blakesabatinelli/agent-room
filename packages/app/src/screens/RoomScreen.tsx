@@ -164,7 +164,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
   const header = (
     <View style={{ height: 58, flexDirection: "row", alignItems: "center", gap: space(2), paddingHorizontal: space(4), borderBottomWidth: 1, borderColor: p.line }}>
       {onBack ? <IconButton glyph="‹" label="Back" onPress={onBack} /> : null}
-      {dmAgent ? <Avatar name={dmAgent.name} color={dmAgent.color} size={24} /> : null}
+      {dmAgent ? <Avatar name={dmAgent.name} color={dmAgent.color} glyph={dmAgent.avatar} size={24} /> : null}
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text numberOfLines={1} style={[t.heading, { color: p.inkStrong, fontSize: 17 }]}>{dmAgent ? dmAgent.name : `# ${room?.name ?? ""}`}</Text>
         <Text numberOfLines={1} style={[t.tiny, { color: p.muted }]}>
@@ -174,7 +174,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
       {!dmAgent ? (
         <Pressable onPress={() => s.openPage("agents")} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: space(1.5), paddingVertical: 3, borderRadius: radius.md, borderWidth: 1, borderColor: p.line }}>
           {members.slice(0, 4).map((a, i) => (
-            <View key={a.id} style={{ marginLeft: i ? -6 : 0, borderRadius: 6, borderWidth: 2, borderColor: p.canvas }}><Avatar name={a.name} color={a.color} size={20} /></View>
+            <View key={a.id} style={{ marginLeft: i ? -6 : 0, borderRadius: 6, borderWidth: 2, borderColor: p.canvas }}><Avatar name={a.name} color={a.color} glyph={a.avatar} size={20} /></View>
           ))}
           <Text style={[t.small, { color: p.ink, marginLeft: space(1.5), fontWeight: "600" }]}>{members.length}</Text>
         </Pressable>
@@ -188,7 +188,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
 
   const intro = (
     <View style={{ paddingHorizontal: space(5), paddingTop: space(8), paddingBottom: space(4), gap: space(2) }}>
-      {dmAgent ? <Avatar name={dmAgent.name} color={dmAgent.color} size={64} /> : null}
+      {dmAgent ? <Avatar name={dmAgent.name} color={dmAgent.color} glyph={dmAgent.avatar} size={64} /> : null}
       <Text style={[t.title, { color: p.inkStrong }]}>{dmAgent ? dmAgent.name : `# ${room?.name ?? ""}`}</Text>
       <Text style={[t.body, { color: p.muted, maxWidth: 560 }]}>
         {dmAgent
@@ -222,6 +222,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
           <View>
             <MessageRow m={item.m} grouped={item.grouped} mentionNames={mentionNames}
               color={item.m.author.kind === "human" ? undefined : agents.find((a) => a.id === item.m.author.id)?.color}
+              glyph={item.m.author.kind === "human" ? undefined : agents.find((a) => a.id === item.m.author.id)?.avatar}
               onAuthor={(id) => void s.openDm(id)} />
             {item.m.planGoalId && goals[item.m.planGoalId]?.status === "awaiting_approval" ? (
               <View style={{ flexDirection: "row", gap: space(2), paddingLeft: space(5) + 36 + space(2), paddingBottom: space(2) }}>
@@ -267,7 +268,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
             {suggestions.map((a, i) => (
               <Pressable key={a.id} onPress={() => pickMention(a.id)}
                 style={{ flexDirection: "row", alignItems: "center", gap: space(2), paddingHorizontal: space(3), paddingVertical: space(1.5), backgroundColor: i === 0 ? p.tint : "transparent" }}>
-                <Avatar name={a.name} color={a.color} size={20} />
+                <Avatar name={a.name} color={a.color} glyph={a.avatar} size={20} />
                 <Text style={[t.small, t.name, { color: p.inkStrong }]}>{a.name}</Text>
                 <Dot state={presence(s, a.id)} size={7} />
                 <Text style={[t.tiny, { color: i === 0 ? p.inkStrong : p.faint }]}>@{a.id}</Text>
@@ -401,7 +402,7 @@ function Activity({ log, onClose }: { log: Message[]; onClose: () => void }) {
             const color = task.status === "failed" ? p.danger : task.status === "done" ? p.ok : task.status === "waiting" ? p.warn : p.muted;
             return (
               <View key={task.id} style={{ flexDirection: "row", gap: space(2), alignItems: "flex-start" }}>
-                {a ? <Avatar name={a.name} color={a.color} size={18} /> : <View style={{ width: 18, height: 18, borderRadius: 4, borderWidth: 1, borderColor: p.line }} />}
+                {a ? <Avatar name={a.name} color={a.color} glyph={a.avatar} size={18} /> : <View style={{ width: 18, height: 18, borderRadius: 4, borderWidth: 1, borderColor: p.line }} />}
                 <View style={{ flex: 1, gap: 2 }}>
                   <Text style={[t.small, { color: p.ink }]}>{task.title}</Text>
                   <Text style={[t.tiny, { color }]}>

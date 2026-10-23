@@ -1271,3 +1271,42 @@ export interface MemoryExportInfo {
   note?: string;
   lastWrittenAt?: number;
 }
+
+// ---- 3.2 Personas
+/** An agent's persona: how it presents itself (SOUL.md). Not a résumé: it never says what the agent is good at. */
+export interface Persona {
+  name: string;
+  /** Hex colour like #6B4FD8. */
+  color: string;
+  /** One letter or emoji shown on the avatar. Empty: the first letter of the name. */
+  avatar?: string;
+  /** What the agent does, in a few words. */
+  role: string;
+  /** How it sounds, in a few words. */
+  tone: string;
+  /** Bio and voice notes (the SOUL.md body). */
+  body: string;
+}
+/** GET /agents/:id/persona */
+export interface PersonaView extends Persona {
+  agentId: string;
+  /** control: it is agents/<id>/SOUL.md in the control folder. agent: it is kept in the agent's record (no control folder). */
+  source: "control" | "agent";
+  /** The starter template this persona still matches word for word, or null. */
+  template: string | null;
+  /** SOUL.md's `updated` date, when it comes from the file. */
+  updated?: string;
+}
+/** PUT /agents/:id/persona. Fields left out keep their current value. `template` fills role, tone and body from a starter first. */
+export interface PersonaInput extends Partial<Persona> { template?: string }
+/** GET /personas/templates */
+export interface PersonaTemplate {
+  id: string;
+  label: string;
+  /** One line for the picker. */
+  summary: string;
+  role: string;
+  tone: string;
+  body: string;
+}
+export interface AgentConfig { avatar?: string }

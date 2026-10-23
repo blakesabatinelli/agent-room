@@ -1,6 +1,7 @@
 import type { AgentConfig, AgentScore, Contract, GateReport, MemoryEntry, Requirement, Task } from "@agent-room/shared";
 import { REPORT_FORMAT, gateText, handle, profileText, profilesOf, roster } from "./contract.js";
 import { capabilityText } from "../discovery/routing.js"; // 1.3
+import { stripPersona } from "../jury/neutralize.js"; // 3.2: persona text never reaches a judge
 
 const TYPES = "writing | research | coding | analysis | data | other";
 const mem = (m: MemoryEntry[]) => m.map((x) => `- ${x.text}`).join("\n") || "- (none)";
@@ -170,9 +171,9 @@ Agent's self-report: ${task.report ? `STATUS ${task.report.status}; ${Object.ent
 
 Submitted reply:
 """
-${(task.result ?? "").slice(0, 10000)}
+${stripPersona(task.result ?? "").slice(0, 10000)}
 """
-${files ? `\nThe deliverable files as they are now (judge these; the reply can overstate them):\n"""\n${files}\n"""\n` : ""}
+${files ? `\nThe deliverable files as they are now (judge these; the reply can overstate them):\n"""\n${stripPersona(files)}\n"""\n` : ""}
 Check each criterion yourself; don't trust the self-report. Done is a property of the files, not of
 the message. The work must reflect every owner amendment. Check for drift: did the agent do other
 tasks' work, wander from the objective, or pad with things nobody asked for?

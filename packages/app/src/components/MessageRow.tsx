@@ -49,8 +49,8 @@ export function Body({ text, mentionNames }: { text: string; mentionNames: Set<s
   );
 }
 
-function MessageRowImpl({ m, color, grouped, mentionNames, onAuthor }: {
-  m: Message; color?: string; grouped?: boolean; mentionNames: Set<string>; onAuthor?: (agentId: string) => void;
+function MessageRowImpl({ m, color, glyph, grouped, mentionNames, onAuthor }: {
+  m: Message; color?: string; glyph?: string; grouped?: boolean; mentionNames: Set<string>; onAuthor?: (agentId: string) => void;
 }) {
   const p = usePalette();
   const [hover, setHover] = useState(false);
@@ -74,7 +74,7 @@ function MessageRowImpl({ m, color, grouped, mentionNames, onAuthor }: {
       <View style={{ width: 36, alignItems: "center", paddingTop: grouped ? 3 : 2 }}>
         {grouped
           ? (hover ? <Text style={[t.tiny, { color: p.faint, fontSize: 10 }]}>{time(m.createdAt).replace(/\s?[AP]M/i, "")}</Text> : null)
-          : <Avatar name={m.author.name} color={c} />}
+          : <Avatar name={m.author.name} color={c} glyph={glyph} />}
       </View>
       <View style={{ flex: 1, minWidth: 0 }}>
         {!grouped ? (

@@ -294,7 +294,8 @@ test("the jury can be switched off: judging is exactly what it was, and nothing 
   assert.equal(j.jury, undefined);
   assert.equal(listJuries(ctx.store).length, 0);
   assert.equal(calls("JUDGE").length, 1);
-  assert.ok(calls("JUDGE")[0].prompt.includes("PERSONA-SECRET"), "untouched when the owner turns it off");
+  assert.ok(!calls("JUDGE")[0].prompt.includes("PERSONA-SECRET"), "3.2: no persona reaches a judge, jury or not"); // was: the raw reply, untouched
+  assert.ok(calls("JUDGE")[0].prompt.includes("venues.csv"), "the rest of the reply is untouched when the owner turns it off");
 });
 
 test("a judge that is out of quota is skipped", async () => {

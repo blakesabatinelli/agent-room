@@ -5,6 +5,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import type { ControlCommit, ControlNotice, ControlStatus, ServerEvent } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import { buildTaskContext, type TaskContextInput } from "./context.js";
+import { scrubPersona } from "../persona/block.js"; // 3.2
 import { ControlGit } from "./git.js";
 import { analyzeFolder, checkFile, walk, type Analysis, type FileResult } from "./lint.js";
 import { editFrontMatter, seqNode } from "./parse.js";
@@ -280,6 +281,7 @@ export class ControlFolder {
   private read(rel: string) { return readFileSync(this.abs(rel), "utf8"); }
   /** Write through a hidden temp file so an editor never sees half a file. Records the hash so the watcher ignores our own write. */
   private write(rel: string, text: string) {
+    if (/(^|\/)RESUME\.md$/.test(rel)) text = scrubPersona(text); // 3.2: personas present, résumés prove: no persona text in a résumé
     const p = this.abs(rel);
     mkdirSync(dirname(p), { recursive: true });
     const tmp = join(dirname(p), `.${rel.split("/").pop()}.tmp-${process.pid}`);
