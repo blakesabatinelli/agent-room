@@ -27,7 +27,8 @@ const orch = new Orchestrator(store, approvals, { dataDir, mcpUrl: () => `http:/
 const app = await buildServer({ store, orch, approvals, ownerName });
 
 await app.listen({ host: "0.0.0.0", port });
-// Pick up any work that was running when the hub last stopped.
+// 1.4: drop worktrees left behind by tasks that are no longer open, then pick up any work that was running when the hub last stopped.
+await orch.pruneWorktrees().catch(() => undefined);
 const resumed = orch.recover();
 if (resumed.length) console.log(`Resumed ${resumed.length} goal${resumed.length > 1 ? "s" : ""} after restart.`);
 const ts = await tailscaleIp();

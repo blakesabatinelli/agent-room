@@ -16,6 +16,7 @@ import { addUsage, closeRecord, decide, fixedDecision, openRecord, type RouteDec
 import { addFailure, classifyFailure, parseFailureCategory, type FailureEvidence } from "./failures.js";
 import { Library, defaultLibraryRoot } from "../library/library.js";
 import { FileBroker } from "../files/broker.js";
+import { TaskWorkspaces, type TaskWorkspace, type WorkspaceHookContext, type WorkspaceHooks } from "./worktree.js";
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -40,6 +41,8 @@ export interface OrchestratorOptions {
   retryDelayMs?: number;
   /** Root of the document Library; defaults to ~/Agent Room/Library (or $AGENT_ROOM_LIBRARY). */
   libraryDir?: string;
+  /** 1.4: git binary for task worktrees (default $AGENT_ROOM_GIT or "git"). A failing one makes tasks use folder copies. */
+  gitBin?: string;
 }
 
 type PlanTask = RawPlanTask;
@@ -68,10 +71,17 @@ export class Orchestrator {
   library: Library;
   /** 0.3 spike: folder grants, file reads, and diff-proposed writes. */
   files: FileBroker;
+  /** 1.4: every task attempt works in its own git worktree (or folder copy) cut from the goal folder. */
+  workspaces: TaskWorkspaces;
+  /** 1.4: hooks around each task's worktree (1.9 writes and restores the agent's context file here). */
+  workspaceHooks: WorkspaceHooks = {};
+  /** Worktree clean-ups in flight (stop/replan are synchronous callers); idle() waits for them. */
+  private cleanups = new Set<Promise<unknown>>();
 
   constructor(private store: Store, private approvals: Approvals, private opts: OrchestratorOptions) {
     this.library = new Library(store, opts.libraryDir ?? defaultLibraryRoot());
     this.files = new FileBroker(store, approvals);
+    this.workspaces = new TaskWorkspaces({ dataDir: opts.dataDir, git: opts.gitBin });
   }
 
   private cfg(): Required<OrchestratorSettings> {
@@ -101,6 +111,7 @@ export class Orchestrator {
   }
   /** Wait for in-flight chat/tag replies to settle (tests, shutdown). */
   async idle() {
+    await Promise.allSettled([...this.cleanups]);
     for (let i = 0; i < 50; i++) {
       const all = [...this.lanes.values()];
       await Promise.allSettled(all); await sleep(5);
@@ -376,6 +387,7 @@ export class Orchestrator {
     const tasks = this.store.listTasks({ goalId: goal.id });
     const done = tasks.filter((t) => t.status === "done");
     for (const t of tasks.filter(OPEN)) { t.status = "cancelled"; this.store.saveTask(t); }
+    void this.dropWorktrees(g.id); // 1.4
     g.status = "superseded"; g.summary = `Owner changed direction: ${text}`;
     g.state = { ...(g.state ?? { decisions: [] }), nextAction: "Replaced by a new plan." };
     this.store.saveGoal(g);
@@ -557,6 +569,7 @@ export class Orchestrator {
         for (const t of this.store.listTasks({ goalId: g.id })) {
           if (OPEN(t)) { t.status = "cancelled"; this.store.saveTask(t); }
         }
+        void this.dropWorktrees(g.id); // 1.4
       }
     }
     for (const a of this.enabledAgents()) this.floor.take(a.id, roomId);
@@ -734,6 +747,7 @@ export class Orchestrator {
         if (!this.cfg().autoResume) {
           for (const t of tasks.filter(OPEN)) { t.status = "cancelled"; this.store.saveTask(t); }
           g.status = "failed"; g.summary = "Interrupted by a restart."; this.store.saveGoal(g);
+          void this.dropWorktrees(g.id); // 1.4
           this.post(room.id, SYS, `"${g.text.slice(0, 80)}" stopped when the hub restarted.`, "system");
           continue;
         }
@@ -908,6 +922,7 @@ export class Orchestrator {
     for (const t of stuck) {
       if (OPEN(t)) { this.taskRuns.get(t.id)?.ctrl.abort(); t.status = "cancelled"; }
       t.recovered = true; this.store.saveTask(t);
+      await this.discardWorktree(goal, t); // 1.4
     }
     if (!raw.length) {
       // No new route: retry the stuck tasks once more, a tier up, rather than ending the goal quietly.
@@ -1067,6 +1082,57 @@ export class Orchestrator {
     this.checkpoint(goal.id, { decision: `Owner redirected "${task.title}": ${text.slice(0, 200)}` });
   }
 
+  // ---------- 1.4 worktree per task
+  /** The task's own working directory (its git worktree or folder copy), if it has one right now. */
+  taskWorktree(task: Pick<Task, "goalId" | "id">): string | undefined { return this.workspaces.find(task.goalId, task.id)?.path; }
+
+  /** Remove every worktree and branch the goal still holds. Tracked so idle() can wait for it. */
+  private dropWorktrees(goalId: string): Promise<void> {
+    const folder = this.store.getGoal(goalId)?.folder;
+    if (!folder) return Promise.resolve();
+    const p: Promise<void> = this.workspaces.cleanup({ id: goalId, folder }, this.store.listTasks({ goalId }).map((t) => t.id))
+      .catch(() => undefined).finally(() => { this.cleanups.delete(p); });
+    this.cleanups.add(p);
+    return p;
+  }
+  private async discardWorktree(goal: Goal, task: Task) {
+    const folder = this.store.getGoal(goal.id)?.folder ?? goal.folder;
+    if (folder) await this.workspaces.discard({ id: goal.id, folder }, task.id).catch(() => undefined);
+  }
+  private async workspaceHook(name: keyof WorkspaceHooks, ws: TaskWorkspace, agentId: string) {
+    const fn = this.workspaceHooks[name]; if (!fn) return;
+    const ctx: WorkspaceHookContext = { goalId: ws.goalId, taskId: ws.taskId, agentId, path: ws.path, kind: ws.kind };
+    try { await fn(ctx); } catch (e) { this.store.audit(agentId, "worktree.hook", `${name} failed: ${firstLine(String(e))}`); }
+  }
+  /** Hub start: remove worktrees of tasks that are no longer open. Call before recover(). */
+  pruneWorktrees() {
+    return this.workspaces.prune((goalId, taskId) => {
+      const g = this.store.getGoal(goalId), t = this.store.getTask(taskId);
+      return !!g && ["planning", "awaiting_approval", "running", "paused"].includes(g.status) && !!t && OPEN(t);
+    });
+  }
+
+  /**
+   * The judge accepted the work but it collides with work already merged from another task. Never done, never an overwrite:
+   * the task goes back to the same agent, whose worktree now holds the latest base with conflict markers to resolve.
+   * Conflicts are not the agent's fault, so they don't use up an attempt (three in a row do).
+   */
+  private async sendBackConflict(goal: Goal, task: Task, agent: AgentConfig, judgment: Judgment, files: string[], markers: boolean, goalSignal: AbortSignal) {
+    const list = files.length ? files.join(", ") : "the files you changed";
+    const feedback = markers
+      ? `Not merged yet: ${list} still contain conflict markers (<<<<<<<, =======, >>>>>>>). Resolve them so the file keeps BOTH your change and the other task's accepted change, remove every marker, and finish again.`
+      : `Your work was accepted but could not be merged: ${list} changed in another task's accepted work too. Your folder now holds the latest accepted state, and the conflicting files contain conflict markers (<<<<<<<, =======, >>>>>>>). Open each one, keep BOTH your change and the other task's change (never drop theirs), remove the markers, and finish again.`;
+    const strikes = (task.history ?? []).filter((h) => h.outcome === "redirect" && h.note.startsWith("merge conflict")).length;
+    task.judgment = { ...judgment, verdict: "revise", feedback };
+    this.addHistory(task, agent.id, strikes >= 3 ? "fail" : "redirect", `merge conflict: ${list}`);
+    this.log(goal.roomId, `"${task.title}" passed review but conflicts with accepted work in ${list}; sending it back to ${agent.name} to merge.`, task.id, "task_update");
+    this.store.audit(agent.id, "worktree.conflict", `"${task.title}": ${list}`.slice(0, 300));
+    if (strikes >= 3) return this.retryOrFail(goal, task, agent, "revise", goalSignal);
+    this.floor.take(agent.id, goal.roomId);
+    task.attempts = Math.max(0, task.attempts - 1);
+    task.status = "revising"; this.store.saveTask(task);
+  }
+
   private async runTaskInner(goal: Goal, task: Task, agent: AgentConfig, signal: AbortSignal, goalSignal: AbortSignal, run: { redirect?: string }) {
     const s = this.cfg();
     const stopped = () => signal.aborted;
@@ -1082,26 +1148,36 @@ export class Orchestrator {
     this.working(goal.roomId, agent, true, task.title);
 
     const fresh = this.store.getGoal(goal.id) ?? goal;
-    const folder = fresh.folder ?? goalFolder(this.opts.dataDir, goal.id);
+    const folder = fresh.folder ?? goalFolder(this.opts.dataDir, goal.id); // the goal's BASE folder (LEDGER.md, final checks)
+    // 1.4: the agent never works in the base. Its own worktree (or copy) is `work`: the cwd, the checks and the judge's view.
+    const ws = await this.workspaces.open({ id: goal.id, folder }, task, agent.id);
+    const work = ws.path;
+    await this.workspaceHook("beforeRun", ws, agent.id); // 1.9 HOOK: write the agent's context file into `work` here
+    // The owner may have stopped or cancelled this while the worktree was being cut: don't resurrect the task or leak the worktree.
+    if (this.store.getTask(task.id)?.status === "cancelled" || (stopped() && interrupted())) {
+      this.working(goal.roomId, agent, false); closeRecord(this.store, task.routingId, { outcome: "interrupted" });
+      if (this.store.getTask(task.id)?.status === "cancelled") await this.discardWorktree(goal, task);
+      return;
+    }
     const profile = pickProfile(agent, task.role ?? "worker", task.minTier ?? 1);
     task.profileId = profile.id; this.store.saveTask(task);
     const rid = task.routingId;
     closeRecord(this.store, rid, { profileId: profile.id, modelRequested: profile.model ?? ((agent.settings?.model as string | undefined) || undefined) });
     const deps = this.store.listTasks({ goalId: goal.id }).filter((t) => task.dependsOn.includes(t.id));
     const notes = this.ownerNotes.get(goal.id) ?? [];
-    const before = snapshot(folder);
-    const prompt = taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.store.listPrivate(agent.id), notes, this.enabledAgents(), agent.id, feedback, { path: folder, files: [...before.keys()] }, this.ledgerText(fresh), this.decisionsFor(fresh));
-    let res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: folder });
+    const before = snapshot(work);
+    const prompt = taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.store.listPrivate(agent.id), notes, this.enabledAgents(), agent.id, feedback, { path: work, files: [...before.keys()], ledger: join(folder, "LEDGER.md") }, this.ledgerText(fresh), this.decisionsFor(fresh));
+    let res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: work });
     let usage: RunUsage | undefined = res.usage, ms = res.durationMs, ranModel = res.model;
     // A rate limit or timeout says nothing about the agent's work: wait and retry, without spending an attempt.
     for (let retry = 1; !res.ok && retry <= 2 && isTransient(res.error) && !stopped(); retry++) {
       this.log(goal.roomId, `${agent.name} hit a temporary error on "${task.title}" (${firstLine(res.error)}); retrying in a moment.`, task.id, "task_update");
       await sleep((this.opts.retryDelayMs ?? 5000) * retry * retry);
       if (stopped()) break;
-      res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: folder });
+      res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: work });
       usage = addUsage(usage, res.usage); ms += res.durationMs; ranModel = res.model ?? ranModel;
     }
-    const changed = changedFiles(before, snapshot(folder));
+    const changed = changedFiles(before, snapshot(work));
     this.working(goal.roomId, agent, false);
     // 0.2: close the routing record on every way out of this attempt.
     const route = (outcome: RoutingOutcome, extra: Partial<RoutingRecord> = {}) =>
@@ -1154,7 +1230,7 @@ export class Orchestrator {
     const mayRun = !!fresh.approvedAt || this.cfg().autoRunChecks;
     task.checks = [];
     if (runnable.length && mayRun) {
-      for (const c of runnable) task.checks.push(await runCheck(c.id, c.check!, folder));
+      for (const c of runnable) task.checks.push(await runCheck(c.id, c.check!, work));
       this.store.saveTask(task);
       this.log(goal.roomId, `Checks on "${task.title}": ${task.checks.map((r) => `${r.criterionId} ${r.ok ? "PASS" : `FAIL (exit ${r.exitCode})`}`).join(", ")}.`, task.id, "task_update");
     }
@@ -1166,7 +1242,7 @@ export class Orchestrator {
       ? { score: 0.3, verdict: "revise", judgeAgentId: "checks",
           feedback: `These checks failed: ${failedChecks.map((r) => `${r.criterionId} \`${r.command}\` exited ${r.exitCode}${r.output ? `: ${r.output.split("\n").slice(-3).join(" ").slice(0, 300)}` : ""}`).join("; ")}.`,
           criteria: {}, onTask: true }
-      : await this.judge(task, agent, fresh.contract, this.ownerNotes.get(goal.id) ?? notes, signal, changed, this.deliverableText(folder, task, changed), isRevision ? feedback : undefined);
+      : await this.judge(task, agent, fresh.contract, this.ownerNotes.get(goal.id) ?? notes, signal, changed, this.deliverableText(work, task, changed), isRevision ? feedback : undefined);
     if (stopped() && interrupted()) { route("interrupted"); return; }
     // A command's verdict beats a model's.
     for (const r of task.checks) (judgment.criteria ??= {})[r.criterionId] = { verdict: r.ok ? "PASS" : "FAIL", evidence: r.ok ? `\`${r.command}\` passed` : `\`${r.command}\` exited ${r.exitCode}` };
@@ -1179,7 +1255,7 @@ export class Orchestrator {
       && blockers.every(([, v]) => v.verdict === "UNSURE") && judgment.onTask !== false && !judgment.drift;
     task.unsureRounds = onlyUnsure ? (task.unsureRounds ?? 0) + 1 : 0;
     if (onlyUnsure && task.unsureRounds >= 2) {
-      const second = await this.judge(task, agent, fresh.contract, this.ownerNotes.get(goal.id) ?? notes, signal, changed, this.deliverableText(folder, task, changed), undefined, judgment.judgeAgentId);
+      const second = await this.judge(task, agent, fresh.contract, this.ownerNotes.get(goal.id) ?? notes, signal, changed, this.deliverableText(work, task, changed), undefined, judgment.judgeAgentId);
       if (stopped() && interrupted()) { route("interrupted"); return; }
       const still = Object.entries(second.criteria ?? {}).filter(([k, v]) => v.verdict !== "PASS" && !checked.has(k));
       if (still.every(([, v]) => v.verdict === "UNSURE") && second.onTask !== false) {
@@ -1209,6 +1285,12 @@ export class Orchestrator {
     this.progress(goal.id, (p) => { if (judgment.verdict === "accept") { p.stall = 0; p.lastAcceptAt = now(); } else p.stall += 1; });
     const judged = { judgment: { score: judgment.score, verdict: judgment.verdict, judgeAgentId: judgment.judgeAgentId } };
     if (judgment.verdict === "accept") {
+      // 1.4: accepted work merges into the goal folder. A conflict with another task's accepted work is a send-back, never "done".
+      await this.workspaceHook("beforeMerge", ws, agent.id); // 1.9 HOOK: restore the agent's context file in `work` before it is committed
+      const merge = await this.workspaces.accept({ id: goal.id, folder }, task);
+      if (!merge.ok) { route("revise", judged); return this.sendBackConflict(goal, task, agent, judgment, merge.conflict, !!merge.markers, goalSignal); }
+      await this.discardWorktree(goal, task);
+      if (merge.merged.length) this.store.audit(agent.id, "worktree.merge", `"${task.title}" merged (${merge.how}): ${merge.merged.slice(0, 12).join(", ")}`.slice(0, 400));
       route("accepted", judged);
       this.addHistory(task, agent.id, "ok", `${Math.round(judgment.score * 100)}/100`);
       task.status = "done"; this.store.saveTask(task); this.floor.take(agent.id, goal.roomId);
@@ -1236,11 +1318,12 @@ export class Orchestrator {
     if ((fails >= 2 || looping) && (task.replans ?? 0) < 1 && !signal.aborted && await this.replan(goal, task, signal)) return;
     if (task.attempts >= s.maxAttempts) {
       task.status = "failed"; this.store.saveTask(task);
+      await this.discardWorktree(goal, task); // 1.4: rejected work is discarded
       this.post(task.roomId, SYS, `"${task.title}" failed after ${task.attempts} attempt${task.attempts > 1 ? "s" : ""}${task.replans ? " and a replan" : ""}.`, "system", task.id);
       this.checkpoint(goal.id, { decision: `"${task.title}" failed.` });
       return;
     }
-    if (mode === "reassign") { task.triedBy = [...(task.triedBy ?? []), agent.id]; task.assignee = undefined; task.status = "pending"; }
+    if (mode === "reassign") { task.triedBy = [...(task.triedBy ?? []), agent.id]; task.assignee = undefined; task.status = "pending"; await this.discardWorktree(goal, task); /* 1.4: the next agent starts fresh */ }
     else task.status = "revising";
     this.store.saveTask(task);
   }
@@ -1264,6 +1347,7 @@ export class Orchestrator {
     task.minTier = Math.min(3, usedTier + 1) as 1 | 2 | 3;
     task.replans = (task.replans ?? 0) + 1; task.attempts = 0; task.triedBy = [];
     task.assignee = undefined; task.status = "pending"; task.judgment = undefined;
+    await this.discardWorktree(goal, task); // 1.4: a new approach starts from the current base
     this.addHistory(task, "orchestrator", "replan", r.approach ?? "new approach");
     this.store.saveTask(task);
     this.log(goal.roomId, `Replanned "${task.title}" after two failures: ${r.approach ?? "new approach"}; next attempt runs at tier ${task.minTier} or above.`, task.id, "task_update");
@@ -1316,6 +1400,7 @@ export class Orchestrator {
   }
 
   private async finish(goal: Goal) {
+    await this.dropWorktrees(goal.id); // 1.4: nothing outlives the goal
     const tasks = this.store.listTasks({ goalId: goal.id });
     const g = this.store.getGoal(goal.id) ?? goal;
     // Tasks that were replaced by a recovery don't count against the goal; their replacements do.

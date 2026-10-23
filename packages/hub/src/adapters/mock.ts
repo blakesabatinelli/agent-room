@@ -1,4 +1,4 @@
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Adapter, RunRequest, RunResult } from "./types.js";
 
@@ -14,11 +14,15 @@ import type { Adapter, RunRequest, RunResult } from "./types.js";
  * recoverAsk (recovery asks the owner), recoverOwner (who recovery hands the new task to), transient (fail the
  * first N task runs with a rate-limit error), unsure (as a judge, can't verify anything), decide (report this
  * DECISIONS line), badPlan (the first plan is broken; the repair round fixes it), failureCategory (as a judge,
- * the failure_category it gives work it sends back), noOwner (plans name no owner, so routing is learned).
+ * the failure_category it gives work it sends back), noOwner (plans name no owner, so routing is learned),
+ * shared (1.4: a file path; the task run MERGES one line "<name> wrote <path>" into that file instead of overwriting it,
+ * and when the file holds git conflict markers it keeps both sides and drops the markers, like a careful agent would;
+ * the file is not written again by the usual scope-file loop).
+ * Every call also records the cwd it ran in (MockAdapter.calls[].cwd), so tests can see which worktree a task used.
  */
 export class MockAdapter implements Adapter {
   /** Every run, for tests: which profile reached the agent. */
-  static calls: { agentId: string; model?: string; effort?: string; kind: string; prompt: string }[] = [];
+  static calls: { agentId: string; model?: string; effort?: string; kind: string; prompt: string; cwd: string }[] = [];
   static transientSeen = new Map<string, number>();
   async status() { return { ready: true, state: "ready" as const, detail: "Practice agent" }; }
 
@@ -27,7 +31,7 @@ export class MockAdapter implements Adapter {
     const p = req.prompt;
     const st = req.agent.settings as { quality?: number; status?: string; outOfScope?: string; tag?: string; noReport?: boolean; checks?: boolean; bigPlan?: boolean; skipFiles?: boolean; writeOutside?: string };
     const kind = (p.match(/^\[\[(\w+)\]\]/)?.[1] ?? (p.includes("# Your task:") ? "TASK" : "CHAT")).toUpperCase();
-    MockAdapter.calls.push({ agentId: req.agent.id, model: req.model, effort: req.effort, kind, prompt: p });
+    MockAdapter.calls.push({ agentId: req.agent.id, model: req.model, effort: req.effort, kind, prompt: p, cwd: req.cwd });
     const quality = Number(st.quality ?? 0.8);
     const ids = [...new Set([...p.matchAll(/^(AC\d+):/gm)].map((m) => m[1]))];
     let text: string;
@@ -101,7 +105,16 @@ export class MockAdapter implements Adapter {
     } else if (p.includes("# Your task:")) {
       // write the files this task may change, like a real agent saving its deliverable
       const allowed = p.match(/You may create or change only: (.+?)\. Read anything else/)?.[1]?.split(", ") ?? [];
+      const shared = (st as { shared?: string }).shared;
+      if (shared) {
+        const full = join(req.cwd, shared); mkdirSync(dirname(full), { recursive: true });
+        const mine = `${req.agent.name} wrote ${shared}`;
+        const kept = (existsSync(full) ? readFileSync(full, "utf8") : "").split("\n").filter((l) => l && !/^(<{7}|={7}|>{7})( .*)?$/.test(l));
+        if (!kept.includes(mine)) kept.push(mine);
+        writeFileSync(full, kept.join("\n") + "\n");
+      }
       if (!st.skipFiles) for (const f of [...allowed, ...(st.writeOutside ? [st.writeOutside] : [])]) {
+        if (f === shared) continue;
         const full = join(req.cwd, f); mkdirSync(dirname(full), { recursive: true });
         writeFileSync(full, `${req.agent.name} wrote ${f}\n`);
       }

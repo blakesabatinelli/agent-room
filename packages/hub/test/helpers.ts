@@ -6,12 +6,12 @@ import { Approvals } from "../src/orchestrator/approvals.js";
 import { Orchestrator } from "../src/orchestrator/orchestrator.js";
 import { seed } from "../src/seed.js";
 
-export function setup(opts: { rand?: () => number; retryDelayMs?: number } = {}) {
+export function setup(opts: { rand?: () => number; retryDelayMs?: number; gitBin?: string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "ar-"));
   const store = new Store(join(dir, "t.db"));
   seed(store, true);
   const approvals = new Approvals(store, 2000);
-  const orch = new Orchestrator(store, approvals, { dataDir: dir, mcpUrl: () => undefined, rand: opts.rand ?? (() => 0.99), retryDelayMs: opts.retryDelayMs ?? 1, libraryDir: join(dir, "Library") });
+  const orch = new Orchestrator(store, approvals, { dataDir: dir, mcpUrl: () => undefined, rand: opts.rand ?? (() => 0.99), retryDelayMs: opts.retryDelayMs ?? 1, gitBin: opts.gitBin, libraryDir: join(dir, "Library") });
   const room = store.listRooms()[0];
   return { dir, store, approvals, orch, room };
 }
