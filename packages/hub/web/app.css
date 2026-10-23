@@ -106,3 +106,22 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+
+/* permissions */
+.section .av.mini { display: inline-flex; width: 20px; height: 20px; border-radius: 5px; font-size: 11px; vertical-align: -1px; margin-right: 8px; }
+.perm { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.perm .txt { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.perm .lbl { font-size: 16px; color: var(--strong); }
+.perm .hint2 { font-size: 13px; color: var(--muted); }
+/* A sub-setting: indented container with a left rule and secondary text. The rule shows the hierarchy, not whitespace. */
+.nested { margin: 0 0 4px 28px; border-left: 2px solid var(--line-strong); }
+.nested .perm { padding: 10px 16px 10px 12px; }
+.nested .perm .lbl { font-size: 14px; color: var(--muted); }
+.nested .perm .hint2 { font-size: 12px; }
+.switch { appearance: none; -webkit-appearance: none; flex: none; width: 46px; height: 28px; border-radius: 99px; background: var(--line-strong);
+  position: relative; cursor: pointer; transition: background .15s; margin: 0; }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 3px rgba(30,36,44,0.25); transition: transform .15s; }
+.switch:checked { background: var(--accent); }
+.switch:checked::after { transform: translateX(18px); }
+.switch:disabled { opacity: .5; }

@@ -53,16 +53,24 @@ export function IconButton({ glyph, label, onPress, active, badge }: { glyph: st
   );
 }
 
-export function Toggle({ label, hint, value, onChange, accent }: { label: string; hint?: string; value: boolean; onChange: (v: boolean) => void; accent?: string }) {
+/**
+ * A labelled switch. `nested` renders it as a sub-setting of the toggle above it: indented, with a left rule
+ * and secondary text. Indent with this, never with spaces in the label.
+ */
+export function Toggle({ label, hint, value, onChange, accent, nested }: { label: string; hint?: string; value: boolean; onChange: (v: boolean) => void; accent?: string; nested?: boolean }) {
   const p = usePalette();
-  return (
-    <View style={[styles.row, { borderColor: p.line }]}>
+  const row = (
+    <View style={[styles.row, nested ? styles.nestedRow : null, { borderColor: p.line }]}>
       <View style={{ flex: 1 }}>
-        <Text style={[t.body, { color: p.ink }]}>{label}</Text>
-        {hint ? <Text style={[t.small, { color: p.muted }]}>{hint}</Text> : null}
+        <Text style={[nested ? t.small : t.body, { color: nested ? p.muted : p.ink }]}>{label}</Text>
+        {hint ? <Text style={[nested ? t.tiny : t.small, { color: nested ? p.faint : p.muted }]}>{hint}</Text> : null}
       </View>
       <Switch accessibilityLabel={label} value={value} onValueChange={onChange} trackColor={{ true: accent ?? p.ok, false: p.raised }} />
     </View>
+  );
+  if (!nested) return row;
+  return (
+    <View accessibilityRole="none" style={[styles.nested, { borderLeftColor: p.lineStrong }]}>{row}</View>
   );
 }
 
@@ -157,6 +165,9 @@ const styles = StyleSheet.create({
   button: { paddingHorizontal: space(3.5), paddingVertical: space(2), borderRadius: radius.md, borderWidth: 1, alignItems: "center", justifyContent: "center" },
   buttonSmall: { paddingHorizontal: space(2.5), paddingVertical: space(1) },
   row: { flexDirection: "row", alignItems: "center", paddingHorizontal: space(4), paddingVertical: space(3), borderBottomWidth: StyleSheet.hairlineWidth, gap: space(3) },
+  // Sub-setting: indented container with a left rule; the rule carries the hierarchy, not whitespace.
+  nested: { marginLeft: space(6), borderLeftWidth: 2, marginBottom: space(1) },
+  nestedRow: { paddingLeft: space(3), paddingVertical: space(2.5) },
   input: { borderWidth: 1, borderRadius: radius.lg, paddingHorizontal: space(3), paddingVertical: space(2.5) },
   card: { borderWidth: 1, borderRadius: radius.xl, overflow: "hidden" },
 });

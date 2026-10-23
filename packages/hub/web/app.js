@@ -7,7 +7,8 @@
   const st = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
-    view: "rooms",          // rooms | room | approvals | pair
+    view: "rooms",          // rooms | room | approvals | permissions | pair
+    tools: [],
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, working: {}, approvals: [],
     unread: new Set(), readAt: 0, readSent: {}, positioned: "",
     online: false, ws: null, wsDelay: 1000,
@@ -153,7 +154,7 @@
         st.rooms = st.rooms.filter((r) => r.id !== e.roomId);
         if (st.roomId === e.roomId) go("rooms"); else if (st.view === "rooms") renderRooms();
         break;
-      case "agent": st.agents[e.agent.id] = e.agent; break;
+      case "agent": st.agents[e.agent.id] = e.agent; if (st.view === "permissions") renderPermissions(); break;
       case "read": if (st.unread.delete(e.roomId) && st.view === "rooms") renderRooms(); break;
     }
   }
@@ -213,11 +214,12 @@
     $("#composer").hidden = st.view !== "room";
     const room = st.rooms.find((r) => r.id === st.roomId);
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : `# ${room.name}`)
-      : st.view === "approvals" ? "Approvals" : "Agent Room";
+      : st.view === "approvals" ? "Approvals" : st.view === "permissions" ? "Permissions" : "Agent Room";
     renderDot(); renderBadge();
     if (st.view === "pair") return renderPair();
     if (st.view === "rooms") return renderRooms();
     if (st.view === "approvals") return renderApprovals();
+    if (st.view === "permissions") return renderPermissions();
     renderMessages(); renderComposerState();
   }
 
@@ -240,6 +242,7 @@
       ? `${channels.length ? `<div class="section">Channels</div>${channels.map(row).join("")}` : ""}
          ${dms.length ? `<div class="section">Direct messages</div>${dms.map(row).join("")}` : ""}`
       : `<div class="empty">No rooms yet. Make one on the Mac.</div>`;
+    $("#view").innerHTML += `<div class="section">Settings</div><button class="row" data-nav="permissions"><span class="hash">⚙︎</span><span class="name">Permissions</span></button>`;
     paintColors();
   }
 
@@ -253,6 +256,29 @@
           <button class="btn small plain" data-approval="${esc(a.id)}" data-decision="rejected">Reject</button>
         </div>
       </div>`).join("") : `<div class="empty">Nothing waiting for you.</div>`;
+  }
+
+  // Per-agent tool switches. A sub-setting is nested under its parent (indented, with a left rule); labels never carry spaces.
+  function renderPermissions() {
+    const agents = Object.values(st.agents).sort((a, b) => a.name.localeCompare(b.name));
+    const sw = (a, kind, tool, on, label) =>
+      `<input type="checkbox" role="switch" class="switch" aria-label="${esc(label)}" data-agent="${esc(a.id)}" data-kind="${kind}" data-tool="${esc(tool)}"${on ? " checked" : ""}>`;
+    const row = (a, kind, tool, on, label, hint) => `
+      <label class="perm">
+        <span class="txt"><span class="lbl">${esc(label)}</span>${hint ? `<span class="hint2">${esc(hint)}</span>` : ""}</span>
+        ${sw(a, kind, tool, on, label)}
+      </label>`;
+    $("#view").innerHTML = !st.tools.length ? `<div class="empty">Loading…</div>` : agents.map((a) => `
+      <div class="section"><span class="av mini" data-color="${esc(safeColor(a.color))}">${esc((a.name || "?")[0].toUpperCase())}</span>${esc(a.name)}</div>
+      ${st.tools.map((tool) => {
+        const on = !!a.tools?.[tool.id], auto = !!a.autoApprove?.[tool.id];
+        const main = row(a, "tool", tool.id, on, tool.label, tool.sensitive ? (auto ? "Runs without asking" : "Asks you before each use") : "");
+        const sub = tool.id === "shell" && on ? `<div class="nested">${row(a, "auto", "shell", auto, "Run shell commands without asking",
+          a.adapter === "codex" ? "Codex already runs commands inside its sandbox without asking. This covers anything it asks the room about."
+            : "Commands run right away. Each one is still logged in Activity and the audit log.")}</div>` : "";
+        return main + sub;
+      }).join("")}`).join("");
+    paintColors();
   }
 
   // First render of a room jumps to the first unread message (or the latest); later renders
@@ -324,6 +350,11 @@
     const t = e.target.closest("button"); if (!t) return;
     try {
       if (t.dataset.room) return go("room", t.dataset.room);
+      if (t.dataset.nav === "permissions") {
+        go("permissions");
+        if (!st.tools.length) { st.tools = await api("/tools"); if (st.view === "permissions") renderPermissions(); }
+        return;
+      }
       if (t.dataset.plan) {
         const d = t.dataset.decision; let text;
         if (d === "revise") { text = prompt("What should change in the plan?"); if (!text || !text.trim()) return; }
@@ -344,6 +375,18 @@
         return;
       }
     } catch (err) { t.disabled = false; if (err.message !== "unpaired") toast(err.message); }
+  });
+
+  // Permission switches: tool on/off, or the nested "without asking" setting.
+  document.addEventListener("change", async (e) => {
+    const el = e.target; if (!el.matches?.("input.switch")) return;
+    const { agent, kind, tool } = el.dataset;
+    el.disabled = true;
+    try {
+      const updated = await api(`/agents/${agent}/${kind === "auto" ? "auto-approve" : "tools"}`, { method: "PUT", body: { [tool]: el.checked } });
+      if (updated?.id) st.agents[updated.id] = updated;
+      renderPermissions();
+    } catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
   });
 
   $("#back").onclick = () => go("rooms");

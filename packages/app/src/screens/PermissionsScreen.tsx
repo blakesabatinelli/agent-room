@@ -23,7 +23,7 @@ export function PermissionsScreen() {
                     hint={tool.sensitive ? (auto ? "Runs without asking" : "Asks you before each use") : undefined}
                     value={on} onChange={(v) => hub?.setTools(a.id, { [tool.id]: v })} />
                   {tool.id === "shell" && on ? (
-                    <Toggle label="    Run shell commands without asking" accent={a.color}
+                    <Toggle nested label="Run shell commands without asking" accent={a.color}
                       hint={a.adapter === "codex"
                         ? "Codex already runs commands inside its sandbox without asking. This covers anything it asks the room about."
                         : "Commands run right away. Each one is still logged in Activity and the audit log."}
