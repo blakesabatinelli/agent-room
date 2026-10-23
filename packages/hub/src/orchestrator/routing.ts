@@ -84,7 +84,10 @@ export function closeRecord(store: Store, routingId: string | undefined, patch: 
   if (!routingId) return;
   const r = store.getRouting(routingId);
   if (!r) return;
-  store.saveRouting({ ...r, ...patch, completedAt: patch.outcome && patch.outcome !== "pending" ? now() : r.completedAt });
+  const saved = { ...r, ...patch, completedAt: patch.outcome && patch.outcome !== "pending" ? now() : r.completedAt };
+  store.saveRouting(saved);
+  // 2.3: a run that was graded. The résumé writer and probation listen for this (resume/service.ts); nothing else depends on it.
+  if (patch.judgment) store.emit("graded", saved);
 }
 
 /** Add one run's usage to another (task retries count toward the same attempt). */

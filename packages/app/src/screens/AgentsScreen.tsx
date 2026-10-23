@@ -7,6 +7,7 @@ import { presence, useRoom } from "../state/store";
 import { Avatar, Button, CodeBlock, Field, Pill, Screen, Toggle } from "../components/ui";
 import { Profiles } from "../components/Profiles";
 import { Discovery } from "../components/Discovery";
+import { Resume } from "../components/Resume"; // 2.3
 import { SignInPanel } from "../components/SignIn";
 import { radius, space, type as t, usePalette } from "../theme";
 
@@ -141,6 +142,7 @@ function AgentCard({ a, scores, version, shift }: { a: AgentConfig; scores: Agen
               {version ? <Text style={[t.small, { color: p.muted, marginTop: 2 }]}>{`Model version: ${version}`}</Text> : null}
               {shift ? <Text style={[t.small, { color: p.warn, marginTop: 2 }]}>{shift}</Text> : null}
             </View>
+            <Resume agentId={a.id} name={a.name} />
           </View>
 
           <Pressable onPress={() => setAdvanced(!advanced)}><Text style={[t.small, { color: p.link }]}>{advanced ? "Hide advanced" : "Advanced"}</Text></Pressable>

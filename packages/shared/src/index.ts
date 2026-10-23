@@ -360,6 +360,7 @@ export const SETTING_DEFAULTS = {
   planApproval: "big" as "always" | "big" | "never", autoRunChecks: false, autoResume: true,
   stallLimit: 4, maxGoalReplans: 2, maxVerifyRounds: 2, maxTaskRuns: 40,
   memoryTtlDays: { fact: 90, preference: 365, status: 14 }, memoryExportBytes: 4096, // 2.5
+  probationRuns: 5, // 2.3
 };
 
 /** Suggested profiles per provider, following the delegation policy's routing table. */
@@ -510,7 +511,8 @@ export type RoutingReason =
   | "revision"         // a revision stays with the same agent
   | "planner_choice"   // the planner answered "direct" and named the agent
   | "only_candidate"   // one agent connected
-  | "command";         // 2.6: the owner typed /<agent>:<command>, so no policy chose
+  | "command"         // 2.6: the owner typed /<agent>:<command>, so no policy chose
+  | "shadow";         // 2.3: a probation agent practising on a copy of a real task
 
 export interface RoutingCandidate {
   agentId: string;
@@ -535,8 +537,8 @@ export interface RoutingRecord {
   taskId: string;
   taskTitle: string;
   taskType: string;
-  /** "task" = a planned task attempt; "direct" = a conversational answer with no plan. */
-  kind: "task" | "direct";
+  /** "task" = a planned task attempt; "direct" = a conversational answer with no plan; "shadow" (2.3) = a probation agent's practice copy of a real task. */
+  kind: "task" | "direct" | "shadow";
   /** Attempt number on this task (1 = first try). */
   attempt: number;
   revision: boolean;
@@ -1270,4 +1272,88 @@ export interface MemoryExportInfo {
   /** Why it can't write right now (folder missing, markers damaged), or a caution. */
   note?: string;
   lastWrittenAt?: number;
+}
+
+// ---- 2.3 Résumés and probation
+/** Graded runs a new agent needs before it does real work (OrchestratorSettings.probationRuns). Shadow runs count. */
+export const PROBATION_RUNS_DEFAULT = 5;
+export interface OrchestratorSettings {
+  /** Graded runs (real or shadow) an agent needs to finish probation. Default 5. */
+  probationRuns?: number;
+}
+
+/** An agent's track record on one task type, from its graded runs (routing log). */
+export interface ResumeTypeRow {
+  taskType: string;
+  /** Graded runs the numbers below come from. */
+  runs: number;
+  /** Mean judged quality, 0..1. */
+  quality: number;
+  /** Tasks it worked on, and how many were sent back after its first attempt. */
+  tasks: number;
+  sentBack: number;
+  /** Share of tasks accepted on the first attempt; null with no tasks. */
+  firstPass: number | null;
+  /** Send-back revisions it was given. */
+  revisions: number;
+  /** Runs that crashed, timed out or were never graded. */
+  runFailures: number;
+  /** How many of the graded runs were shadow runs. */
+  shadowRuns: number;
+  /** What sent its first attempts back most often. */
+  topFailure?: FailureTag;
+  /** True when the numbers are the current model version's alone (it has enough runs of its own). */
+  currentVersionOnly: boolean;
+}
+
+/** Where an agent stands on probation. `graded` counts runs since `since`. */
+export interface ProbationStatus {
+  on: boolean;
+  graded: number;
+  needed: number;
+  since?: number;
+  /** How it started: a new agent, or the owner restarted it. */
+  startedBy?: "new" | "owner";
+  endedAt?: number;
+  /** How it ended: reached the threshold, or the owner ended it. */
+  endedBy?: "threshold" | "owner";
+  /** Mean quality of the runs that counted (set once it ends). */
+  mean?: number | null;
+  /** Of the counted runs, how many were shadow runs. */
+  shadowRuns: number;
+}
+
+/** GET /agents/:id/resume, GET /resumes. What RESUME.md says, as data. Never shown to an agent. */
+export interface AgentResume {
+  agentId: string;
+  name: string;
+  at: number;
+  /** Graded runs in all (real and shadow). */
+  runs: number;
+  shadowRuns: number;
+  strengths: string[];
+  weaknesses: string[];
+  byType: ResumeTypeRow[];
+  /** All tasks: share accepted on the first attempt, and send-backs per task. */
+  firstPass: number | null;
+  revisionsPerTask: number | null;
+  failureMix: Record<FailureTag, number>;
+  /** Juries that judged its work, how much the judges agreed (majority share), how many split. */
+  jury: { n: number; majority: number; splits: number } | null;
+  /** The owner's spot ratings of its work, against what the judges said. */
+  owner: { n: number; ownerMean: number; judgeMean: number; meanDistance: number } | null;
+  /** Model versions it ran on, current first. */
+  modelVersions: string[];
+  currentVersion?: string;
+  lessons: string[];
+  probation: ProbationStatus;
+  /** The RESUME.md text this would be written as (with the front matter). */
+  markdown: string;
+}
+
+export interface RoutingRecord {
+  /** 2.3: set on a probation agent's practice run. Such a run is never merged and never visible in the room. */
+  shadow?: boolean;
+  /** 2.3: the real task this practice run copied. */
+  shadowOf?: string;
 }

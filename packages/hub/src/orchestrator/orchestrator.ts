@@ -32,6 +32,7 @@ import { loadCommandIndex, plannerCommands } from "../commands/index.js"; // 2.6
 import { buildInvocation, parseCommand, unknownReply, type Invocation } from "../commands/invoke.js"; // 2.6
 import { learnedBlock, runRetro } from "../retro/index.js"; // 2.1
 import { MemoryKeeper, type KeeperOptions, type ProposeOptions } from "../memory/keeper.js"; // 2.5
+import { Resumes, ShadowRunner, barredSet, planNotes, realAgents, type ShadowHost } from "../resume/index.js"; // 2.3
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -46,7 +47,7 @@ const ORCH: Author = { kind: "orchestrator", id: "orchestrator", name: "Orchestr
 const SYS: Author = { kind: "system", id: "system", name: "System" };
 const OPEN = (t: Task) => !["done", "failed", "cancelled"].includes(t.status);
 
-export interface McpGrant { agentId: string; roomId?: string; taskId?: string; expiresAt?: number; hop?: number; /** 1.1: an external key pinned to one room: every room argument is ignored in favour of roomId */ locked?: boolean; /** 1.1: the external key behind this grant (for the audit log) */ tokenId?: string; /** 1.1: the folder this run works in; file tools aimed elsewhere are refused */ cwd?: string }
+export interface McpGrant { agentId: string; roomId?: string; taskId?: string; expiresAt?: number; hop?: number; /** 1.1: an external key pinned to one room: every room argument is ignored in favour of roomId */ locked?: boolean; /** 1.1: the external key behind this grant (for the audit log) */ tokenId?: string; /** 1.1: the folder this run works in; file tools aimed elsewhere are refused */ cwd?: string; /** 2.3: a probation agent's practice run: approvals are refused, nothing it says or saves reaches the room, the library or memory */ shadow?: boolean }
 
 export interface OrchestratorOptions {
   dataDir: string;
@@ -106,6 +107,10 @@ export class Orchestrator {
   governor: CapacityGovernor;
   /** 2.5: shared memory with sources, expiry, contradiction questions, MEMORY.md files and the export to agents' own context files. */
   memory: MemoryKeeper;
+  /** 2.3: agents' RESUME.md files, and probation. */
+  resumes: Resumes;
+  /** 2.3: shadow copies of real tasks for agents on probation. */
+  shadows: ShadowRunner;
 
   /** 1.2: the hub's data folder (the API server keeps local-pair.secret there). */
   get dataDir(): string { return this.opts.dataDir; }
@@ -123,7 +128,7 @@ export class Orchestrator {
     this.workspaceHooks = {
       beforeRun: (c) => {
         const control = this.control; if (!control) return;
-        const task = this.store.getTask(c.taskId), goal = this.store.getGoal(c.goalId), agent = this.store.getAgent(c.agentId);
+        const task = this.store.getTask(c.taskId) ?? this.shadows.task(c.taskId), goal = this.store.getGoal(c.goalId), agent = this.store.getAgent(c.agentId); // 2.3: a shadow copy lives only in memory
         if (!task || !goal || !agent) return;
         const text = control.contextFor({ agentId: agent.id, roomSlug: control.slugFor(task.roomId), taskType: task.taskType, goal, task });
         writeTaskContext(c.path, agent.adapter, text);
@@ -132,6 +137,34 @@ export class Orchestrator {
     };
     this.governor = opts.governor ?? new CapacityGovernor(store, detectHardware());
     this.memory = new MemoryKeeper({ store, approvals, control: () => this.control, dataDir: opts.dataDir, ask: (prompt) => this.callJson(prompt, undefined, undefined, "quick") }, opts.memory); // 2.5
+    // 2.3: résumés (RESUME.md after graded runs) and shadow tasks for agents on probation.
+    this.resumes = new Resumes({ store, control: () => this.control, say: (roomId, text) => { if (roomId) this.post(roomId, SYS, text, "system"); } });
+    this.shadows = new ShadowRunner(this.shadowHost());
+  }
+
+  /** 2.3: what the shadow runner may use of the orchestrator. Everything it runs goes through call() with `shadow: true`. */
+  private shadowHost(): ShadowHost {
+    const self = this;
+    return {
+      store: this.store,
+      get control() { return self.control; },
+      workspaces: this.workspaces,
+      governor: this.governor,
+      ref: (g) => this.goalSources.ref(g, g.folder ?? goalFolder(this.opts.dataDir, g.id)),
+      readyAgents: () => this.readyAgents(),
+      busy: (agentId, set) => {
+        if (set === true) this.busy.add(agentId); else if (set === false) this.busy.delete(agentId);
+        return this.busy.has(agentId) || this.chatting.has(agentId);
+      },
+      run: (agent, prompt, o) => this.call(agent, prompt, { ...o, shadow: true }),
+      judge: (task, worker, goal, signal, changed, files) => this.judge(task, worker, goal.contract, this.ownerNotes.get(goal.id) ?? [], signal, changed, files),
+      beforeRun: (ws, agentId) => this.workspaceHook("beforeRun", ws, agentId),
+      notes: (goalId) => this.ownerNotes.get(goalId) ?? [],
+      decisions: (g) => this.decisionsFor(g),
+      ledger: (g) => this.ledgerText(g),
+      checksAllowed: (g) => !!g.approvedAt || this.cfg().autoRunChecks,
+      log: (roomId, text) => { this.log(roomId, text); },
+    };
   }
 
   private cfg(): Required<OrchestratorSettings> {
@@ -267,17 +300,17 @@ export class Orchestrator {
     const dir = join(this.opts.dataDir, "workspaces", agentId, roomId);
     mkdirSync(dir, { recursive: true }); return dir;
   }
-  private grantFor(agentId: string, roomId?: string, taskId?: string, hop = 0, cwd?: string) {
+  private grantFor(agentId: string, roomId?: string, taskId?: string, hop = 0, cwd?: string, shadow = false) {
     const t = token();
     // 1.1: a run's own key is locked to its room, and carries its worktree so approval_prompt can refuse file tools outside it.
-    this.grants.set(t, { agentId, roomId, taskId, hop, expiresAt: now() + 2 * 3600_000, locked: !!roomId, cwd });
+    this.grants.set(t, { agentId, roomId, taskId, hop, expiresAt: now() + 2 * 3600_000, locked: !!roomId, cwd, ...(shadow ? { shadow: true } : {}) });
     return t;
   }
 
-  async call(agent: AgentConfig, prompt: string, o: { jsonOnly?: boolean; roomId?: string; taskId?: string; signal?: AbortSignal; systemPrompt?: string; hop?: number; profile?: Profile; cwd?: string } = {}): Promise<RunResult> {
+  async call(agent: AgentConfig, prompt: string, o: { jsonOnly?: boolean; roomId?: string; taskId?: string; signal?: AbortSignal; systemPrompt?: string; hop?: number; profile?: Profile; cwd?: string; shadow?: boolean /* 2.3 */ } = {}): Promise<RunResult> {
     const url = this.opts.mcpUrl();
     const cwd = o.cwd ?? this.workspace(agent.id, o.roomId ?? "_orchestrator");
-    const grant = url && !o.jsonOnly ? { url, token: this.grantFor(agent.id, o.roomId, o.taskId, o.hop, cwd) } : undefined;
+    const grant = url && !o.jsonOnly ? { url, token: this.grantFor(agent.id, o.roomId, o.taskId, o.hop, cwd, o.shadow) } : undefined;
     const adapter = this.store.getKV("practice_mode", false) ? adapters.mock : adapters[agent.adapter];
     const res = await adapter.run({
       agent, prompt, jsonOnly: o.jsonOnly, signal: o.signal, systemPrompt: o.systemPrompt,
@@ -602,6 +635,7 @@ export class Orchestrator {
 
   /** MCP post_message: gated by the floor, then routed like any agent message. */
   agentPost(grant: McpGrant, text: string, roomId?: string): { ok: boolean; why?: string } {
+    if (grant.shadow) return { ok: false, why: "You can't post right now. Put what you have in your reply." }; // 2.3
     const a = this.store.getAgent(grant.agentId);
     const rid = this.roomFor(grant, roomId);
     if (!a || !rid) return { ok: false, why: "Room or agent not found. You can post only while you hold an assignment or after being tagged." };
@@ -614,6 +648,7 @@ export class Orchestrator {
 
   /** MCP ask_agent: ask one agent a question and wait for the answer. */
   async askAgent(grant: McpGrant, target: string, question: string, roomId?: string): Promise<string> {
+    if (grant.shadow) return "Nobody can answer right now. Continue without it, or report STATUS: needs_input."; // 2.3
     const asker = this.store.getAgent(grant.agentId);
     const agent = resolveMentions(`@${target.replace(/^@/, "")}`, this.enabledAgents())[0];
     const rid = this.roomFor(grant, roomId);
@@ -706,7 +741,8 @@ export class Orchestrator {
   /** Plan the goal: answer directly, or write a contract and tasks (then maybe ask for approval). */
   private async planStage(goal: Goal, signal: AbortSignal) {
     const roomId = goal.roomId, text = goal.text;
-    const agents = await this.readyAgents();
+    const ready = await this.readyAgents();
+    const agents = realAgents(this.store, ready); // 2.3: agents on probation get no real work (they practise on copies)
     if (!agents.length) {
       goal.status = "failed"; goal.summary = "No agents are connected."; this.store.saveGoal(goal);
       this.post(roomId, SYS, this.enabledAgents().length
@@ -726,7 +762,7 @@ export class Orchestrator {
     this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", label: "planning", active: true });
     const folderNote = this.goalSources.note(goal); // 1.1: tell the planner about the granted folder (label, read/write)
     const plan = await this.callJson<Plan>(
-      planPrompt(text + folderNote, agents, this.store.listShared(roomId), notes, this.conversation(roomId), this.store.listScores(), orch.name, [], undefined, plannerCommands(loadCommandIndex(this.store), agents.map((a) => a.id), text)), orch, signal, // 2.6
+      planPrompt(text + folderNote, agents, this.store.listShared(roomId), notes, this.conversation(roomId), [], orch.name, [], undefined, plannerCommands(loadCommandIndex(this.store), agents.map((a) => a.id), text), planNotes(this.store, this.resumes, agents, ready)), orch, signal, // 2.6, 2.3: résumé lines instead of the raw score table
     );
     this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", active: false });
     if (signal.aborted) return;
@@ -747,7 +783,7 @@ export class Orchestrator {
     if (problems.length && current?.tasks?.length) {
       this.log(roomId, `Plan needs fixing before work starts: ${problems.join(" ")}`);
       this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", label: "planning", active: true });
-      const fixed = await this.callJson<Plan>(planPrompt(text + folderNote, agents, this.store.listShared(roomId), notes, this.conversation(roomId), this.store.listScores(), orch.name, problems, JSON.stringify(current), plannerCommands(loadCommandIndex(this.store), agents.map((a) => a.id), text)), orch, signal); // 2.6
+      const fixed = await this.callJson<Plan>(planPrompt(text + folderNote, agents, this.store.listShared(roomId), notes, this.conversation(roomId), [], orch.name, problems, JSON.stringify(current), plannerCommands(loadCommandIndex(this.store), agents.map((a) => a.id), text), planNotes(this.store, this.resumes, agents, ready)), orch, signal); // 2.6, 2.3
       this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", active: false });
       if (signal.aborted) return;
       if (fixed?.tasks?.length) { current = fixed; raw = fixed.tasks; problems = validatePlan(raw, reqsOf(current), agentIds); }
@@ -974,18 +1010,22 @@ export class Orchestrator {
           if (this.progress(goal.id).runs + inflight.size >= budget) break;
           const agent = this.assign(t, live, g.text);
           if (!agent) continue;
+          const first = t.status === "pending" && !t.attempts; // 2.3: a real task's first attempt is copied for free probation agents
           const pr = this.runTask(goal, t, agent, signal).finally(() => { inflight.delete(t.id); this.busy.delete(agent.id); this.governor.release(t.id); });
           inflight.set(t.id, pr);
+          if (first) this.shadows.begin(goal, t, agent.id, signal);
         }
       }
       if (inflight.size) await Promise.race([...inflight.values(), sleep(1000)]);
       else await sleep(500); // paused, waiting on the owner, or waiting for a free agent
     }
     await Promise.allSettled(inflight.values());
+    await this.shadows.settle(goal.id); // 2.3: practice copies still running are given a moment, then dropped
     if (signal.aborted || this.store.getGoal(goal.id)?.state?.waitingOnOwner) return;
     await this.finish(goal);
     // 2.1 HOOK: the retro for a goal that ended (lessons per agent and task type, playbooks). Never throws; skips superseded goals.
     await runRetro({ store: this.store, control: this.control, callJson: (p, role) => this.callJson(p, undefined, undefined, role), post: (t) => this.log(goal.roomId, t) }, goal.id);
+    await this.resumes.goalEnded(goal.id).catch(() => undefined); // 2.3 HOOK: every agent that worked on this goal gets a fresh RESUME.md now
   }
 
   /**
@@ -1004,7 +1044,7 @@ export class Orchestrator {
       this.waitForOwner(goal.id, `${why}${unmet()} I've already tried ${p.goalReplans} other approach${p.goalReplans === 1 ? "" : "es"}.\nLast problem: ${stuck[0]?.history?.at(-1)?.note?.slice(0, 300) ?? "unknown"}\nTell me how you'd like to proceed: a different approach, a narrower goal, or the missing information.`);
       return false;
     }
-    const agents = await this.readyAgents();
+    const agents = realAgents(this.store, await this.readyAgents()); // 2.3: not agents on probation
     if (!agents.length) { this.waitForOwner(goal.id, "No agents are connected, so the remaining work can't continue. Connect one and reply here."); return false; }
     this.store.emit("event", { type: "working", roomId: goal.roomId, agentId: "orchestrator", label: "replanning", active: true });
     const notes = this.ownerNotes.get(goal.id) ?? [];
@@ -1084,7 +1124,7 @@ export class Orchestrator {
     // One small task meeting one requirement has already been reviewed against exactly that.
     if (done.length < 2 && (g.contract.requirements?.length ?? 0) < 2) return false;
 
-    const agents = await this.readyAgents();
+    const agents = realAgents(this.store, await this.readyAgents()); // 2.3
     if (!agents.length) return false;
     const files = folder ? readDeliverables(folder, listFiles(folder).filter((f) => f !== "LEDGER.md"), 24000) : "";
     const pool = this.store.getSettings().judgeRotation.map((j) => agents.find((a) => a.id === j)).filter(Boolean) as AgentConfig[];
@@ -1133,7 +1173,8 @@ export class Orchestrator {
     const gate = needsGate(t, enabled, this.control);
     if (gate && !gate.ok.size) { this.holdForNeeds(t, gate, enabled); return undefined; }
     // 1.5: only agents this machine can take right now; cloud agents are the overflow when local work is at its limit.
-    const idle = this.governor.preferForOverflow(enabled.filter(free).filter((a) => !gate || gate.ok.has(a.id)));
+    const barred = barredSet(this.store, enabled.filter((a) => live.has(a.id))); // 2.3: agents on probation never take real work
+    const idle = this.governor.preferForOverflow(enabled.filter(free).filter((a) => !barred.has(a.id)).filter((a) => !gate || gate.ok.has(a.id)));
     const tried = t.triedBy ?? [];
     let agent: AgentConfig | undefined;
     let route: RouteDecision | undefined;
@@ -1141,16 +1182,16 @@ export class Orchestrator {
     if (t.status === "revising" && t.assignee) {
       // a revision stays with the same agent; if it went offline, the task goes back in the pool
       const same = enabled.find((a) => a.id === t.assignee);
-      if (same && live.has(same.id) && !quotaLimited(this.store, same.id)) { if (!free(same) || !this.governor.admit(same)) return undefined; agent = same; route = fixedDecision(this.store, same, idle, t.taskType, "revision", s.explorationRate); }
+      if (same && live.has(same.id) && !barred.has(same.id) && !quotaLimited(this.store, same.id)) { if (!free(same) || !this.governor.admit(same)) return undefined; agent = same; route = fixedDecision(this.store, same, idle, t.taskType, "revision", s.explorationRate); }
       else { t.triedBy = [...tried, t.assignee]; t.assignee = undefined; t.status = "pending"; this.store.saveTask(t); }
     }
-    if (!agent && t.owner && !tried.includes(t.owner) && live.has(t.owner) && (!gate || gate.ok.has(t.owner)) && !quotaLimited(this.store, t.owner)) { // 1.6: a planned owner out of quota is skipped
+    if (!agent && t.owner && !tried.includes(t.owner) && live.has(t.owner) && !barred.has(t.owner) && (!gate || gate.ok.has(t.owner)) && !quotaLimited(this.store, t.owner)) { // 1.6: a planned owner out of quota is skipped
       const owner = enabled.find((a) => a.id === t.owner)!;
       if (free(owner) && this.governor.admit(owner)) { agent = owner; route = fixedDecision(this.store, owner, idle, t.taskType, "planned_owner", s.explorationRate); }
       else if (!free(owner) && now() - t.updatedAt < 10 * 60_000) return undefined; // wait for the planned owner (an owner the machine can't take right now is overflowed instead)
     }
     // 1.6: routing sees only agents with capacity, free (local) agents first within a margin, expiring capacity nudged up.
-    const waiting = enabled.filter((a) => live.has(a.id) && !free(a) && !tried.includes(a.id)); // busy, but with quota: worth waiting for if every idle agent is limited
+    const waiting = enabled.filter((a) => live.has(a.id) && !barred.has(a.id) && !free(a) && !tried.includes(a.id)); // busy, but with quota: worth waiting for if every idle agent is limited
     route ??= quotaDecide(this.store, idle, t.taskType, s.explorationRate, tried, this.opts.rand, waiting)
            ?? quotaDecide(this.store, idle, t.taskType, s.explorationRate, [], this.opts.rand, waiting);
     if (!route) return undefined;
@@ -1502,7 +1543,7 @@ export class Orchestrator {
   }
 
   private async replan(goal: Goal, task: Task, signal: AbortSignal): Promise<boolean> {
-    const agents = await this.readyAgents();
+    const agents = realAgents(this.store, await this.readyAgents()); // 2.3
     const contract = this.store.getGoal(goal.id)?.contract;
     const r = await this.callJson<{ owner?: string; description?: string; scope?: string; criteria?: unknown; approach?: string }>(
       replanPrompt(task, contract, agents), undefined, signal);
@@ -1630,11 +1671,16 @@ export class Orchestrator {
     if (!t?.judgment || !t.assignee) return;
     applyOwnerRating(this.store, t.assignee, t.taskType, t.judgment.score, ownerScore, (t.routingId ? this.store.getRouting(t.routingId) : undefined)?.modelVersion /* 2.4 */);
     recordOwnerRating(this.store, t.judgment, ownerScore); // 2.2: per-judge and jury distance from the owner's rating
+    this.resumes.noteRating(t.assignee, t.judgment.score, ownerScore); // 2.3: the owner's spot rating goes on the résumé
     this.store.audit("owner", "judgment.rated", `${t.title}: judge ${t.judgment.score} owner ${ownerScore}`);
   }
 
   requestApproval(grant: McpGrant, tool: string, action: string, detail: string): Promise<Approval> {
     const p = { agentId: grant.agentId, roomId: grant.roomId, tool, action, detail };
+    if (grant.shadow) { // 2.3: a practice run is never allowed anything sensitive, and never puts a card in front of the owner
+      this.store.audit(grant.agentId, "shadow.denied", `${tool}: ${action}`.slice(0, 200));
+      return Promise.resolve({ id: id("apr"), ...p, detail: "", status: "rejected", createdAt: now(), decidedAt: now() });
+    }
     const a = this.store.getAgent(grant.agentId);
     // "Run without asking" only counts while the tool itself is switched on.
     if (a?.tools[tool] && a.autoApprove?.[tool]) return Promise.resolve(this.approvals.auto(p));

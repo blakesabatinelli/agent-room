@@ -2,6 +2,7 @@ import type { AgentCapabilities, AgentConfig, DiscoveredAgent, DiscoveryResult, 
 import type { ControlFolder } from "../control/folder.js";
 import type { Store } from "../db/store.js";
 import { quotaFor } from "../quota/index.js";
+import { startProbation } from "../resume/probation.js"; // 2.3
 
 const TOOLS_OFF = { web: true, filesystem: true, shell: false, gmail: false, slack: false, drive: false, salesforce: false };
 const COLORS: Record<string, string> = { claude: "#D97757", codex: "#2BAC76", hermes: "#E8912D" };
@@ -54,6 +55,7 @@ export async function applyDiscovery(store: Store, found: DiscoveryResult, contr
         capabilities: merge(d.capabilities, undefined, found.at),
       };
       store.saveAgent(agent);
+      startProbation(store, agent.id, "new"); // 2.3: a new agent practises on shadow tasks before it gets real work
       store.audit("hub", "discovery.agent.created", `${agent.id} (${agent.adapter}), ${agent.enabled ? "on" : "off until you switch it on"}`);
       known.add(agent.id); created.push(agent.id);
       if (d.adapter === "openai-api") addLocalSubscription(store, agent);
