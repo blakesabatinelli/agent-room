@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { EventEmitter } from "node:events";
 import type {
-  AgentConfig, AgentScore, Approval, AuditEntry, Goal, LibraryDoc, MemoryEntry, MemoryProposal,
+  AgentConfig, AgentScore, VersionScore, Approval, AuditEntry, Goal, LibraryDoc, MemoryEntry, MemoryProposal,
   Message, OrchestratorSettings, Room, RoutingRecord, ServerEvent, Task,
 } from "@agent-room/shared";
 import { SETTING_DEFAULTS } from "@agent-room/shared";
@@ -32,6 +32,7 @@ export class Store extends EventEmitter {
       CREATE TABLE IF NOT EXISTS memory (id TEXT PRIMARY KEY, scope TEXT, owner TEXT, room_id TEXT, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS proposals (id TEXT PRIMARY KEY, status TEXT, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS scores (agent_id TEXT, task_type TEXT, data TEXT NOT NULL, PRIMARY KEY(agent_id, task_type));
+      CREATE TABLE IF NOT EXISTS version_scores (agent_id TEXT, task_type TEXT, model_version TEXT, data TEXT NOT NULL, PRIMARY KEY(agent_id, task_type, model_version));
       CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, status TEXT, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, at INTEGER, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS devices (token TEXT PRIMARY KEY, name TEXT, created_at INTEGER);
@@ -177,6 +178,18 @@ export class Store extends EventEmitter {
   }
   saveScore(s: AgentScore) { this.put("scores", { agent_id: s.agentId, task_type: s.taskType, data: JSON.stringify(s) }); }
   listScores() { return this.all<AgentScore>("SELECT data FROM scores"); }
+
+  // ---- 2.4 scores per model version (the `scores` table stays the agent-level roll-up)
+  getVersionScore(agentId: string, taskType: string, modelVersion: string): VersionScore | undefined {
+    return this.one<VersionScore>("SELECT data FROM version_scores WHERE agent_id=? AND task_type=? AND model_version=?", agentId, taskType, modelVersion);
+  }
+  saveVersionScore(s: VersionScore) {
+    this.put("version_scores", { agent_id: s.agentId, task_type: s.taskType, model_version: s.modelVersion, data: JSON.stringify(s) });
+  }
+  listVersionScores(agentId?: string, taskType?: string): VersionScore[] {
+    const where = [agentId ? "agent_id=?" : "", taskType ? "task_type=?" : ""].filter(Boolean).join(" AND ");
+    return this.all<VersionScore>(`SELECT data FROM version_scores${where ? ` WHERE ${where}` : ""}`, ...[agentId, taskType].filter((x): x is string => !!x));
+  }
 
   // ---- approvals
   saveApproval(a: Approval) {

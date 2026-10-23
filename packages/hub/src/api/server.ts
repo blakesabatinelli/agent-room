@@ -14,6 +14,7 @@ import { signInLog } from "../setup.js";
 import { pairingCode, token } from "../util.js";
 import { listFiles } from "../orchestrator/workspace.js";
 import { routingJsonl } from "../orchestrator/routing.js";
+import { listShifts, versionRows } from "../orchestrator/versions.js"; // 2.4
 import { quotaFor } from "../quota/index.js";
 import { runProc } from "../adapters/proc.js";
 import { PathDenied, GrantRefused } from "../files/paths.js";
@@ -624,6 +625,9 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     return store.getAgent(cur.id);
   });
   app.get("/scores", async () => store.listScores());
+  // 2.4 scores per model version, and the shifts the room has noticed
+  app.get("/scores/versions", async (req) => versionRows(store, z.object({ agentId: z.string().optional() }).parse(req.query ?? {}).agentId));
+  app.get("/model-shifts", async () => listShifts(store).slice().reverse());
   // 0.2 routing decision log (+ 0.5 failure tags on each record)
   const routingQuery = z.object({ goalId: z.string().optional(), since: z.coerce.number().optional(), limit: z.coerce.number().int().min(1).max(100_000).optional() });
   app.get("/routing", async (req) => store.listRouting(routingQuery.parse(req.query ?? {})));

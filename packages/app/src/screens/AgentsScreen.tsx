@@ -1,7 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
 import React, { useEffect, useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, Text, View } from "react-native";
-import type { AgentConfig, AgentScore, McpConnection } from "@agent-room/shared";
+import type { AgentConfig, AgentScore, McpConnection, ModelShift, VersionScoreRow } from "@agent-room/shared";
 import type { SetupInfo } from "../api/client";
 import { presence, useRoom } from "../state/store";
 import { Avatar, Button, CodeBlock, Field, Pill, Screen, Toggle } from "../components/ui";
@@ -22,10 +22,14 @@ export function AgentsScreen({ onBack }: { onBack?: () => void }) {
   const [scores, setScores] = useState<AgentScore[]>([]);
   const [setup, setSetup] = useState<SetupInfo>();
   const [adding, setAdding] = useState(false);
+  const [versions, setVersions] = useState<VersionScoreRow[]>([]); // 2.4
+  const [shifts, setShifts] = useState<ModelShift[]>([]); // 2.4, newest first
 
   useEffect(() => {
     if (!hub) return;
     hub.scores().then(setScores).catch(() => {});
+    hub.versionScores().then(setVersions).catch(() => {});
+    hub.modelShifts().then(setShifts).catch(() => {});
     hub.setup().then(setSetup).catch(() => {});
     void useRoom.getState().refreshStatus(true);
   }, [hub]);
@@ -46,13 +50,15 @@ export function AgentsScreen({ onBack }: { onBack?: () => void }) {
         ) : null}
         <Discovery />
         {adding ? <AddAgent existing={agents} onDone={() => setAdding(false)} /> : null}
-        {agents.map((a) => <AgentCard key={a.id} a={a} scores={scores.filter((s) => s.agentId === a.id && s.runs > 0)} />)}
+        {agents.map((a) => <AgentCard key={a.id} a={a} scores={scores.filter((s) => s.agentId === a.id && s.runs > 0)}
+          version={versions.filter((v) => v.agentId === a.id && v.current && v.modelVersion !== "unknown").sort((x, y) => y.lastSeen - x.lastSeen)[0]?.modelVersion}
+          shift={shifts.find((x) => x.agentId === a.id && x.kind === "shift")?.text} />)}
       </ScrollView>
     </Screen>
   );
 }
 
-function AgentCard({ a, scores }: { a: AgentConfig; scores: AgentScore[] }) {
+function AgentCard({ a, scores, version, shift }: { a: AgentConfig; scores: AgentScore[]; version?: string; shift?: string }) {
   const p = usePalette();
   const s = useRoom(useShallow((s) => ({ hub: s.hub, openDm: s.openDm, refreshStatus: s.refreshStatus, statuses: s.statuses, agents: s.agents, working: s.working })));
   const { hub } = s;
@@ -123,6 +129,8 @@ function AgentCard({ a, scores }: { a: AgentConfig; scores: AgentScore[] }) {
                 {scores.length ? `Track record: ${scores.map((x) => `${x.taskType} ${Math.round(x.quality * 100)} over ${x.runs}`).join(" · ")}`
                   : "No track record yet. The room will try it out and learn what it's good at."}
               </Text>
+              {version ? <Text style={[t.small, { color: p.muted, marginTop: 2 }]}>{`Model version: ${version}`}</Text> : null}
+              {shift ? <Text style={[t.small, { color: p.warn, marginTop: 2 }]}>{shift}</Text> : null}
             </View>
           </View>
 
