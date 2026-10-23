@@ -56,10 +56,13 @@ export interface Lease {
   /** A goal-only lease has no time of its own; it gets this ceiling so it can never outlive its goal by much. */
   capped?: boolean;
   switchedOn?: boolean;
+  /** A lease that switched a tool on does not apply until the switch is seen to have stuck (the control folder may turn it straight back off). */
+  pending?: boolean;
   by: string;
 }
 
-export interface LeaseInput { agentId: string; tool: string; minutes?: number; goalId?: string; roomId?: string; action?: string; by?: string }
+/** `noRoom`: the lease is for requests that have no room (granted from an approval that had none); without it, no room means any room. */
+export interface LeaseInput { agentId: string; tool: string; minutes?: number; goalId?: string; roomId?: string; noRoom?: boolean; action?: string; by?: string }
 export type Fail = { ok: false; status: number; error: string };
 export type LeaseResult = { ok: true; lease: LeaseView; notes: string[] } | Fail;
 
@@ -166,10 +169,12 @@ export class PolicyEngine {
     const shape = shapeOf(tool, action, detail, input);
     const t = this.clock();
     let allow: PolicyRule | undefined, ask: PolicyRule | undefined, deny: PolicyRule | undefined, maybe: PolicyRule | undefined;
+    let pendingLeases: Set<string> | undefined; // leases waiting for their tool switch to be confirmed (read once, and only if a lease rule is met)
     for (const r of rules) {
       if (!r.accepted || (r.expires && t >= expiryMs(r.expires))) continue;
       if (r.tool !== tool && r.tool !== "*") continue;
-      if (!scopeApplies(r.scope, agentId, slug, goalId)) continue;
+      if (!scopeApplies(r.scope, agentId, slug, goalId, { id: roomId })) continue;
+      if (r.id.startsWith("lease-") && (pendingLeases ??= new Set(this.kvLeases().filter((l) => l.pending).map((l) => l.id))).has(r.id)) continue;
       const pm = parseMatch(r.match);
       if (!pm.ok) continue;
       // A rule for the whole tool is the permission layers' business (POLICY.md levels, TOOLS.md, ROOM.md). Counting an allow here would
@@ -419,7 +424,7 @@ export class PolicyEngine {
   /** Active leases, soonest to end first. */
   leases(): LeaseView[] {
     const t = this.clock();
-    return this.allLeases().filter((l) => l.expiresAt > t && !(l.goalId && this.goalOver(l.goalId))).sort((a, b) => a.expiresAt - b.expiresAt).map((l) => this.view(l));
+    return this.allLeases().filter((l) => !l.pending && l.expiresAt > t && !(l.goalId && this.goalOver(l.goalId))).sort((a, b) => a.expiresAt - b.expiresAt).map((l) => this.view(l));
   }
 
   private goalOver(goalId: string): boolean {
@@ -446,17 +451,17 @@ export class PolicyEngine {
       if (!/^[a-z0-9_*?-]{1,60}$/.test(action)) return fail(400, "action must be a word like send or read (* and ? are allowed).");
       const roomId = input.roomId ?? goal?.roomId;
       if (roomId && !this.store.getRoom(roomId)) return fail(400, "That room doesn't exist.");
-      const slug = roomId ? c.slugFor(roomId) : undefined; // a direct-message room has no folder name; the lease is then the agent's alone
+      const slug = roomId ? c.slugFor(roomId) : undefined; // a direct-message room has no folder name: the room's own id scopes the lease, so it still stays in that room
       const t = this.clock();
       const lease: Lease = {
         id: `lease-${randomBytes(3).toString("hex")}`, agentId: agent.id, tool: input.tool, action, match: `action:${action}`,
-        scope: [`agent:${agent.id}`, ...(slug ? [`room:${slug}`] : []), ...(input.goalId ? [`goal:${input.goalId}`] : [])].join(" "),
+        scope: [`agent:${agent.id}`, ...(slug ? [`room:${slug}`] : []), ...(input.goalId ? [`goal:${input.goalId}`] : []), ...(roomId ? [`roomid:${roomId}`] : input.noRoom ? ["noroom"] : [])].join(" "),
         ...(roomId ? { roomId } : {}), ...(input.goalId ? { goalId: input.goalId } : {}), createdAt: t,
         expiresAt: input.minutes !== undefined ? t + input.minutes * 60_000 : t + GOAL_LEASE_CEILING_MS,
         ...(input.minutes === undefined ? { capped: true } : {}), by: input.by ?? "owner",
       };
       const needsSwitch = agent.tools?.[input.tool] !== true;
-      if (needsSwitch) lease.switchedOn = true;
+      if (needsSwitch) { lease.switchedOn = true; lease.pending = true; } // it applies once the tool is seen to stay on (below)
       const rule: RuleOut = { id: lease.id, effect: "allow", tool: lease.tool, match: lease.match, scope: lease.scope, expires: new Date(lease.expiresAt).toISOString(), source: "owner", accepted: true };
       const line = this.leaseText(lease, agent.name);
       const edited = await this.editFileNow(`Lease: ${clip(line, 120)}`, (text) => {
@@ -473,11 +478,13 @@ export class PolicyEngine {
       if (!edited.ok) return edited;
       const notes: string[] = [];
       if (needsSwitch) {
-        await c.idle(); // the tool switch is written to the agent's files; the files may say no
+        await c.idle().catch(() => undefined); // the tool switch is written to the agent's files; the files may say no (the lease stays pending until they have said yes)
         if (this.store.getAgent(agent.id)?.tools?.[lease.tool] !== true) {
           await this.endLeases([lease], "revoked", "the tool stays off", "hub");
           return fail(409, `${agent.name} can't have ${lease.tool}: POLICY.md or its platform keeps it off, and a lease can't widen that.`);
         }
+        this.saveLeases(this.kvLeases().map((l) => (l.id === lease.id ? { ...l, pending: undefined } : l))); // the switch stuck: the lease applies now
+        delete lease.pending;
         notes.push(`${lease.tool} was off for ${agent.name}. It is on until the lease ends.`);
       }
       if (twoKeyClass(lease.tool, action === "*" ? "delete" : action, "") || ["shell", "gmail", "salesforce"].includes(lease.tool)) notes.push("Sends, CRM writes and deletes still need the two-key check.");
@@ -511,7 +518,7 @@ export class PolicyEngine {
     if (!verb) return Promise.resolve(fail(400, "The hub can't tell what to allow from this request. Approve it, or grant a lease from the Policy screen."));
     const goalId = o.forGoal ? this.goalForApproval(approval) : undefined;
     if (o.forGoal && !goalId) return Promise.resolve(fail(400, "No goal is running for this agent here, so there is no goal to lease it for."));
-    return this.grant({ agentId: approval.agentId, tool: approval.tool, action: verb, roomId: approval.roomId, goalId, minutes: o.forGoal ? undefined : o.minutes }).then((r) => {
+    return this.grant({ agentId: approval.agentId, tool: approval.tool, action: verb, roomId: approval.roomId, noRoom: !approval.roomId, goalId, minutes: o.forGoal ? undefined : o.minutes }).then((r) => {
       if (r.ok) approve(approval.id);
       return r;
     });

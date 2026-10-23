@@ -11,9 +11,14 @@ import type { Adapter, RunRequest, RunResult } from "./types.js";
  * The folder is under the hub's data folder when there is one (a confined run may not read or write there), else in the system temp folder.
  */
 export async function inJsonScratch<T>(req: Pick<RunRequest, "dataDir">, run: (cwd: string) => Promise<T>): Promise<T> {
-  const base = req.dataDir ? join(req.dataDir, "scratch") : join(tmpdir(), "agent-room-scratch");
-  mkdirSync(base, { recursive: true, mode: 0o700 });
-  const cwd = mkdtempSync(join(base, "json-"));
+  // With no data folder the run's own folder is made straight under the system temp folder (a unique name, mode 0700, by the OS's mkdtemp). A shared
+  // fixed folder there (the old `agent-room-scratch`) could be pre-created by anyone on the machine and made a link or opened up.
+  let cwd: string;
+  if (req.dataDir) {
+    const base = join(req.dataDir, "scratch");
+    mkdirSync(base, { recursive: true, mode: 0o700 });
+    cwd = mkdtempSync(join(base, "json-"));
+  } else cwd = mkdtempSync(join(tmpdir(), "agent-room-json-"));
   try { return await run(cwd); } finally { try { rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ } }
 }
 

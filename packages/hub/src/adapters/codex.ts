@@ -33,8 +33,12 @@ export function codexBaseArgs(req: Pick<RunRequest, "agent" | "cwd" | "model" | 
   if (model) args.push("-m", model);
   // Codex calls the top rung "xhigh"; it has no "max".
   if (req.effort) args.push("-c", `model_reasoning_effort="${req.effort === "max" ? "xhigh" : req.effort}"`);
-  if (req.jsonOnly || req.readOnly) args.push("--sandbox", "read-only"); // 3.3: a read-only helper is sandboxed whatever its tools are
-  else {
+  if (req.jsonOnly || req.readOnly) {
+    args.push("--sandbox", "read-only"); // 3.3: a read-only helper is sandboxed whatever its tools are
+    // 1.1 round 3 (N13): a planning, judging or drafting call runs no tools, so it gets none of the owner's own Codex config either: no MCP servers
+    // (each one is a program Codex would start) and no `notify` program (run when a turn ends). `-c key=value` takes TOML: an empty table, an empty list.
+    if (req.jsonOnly) args.push("-c", "mcp_servers={}", "-c", "notify=[]");
+  } else {
     const sandbox = codexSandboxArgs(req.agent.tools, req.ask);
     args.push(...sandbox);
     if (sandbox.includes("workspace-write")) args.push(...codexConfinementArgs());

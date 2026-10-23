@@ -850,3 +850,85 @@ test("L5: the linter flags an allow rule for every tool and every action, and no
   await ownerRules(c, [{ tool: "drive", match: "action:*", scope: "agent:claude" }]);
   assert.equal(c.control.lint().flags.filter((f) => /tool \* with action:\*/.test(f.message)).length, 1, "only the broad rule is flagged");
 });
+
+// ---------------------------------------------------------------- 4.1/4.2 round 3
+
+test("round 3 N9: a lease granted from a room with no folder name (a direct message) stays in that room, one granted from a request with no room applies only to requests with no room, and an API lease with no room is still the agent's in any room", async (t) => {
+  const c = await mk(t);
+  const dm = c.store.createRoom("dm-claude", { dmAgentId: "claude" });
+  assert.equal(c.control.slugFor(dm.id), undefined, "a direct message has no folder name");
+  const g = await c.policy.grant({ agentId: "claude", tool: "drive", minutes: 30, action: "write", roomId: dm.id });
+  assert.ok(g.ok);
+  if (!g.ok) return;
+  assert.match(read(c.root, "POLICY.md"), new RegExp(`scope: agent:claude roomid:${dm.id}\\n`), "the room's own id is in the scope");
+  assert.deepEqual(c.control.lint().blocks, [], "the scope reads cleanly");
+  assert.equal((await ask(c, { roomId: dm.id }, "drive", "write", "to the DM")).auto, true, "it applies in the room it was granted in");
+  for (const where of [c.general, c.board]) {
+    const p = ask(c, { roomId: where.id }, "drive", "write", "elsewhere");
+    assert.equal(await pending(c, p), true, `not in #${where.name}`);
+    await declineAll(c, [p]);
+  }
+  assert.equal(c.policy.evaluate("claude", undefined, undefined, "drive", "write", "x").effect, "none", "nor with no room");
+  assert.equal(c.policy.leases()[0].roomId, dm.id);
+
+  // from a request that had no room: only requests with no room
+  const n = await c.policy.grant({ agentId: "claude", tool: "slack", minutes: 30, action: "post", noRoom: true });
+  assert.ok(n.ok);
+  assert.match(read(c.root, "POLICY.md"), /scope: agent:claude noroom\n/);
+  assert.equal(c.policy.evaluate("claude", undefined, undefined, "slack", "post", "x").effect, "allow");
+  assert.equal(c.policy.evaluate("claude", c.general.id, undefined, "slack", "post", "x").effect, "none", "a request in a room is not covered");
+  assert.equal(c.policy.evaluate("claude", dm.id, undefined, "slack", "post", "x").effect, "none");
+  assert.equal(c.policy.evaluate("codex", undefined, undefined, "slack", "post", "x").effect, "none", "and only for its own agent");
+
+  // the card's own button does the same: an approval with no room gives a no-room lease
+  const p = c.orch.requestApproval({ agentId: "claude" } as Parameters<typeof c.orch.requestApproval>[0], "drive", "write", "no room at all");
+  assert.equal(await pending(c, p), true);
+  const card = c.store.listApprovals("pending")[0];
+  assert.equal(card.roomId, undefined);
+  const r = await c.policy.leaseFromApproval(card, { minutes: 30 }, (id) => c.approvals.decide(id, "approved"));
+  assert.ok(r.ok, JSON.stringify(r));
+  await p;
+  assert.equal(c.policy.evaluate("claude", undefined, undefined, "drive", "write", "x").effect, "allow");
+  assert.equal(c.policy.evaluate("claude", c.general.id, undefined, "drive", "write", "x").effect, "none");
+
+  // a lease from a named room still has its room name (and now its id too); an API lease with no room at all is the agent's in every room, as before
+  const named = await c.policy.grant({ agentId: "claude", tool: "gmail", minutes: 30, action: "draft", roomId: c.board.id });
+  assert.ok(named.ok);
+  assert.match(read(c.root, "POLICY.md"), new RegExp(`scope: agent:claude room:board roomid:${c.board.id}\\n`));
+  assert.equal(c.policy.evaluate("claude", c.board.id, undefined, "gmail", "draft", "x").effect, "allow");
+  assert.equal(c.policy.evaluate("claude", c.general.id, undefined, "gmail", "draft", "x").effect, "none");
+  const any = await c.policy.grant({ agentId: "claude", tool: "shell", minutes: 30, action: "run" });
+  assert.ok(any.ok);
+  assert.match(read(c.root, "POLICY.md"), /scope: agent:claude\n(?!.*roomid)/);
+  for (const room of [undefined, c.general.id, dm.id, c.board.id]) assert.equal(c.policy.evaluate("claude", room, undefined, "shell", "run", "ls").effect, "allow");
+});
+
+test("round 3 N14: a lease that switches a tool on does not apply until the tool is seen to be on for good; when the files keep it off, it never applied", async (t) => {
+  const c = await mk(t);
+  assert.equal(c.store.getAgent("codex")!.tools.drive ?? false, false);
+  const effect = () => c.policy.evaluate("codex", c.general.id, undefined, "drive", "write", "to #general").effect;
+  const seen: { effect: string; leases: number; on: boolean }[] = [];
+  const idle = c.control.idle.bind(c.control);
+  c.control.idle = async () => { seen.push({ effect: effect(), leases: c.policy.leases().length, on: c.store.getAgent("codex")!.tools.drive === true }); await idle(); };
+  const g = await c.policy.grant({ agentId: "codex", tool: "drive", minutes: 30, action: "write" });
+  assert.ok(g.ok);
+  assert.ok(seen.length > 0, "the check that the switch stuck ran");
+  for (const s of seen) { assert.equal(s.effect, "none", "while the switch is unconfirmed the lease allows nothing"); assert.equal(s.leases, 0, "and is not listed as active"); }
+  assert.equal(effect(), "allow", "once the tool is confirmed on, it applies");
+  assert.equal(c.policy.leases().length, 1);
+  assert.ok(!c.store.getKV<{ pending?: boolean }[]>("policy_leases", []).some((l) => l.pending), "nothing is left pending");
+
+  // the owner's own deny rule keeps the tool off: the lease never applied at any moment, and nothing is left
+  c.clock.t += 31 * MIN;
+  await c.policy.sweep();
+  await c.control.idle();
+  await ownerRules(c, [{ effect: "deny", tool: "drive", match: "*", scope: "agent:codex" }]);
+  seen.length = 0;
+  const no = await c.policy.grant({ agentId: "codex", tool: "drive", minutes: 30, action: "write" });
+  assert.equal(no.ok, false);
+  assert.ok(seen.every((s) => s.effect !== "allow"), "never allowed, not even for a moment");
+  assert.equal(effect(), "deny");
+  assert.deepEqual(c.control.snapshot().policy!.fm.rules.filter((r) => r.id.startsWith("lease-")), []);
+  assert.deepEqual(c.store.getKV("policy_leases", []), []);
+  assert.equal(c.store.getAgent("codex")!.tools.drive, false);
+});

@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { basename } from "node:path";
+import { lstatSync } from "node:fs";
+import { basename, isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { TOOLS } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
@@ -11,7 +12,7 @@ import { localModelsFor, mcpReportShape, normalizeMcpReport } from "../discovery
 import { annotate } from "../memory/model.js"; // 2.5
 import { RoomRules } from "../rooms/rules.js"; // 4.3
 import { overlayDraft } from "../twokey/draft.js"; // 4.1
-import { toolIdOf } from "../twokey/classify.js"; // 4.1: a tool name stands for a hub tool only by whole words (pipedrive is not drive)
+import { emptyWrite, toolIdOf, words } from "../twokey/classify.js"; // 4.1: a tool name stands for a hub tool only by whole words (pipedrive is not drive)
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 /** 1.1 round 2 (M3): the file tools already named in the audit log for a run (a read is listed once per tool per run). */
@@ -135,8 +136,11 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
     const roomWhy = orch.roomDenied(grant, tool); // 4.3
     if (roomWhy) return text(`DENIED: ${roomWhy}`);
     const res = await orch.requestApproval(grant, tool, action, detail);
-    const other = res.status === "approved" && res.choice === "b" ? res.twoKey?.b?.draft : undefined; // 4.1: the owner picked the other agent's draft
+    // 4.1: the owner picked the other agent's draft. Draft B comes whole from memory (the card's own copy has secrets removed and long text cut).
+    const pickedB = res.status === "approved" && res.choice === "b";
+    const other = pickedB ? orch.twoKey.takePicked(res.id) : undefined;
     if (other) return text(`APPROVED, WITH THE OTHER DRAFT: the owner chose a different version of this action. Do NOT do what you asked. Do exactly this instead:\n${JSON.stringify(other)}`);
+    if (pickedB) return text("DENIED: the owner chose the other agent's version, but the hub no longer has it. Do not perform the action; ask again.");
     return text(res.status === "approved" ? "APPROVED: go ahead." : `DENIED (${res.status}). Do not perform the action.`);
   });
 
@@ -185,7 +189,11 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
       // inside the worktree that points at ~ would pass), so every file tool call lands here. A path that really is inside the task folder (links
       // resolved by the check above) gets what the rule used to give: allowed at once, no card for the owner, unless the room says to ask about files.
       // Audited at a low level so the log stays readable: each write, and a read once per tool per run.
-      if (isFileTool(tool_name) && a?.tools.filesystem === true && !orch.rooms.narrow(a, grant.roomId).ask.includes("filesystem")) {
+      // 4.1: a Write of nothing over a file that exists empties it (a delete), so it is never auto-allowed here: it goes on to the two-key check below.
+      const empties = emptyWrite(words(tool_name), input);
+      let emptiesExisting = false;
+      if (empties) { try { lstatSync(isAbsolute(empties.path) ? empties.path : join(grant.cwd, empties.path)); emptiesExisting = true; } catch { emptiesExisting = empties.path === "(a file)"; } }
+      if (!emptiesExisting && isFileTool(tool_name) && a?.tools.filesystem === true && !orch.rooms.narrow(a, grant.roomId).ask.includes("filesystem")) {
         const seen = fileToolSeen.get(grant) ?? new Set<string>();
         fileToolSeen.set(grant, seen);
         const writes = /^(Write|Edit|MultiEdit|NotebookEdit)$/.test(tool_name);
@@ -195,13 +203,15 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
     }
     const res = await orch.requestApproval(grant, toolId, tool_name, JSON.stringify(input ?? {}).slice(0, 4000), input);
     // 4.1: the owner picked the other agent's draft of a two-key action. Run it through the tool's own input when it fits, else tell the agent to ask again with it.
-    const other = res.status === "approved" && res.choice === "b" ? res.twoKey?.b?.draft : undefined;
+    const pickedB = res.status === "approved" && res.choice === "b";
+    const other = pickedB ? orch.twoKey.takePicked(res.id) : undefined; // draft B whole, from memory (never the card's redacted copy)
     if (other) {
       const next = input ? overlayDraft(input, other, tool_name) : undefined;
       if (next) return text(JSON.stringify({ behavior: "allow", updatedInput: next }));
       orch.twoKey.permit(grant, toolId, other);
       return text(JSON.stringify({ behavior: "deny", message: `The owner chose the other agent's version of this action. Do exactly this instead, and ask again: ${JSON.stringify(other)}` }));
     }
+    if (pickedB) return text(JSON.stringify({ behavior: "deny", message: "The owner chose the other agent's version of this action, but the hub no longer has it. Do not perform the action; ask again." }));
     return text(JSON.stringify(res.status === "approved"
       ? { behavior: "allow", updatedInput: input ?? {} }
       : { behavior: "deny", message: `Owner ${res.status} this action.` }));

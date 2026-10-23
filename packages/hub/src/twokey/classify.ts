@@ -104,7 +104,7 @@ function opWords(input: unknown, depth = 0): string[] {
 
 const BODY_KEYS = ["content", "contents", "text", "data", "body", "new_source"];
 /** A file tool (Claude Code's Write) given an empty body: the file is emptied. */
-function emptyWrite(nameTokens: string[], input: unknown): { path: string } | undefined {
+export function emptyWrite(nameTokens: string[], input: unknown): { path: string } | undefined {
   const o = asObj(input);
   if (!o || !nameTokens.some((t) => ["write", "overwrite", "save", "put"].includes(t))) return undefined;
   const k = BODY_KEYS.find((x) => typeof o[x] === "string" && !(o[x] as string).trim());
@@ -156,6 +156,9 @@ export function isTwoKey(tool: string, action: string, input?: unknown): TwoKeyC
         const names = [...new Set(scan.deletes.map((d) => d.program))].join(", ");
         return { twoKey: true, kind: "delete", why: `the shell command deletes files (${names})`, shell: scan, command };
       }
+      // sending mail or writing to a CRM from the shell: the CLI's own words decide, the owner sees the card
+      const send = scan.sends?.find((x) => x.kind === "crm") ?? scan.sends?.[0];
+      if (send) return { twoKey: true, kind: send.kind, why: send.kind === "crm" ? `the shell command writes to a CRM (${send.program})` : `the shell command sends email (${send.program})`, shell: scan, command };
       if (scan.unsure.length) return { twoKey: true, kind: "delete", why: `the shell command can't be read with confidence (${scan.unsure[0]}), so it is treated as a delete`, shell: scan, command };
       return { twoKey: false, why: "a shell command that deletes nothing", shell: scan, command };
     }

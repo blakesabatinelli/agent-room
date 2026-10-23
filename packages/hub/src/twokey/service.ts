@@ -122,6 +122,26 @@ export class TwoKey {
     return until >= now();
   }
 
+  // ---- draft B, whole
+
+  /**
+   * The owner picked draft B on an approval card. The card and the `twokey` table hold B with secrets removed and long text cut (for display and the
+   * audit trail), and running that copy would send "[secret removed]" or a clipped body. So B as the second agent wrote it is kept here, in memory only,
+   * keyed by the card's approval id: the tool input (`updatedInput`) and the one-use permit are made from it, and it is never written anywhere.
+   */
+  private picked = new Map<string, { draft: TwoKeyDraft; until: number }>();
+  private rememberPicked(approvalId: string, draft: TwoKeyDraft) {
+    const t = now();
+    for (const [k, v] of this.picked) if (v.until < t) this.picked.delete(k);
+    this.picked.set(approvalId, { draft, until: t + PERMIT_MS });
+  }
+  /** Draft B in full for the card the owner picked it on, once (the second call gets nothing), or undefined when the hub no longer has it. */
+  takePicked(approvalId: string): TwoKeyDraft | undefined {
+    const v = this.picked.get(approvalId);
+    this.picked.delete(approvalId);
+    return v && v.until >= now() ? v.draft : undefined;
+  }
+
   // ---- the front doors
 
   /** Is the check on? (The owner can switch it off in settings.) */
@@ -251,6 +271,8 @@ export class TwoKey {
     if (apr) { rec.approvalId = apr.id; saveTwoKey(store, rec); r.onCard?.(apr.id); }
     const done = await decision;
     const pick = done.status === "approved" ? (done.choice === "b" && bDraft ? "b" : "a") : "neither";
+    // Draft B as the second agent wrote it (not the redacted, cut copy the card and the table hold) is what runs when the owner picks it.
+    if (pick === "b" && bDraft) this.rememberPicked(done.id, bDraft);
     rec.outcome = done.status === "expired" ? "expired" : pick === "a" ? "owner_a" : pick === "b" ? "owner_b" : "owner_neither";
     rec.decidedAt = now();
     saveTwoKey(store, rec);

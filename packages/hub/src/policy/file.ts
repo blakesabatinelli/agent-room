@@ -149,6 +149,8 @@ const SCOPE_WORDS = (scope: string, agentName?: string) => {
     if (tok.startsWith("room:")) parts.push(`in #${tok.slice(5)}`);
     else if (tok.startsWith("goal:")) parts.push("for one goal");
   }
+  // a lease from a room with no folder name (a direct message) or from a request with no room still says where it applies
+  if (!parts.some((x) => x.startsWith("in #"))) { if (/(^|\s)roomid:/.test(scope)) parts.unshift("in one room"); else if (/(^|\s)noroom(\s|$)/.test(scope)) parts.unshift("where there is no room"); }
   return { owner: agentName ? `${agentName}'s ` : "", where: parts.join(" ") };
 };
 

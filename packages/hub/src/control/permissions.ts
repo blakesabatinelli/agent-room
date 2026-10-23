@@ -22,14 +22,21 @@ export const levelEffect = (l: Level): PolicyRule["effect"] => (l === "on" ? "al
 /** The level a tool has when nothing in POLICY.md says otherwise. */
 export const catalogDefault = (tool: string): Level => (SENSITIVE.has(tool) ? "ask" : "on");
 
-/** Scopes: `*`, or space-separated `agent:<id>` / `room:<slug>` / `goal:<id>` (4.2) tokens that must all match. */
-export function scopeApplies(scope: string, agentId?: string, roomSlug?: string, goalId?: string): boolean {
+/**
+ * Scopes: `*`, or space-separated tokens that must all match: `agent:<id>`, `room:<slug>`, `goal:<id>` (4.2) and, for a lease, `roomid:<room id>` or `noroom`.
+ * `roomid:` is checked against the raw room id, so a lease granted from a room that has no control-folder name (a direct message, a room not yet synced)
+ * still applies only there. `noroom` means the request has no room at all. Both need `room` (the request's room, `{}` when it has none): a caller that
+ * doesn't know the room (the permission levels) never matches them, like a goal.
+ */
+export function scopeApplies(scope: string, agentId?: string, roomSlug?: string, goalId?: string, room?: { id?: string }): boolean {
   const s = scope.trim();
   if (s === "*" || s === "") return true;
   return s.split(/\s+/).every((tok) => {
     if (tok.startsWith("agent:")) return agentId !== undefined && tok.slice(6) === agentId;
     if (tok.startsWith("room:")) return roomSlug !== undefined && tok.slice(5) === roomSlug;
     if (tok.startsWith("goal:")) return goalId !== undefined && tok.slice(5) === goalId; // 4.2: a lease for one goal; tool levels never know the goal, so such a rule never changes them
+    if (tok.startsWith("roomid:")) return room?.id !== undefined && tok.slice(7) === room.id;
+    if (tok === "noroom") return room !== undefined && room.id === undefined;
     return false;
   });
 }
@@ -39,8 +46,9 @@ export function scopesOverlap(a: string, b: string): boolean {
   const norm = (s: string) => (s.trim() === "" ? "*" : s.trim());
   const x = norm(a), y = norm(b);
   if (x === "*" || y === "*" || x === y) return true;
-  const tx = new Map(x.split(/\s+/).map((t) => [t.split(":")[0], t]));
-  const ty = new Map(y.split(/\s+/).map((t) => [t.split(":")[0], t]));
+  const kind = (t: string) => (t === "noroom" ? "roomid" : t.split(":")[0]);
+  const tx = new Map(x.split(/\s+/).map((t) => [kind(t), t]));
+  const ty = new Map(y.split(/\s+/).map((t) => [kind(t), t]));
   for (const [k, v] of tx) if (ty.has(k) && ty.get(k) !== v) return false; // different agent or different room
   return true;
 }

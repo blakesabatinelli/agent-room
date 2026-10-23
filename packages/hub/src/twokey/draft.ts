@@ -104,11 +104,14 @@ export function crmOp(text: unknown): "create" | "update" | "upsert" | "delete" 
   for (const [re, op] of CRM_OPS) if (re.test(s)) return op;
   return undefined;
 }
-const CRM_META = ["object", "sobject", "sobjectType", "objectType", "objectName", "entity", "type", "resource", "table", "op", "operation", "action", "method", "verb", "id", "recordId", "objectId"];
+/** The keys that name a CRM record's object and its id: `crmFrom` reads them from A's request and `overlayDraft` writes B's under the same names. */
+const CRM_OBJECT_KEYS = ["object", "sobject", "sobjectType", "objectType", "objectName", "entity", "type", "resource", "table"];
+const CRM_ID_KEYS = ["id", "recordId", "objectId"];
+const CRM_META = [...CRM_OBJECT_KEYS, "op", "operation", "action", "method", "verb", ...CRM_ID_KEYS];
 const CRM_BOX = ["fields", "data", "record", "values", "attributes", "properties", "payload", "changes", "body"];
 /** A CRM draft from an object with object/op/id/fields keys. `hint` says the operation when the object doesn't (the tool's name). */
 export function crmFrom(o: Obj, hint?: string): TwoKeyDraft | undefined {
-  const object = str(pick(o, ["object", "sobject", "sobjectType", "objectType", "objectName", "entity", "type", "resource", "table"]))?.trim();
+  const object = str(pick(o, CRM_OBJECT_KEYS))?.trim();
   if (!object) return undefined;
   const op = crmOp(pick(o, ["op", "operation", "action", "method", "verb"])) ?? crmOp(hint);
   if (!op) return undefined;
@@ -116,7 +119,7 @@ export function crmFrom(o: Obj, hint?: string): TwoKeyDraft | undefined {
   const meta = new Set(CRM_META.map(key));
   const fields: Obj = box ? { ...box } : Object.fromEntries(Object.entries(o).filter(([k]) => !meta.has(key(k))));
   // A record's id may sit inside the fields (Salesforce's Id): it names the record, it is not a change to it.
-  let id = str(pick(o, ["id", "recordId", "objectId"]))?.trim();
+  let id = str(pick(o, CRM_ID_KEYS))?.trim();
   const inner = Object.keys(fields).find((k) => key(k) === "id");
   if (inner !== undefined) { id ??= str(fields[inner])?.trim(); delete fields[inner]; }
   // With the fields in a box, any other key is something the hub does not compare (a second box, a flag, a header...)
@@ -284,12 +287,17 @@ export function overlayDraft(input: Obj, d: TwoKeyDraft, hint?: string): Obj | u
     if ((opKey !== undefined ? crmOp(input[opKey]) : crmOp(hint)) !== d.op) return undefined;
     // the record id sits beside the fields or inside them (Salesforce's Id), where A put it; B must name one when A's request did
     const innerId = Object.keys(asObj(input[boxKey])!).find((k) => key(k) === "id");
-    const outerId = actualKey(input, ["id", "recordId", "objectId"]);
+    const outerId = actualKey(input, CRM_ID_KEYS);
     if ((innerId !== undefined || outerId !== undefined) && d.id === undefined) return undefined;
+    // B's object and id go where A's were, under whichever of the key names `crmFrom` reads A used. A request with no key that can carry them, or two
+    // of them, would run B's fields against A's record: refused (the agent is told to run B itself and ask again).
+    if (!once(CRM_OBJECT_KEYS) || !once(CRM_ID_KEYS)) return undefined;
+    const objectKey = actualKey(input, CRM_OBJECT_KEYS);
+    if (objectKey === undefined || typeof input[objectKey] !== "string") return undefined;
+    if (d.id !== undefined && innerId === undefined && outerId === undefined) return undefined;
     out[boxKey] = innerId !== undefined && d.id !== undefined ? { ...d.fields, [innerId]: d.id } : d.fields;
-    const set =(names: string[], v: string | undefined) => { const k = actualKey(out, names); if (k !== undefined && v !== undefined) out[k] = v; };
-    set(["object", "sobject", "sobjectType", "objectType", "objectName"], d.object);
-    set(["id", "recordId"], d.id);
+    out[objectKey] = d.object;
+    if (outerId !== undefined && d.id !== undefined) out[outerId] = d.id;
     return out;
   }
   return undefined;
