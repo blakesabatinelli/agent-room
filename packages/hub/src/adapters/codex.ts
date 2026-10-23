@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Adapter, RunRequest, RunResult } from "./types.js";
 import { runProc, which } from "./proc.js";
 import { codexConfinementArgs } from "../files/confine.js";
+import { NativeTracker } from "../subagents/native.js"; // 3.3
 
 /**
  * Drives OpenAI's Codex CLI (`codex exec`), signed in with the owner's ChatGPT plan.
@@ -23,14 +24,14 @@ export function codexSandboxArgs(tools: Record<string, boolean>): string[] {
  * Everything before the prompt for `codex exec`. 1.1 confinement: `-C <task folder>` and the workspace-write sandbox with no extra
  * writable roots (no --add-dir, writable_roots empty, /tmp excluded), so writes stay inside the task's worktree.
  */
-export function codexBaseArgs(req: Pick<RunRequest, "agent" | "cwd" | "model" | "effort" | "jsonOnly">, outFile: string): string[] {
+export function codexBaseArgs(req: Pick<RunRequest, "agent" | "cwd" | "model" | "effort" | "jsonOnly" | "readOnly">, outFile: string): string[] {
   const s = req.agent.settings as { model?: string };
   const args = ["exec", "--json", "--skip-git-repo-check", "-C", req.cwd, "--output-last-message", outFile];
   const model = req.model ?? s.model;
   if (model) args.push("-m", model);
   // Codex calls the top rung "xhigh"; it has no "max".
   if (req.effort) args.push("-c", `model_reasoning_effort="${req.effort === "max" ? "xhigh" : req.effort}"`);
-  if (req.jsonOnly) args.push("--sandbox", "read-only");
+  if (req.jsonOnly || req.readOnly) args.push("--sandbox", "read-only"); // 3.3: a read-only helper is sandboxed whatever its tools are
   else {
     const sandbox = codexSandboxArgs(req.agent.tools);
     args.push(...sandbox);
@@ -64,6 +65,7 @@ export class CodexAdapter implements Adapter {
       : [];
     const attempt = async (extra: string[]) => {
       let streamed = "", evError = "";
+      const native = req.onSubagent ? new NativeTracker(req.onSubagent) : undefined; // 3.3
       let usage: RunResult["usage"], model: string | undefined;
       const r = await runProc(s.binary || "codex", [...args, ...extra, prompt], {
         cwd: req.cwd, signal: req.signal, timeoutMs: 30 * 60_000,
@@ -71,6 +73,7 @@ export class CodexAdapter implements Adapter {
         onLine: (line) => {
           try {
             const ev = JSON.parse(line);
+            native?.codex(ev); // 3.3
             const msg = ev.item?.type === "agent_message" ? ev.item.text
               : ev.msg?.type === "agent_message" ? ev.msg.message : undefined;
             if (msg) { streamed += msg; req.onChunk?.(msg); }
@@ -82,6 +85,7 @@ export class CodexAdapter implements Adapter {
           } catch { /* ignore */ }
         },
       });
+      native?.finish(r.code === 0); // 3.3
       let text = "";
       try { text = readFileSync(outFile, "utf8").trim(); } catch { text = streamed; }
       return { r, text, evError, usage, model };

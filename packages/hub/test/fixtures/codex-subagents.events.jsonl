@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"th_root"}
+{"type":"item.started","item":{"id":"item_1","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"th_root","receiver_thread_ids":[],"prompt":"Check the SQL in db/queries.sql","agents_states":{},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"th_root","receiver_thread_ids":["th_sub1"],"prompt":"Check the SQL in db/queries.sql","agents_states":{"th_sub1":{"status":"running"}},"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"collab_tool_call","tool":"wait","sender_thread_id":"th_root","receiver_thread_ids":["th_sub1"],"agents_states":{"th_sub1":{"status":"completed","message":"The join is missing a key."}},"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"All done."}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}

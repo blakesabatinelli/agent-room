@@ -35,6 +35,8 @@ async function mk(t: TestContext, o: { control?: boolean } = {}) {
 
 const git = (root: string, ...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" });
 const commits = (root: string) => git(root, "log", "--format=%an|%s").trim().split("\n").filter(Boolean).filter((l) => !l.includes("|Résumé: ")); // 2.3: the résumé writer's commits are its own
+/** The commit count once it has stopped moving: the memory keeper writes "Did <task>" notes on its own clock after a goal is done, and on a busy machine they land late. */
+const settledCommits = async (root: string) => { let n = -1; for (let i = 0; i < 40; i++) { const now = commits(root).length; if (now === n) return now; n = now; await new Promise((r) => setTimeout(r, 400)); } return n; };
 const read = (root: string, rel: string) => readFileSync(join(root, rel), "utf8");
 const write = (root: string, rel: string, text: string) => { mkdirSync(dirname(join(root, rel)), { recursive: true }); writeFileSync(join(root, rel), text); };
 const bullets = (text: string, type: string) => {
@@ -153,7 +155,7 @@ test("AC1: the same lessons from a second identical goal are deduplicated, not a
   const c = await mk(t);
   const first = await sentBackGoal(c, "Write a short sourced summary of the venue TV market");
   const pairs = sentBackPairs(c, first.id);
-  const before = commits(c.root).length;
+  const before = await settledCommits(c.root);
   const files = Object.fromEntries(pairs.map((p) => [p.agentId, read(c.root, `agents/${p.agentId}/LESSONS.md`)]));
 
   const second = await sentBackGoal(c, "Write a short sourced summary of the venue TV market");

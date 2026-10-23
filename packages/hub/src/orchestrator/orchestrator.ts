@@ -35,6 +35,7 @@ import { MemoryKeeper, type KeeperOptions, type ProposeOptions } from "../memory
 import { withPersona } from "../persona/index.js"; // 3.2
 import { Resumes, ShadowRunner, barredSet, planNotes, realAgents, type ShadowHost } from "../resume/index.js"; // 2.3
 import { attentionFor, type Attention } from "../attention/index.js"; // 2.7
+import { Subagents, subagentSettings, type SubagentHost } from "../subagents/index.js"; // 3.3
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -49,7 +50,7 @@ const ORCH: Author = { kind: "orchestrator", id: "orchestrator", name: "Orchestr
 const SYS: Author = { kind: "system", id: "system", name: "System" };
 const OPEN = (t: Task) => !["done", "failed", "cancelled"].includes(t.status);
 
-export interface McpGrant { agentId: string; roomId?: string; taskId?: string; expiresAt?: number; hop?: number; /** 1.1: an external key pinned to one room: every room argument is ignored in favour of roomId */ locked?: boolean; /** 1.1: the external key behind this grant (for the audit log) */ tokenId?: string; /** 1.1: the folder this run works in; file tools aimed elsewhere are refused */ cwd?: string; /** 2.3: a probation agent's practice run: approvals are refused, nothing it says or saves reaches the room, the library or memory */ shadow?: boolean }
+export interface McpGrant { agentId: string; roomId?: string; taskId?: string; expiresAt?: number; hop?: number; /** 1.1: an external key pinned to one room: every room argument is ignored in favour of roomId */ locked?: boolean; /** 1.1: the external key behind this grant (for the audit log) */ tokenId?: string; /** 1.1: the folder this run works in; file tools aimed elsewhere are refused */ cwd?: string; /** 2.3: a probation agent's practice run: approvals are refused, nothing it says or saves reaches the room, the library or memory */ shadow?: boolean; /** 3.3: a read-only helper: the hub's file-write tools refuse it, and Claude Code's write tools are off */ readOnly?: boolean }
 
 export interface OrchestratorOptions {
   dataDir: string;
@@ -115,6 +116,8 @@ export class Orchestrator {
   shadows: ShadowRunner;
   /** 2.7: the gate every owner-facing alert goes through (pushes up to the daily cap, the rest wait for the evening digest). */
   attention: Attention;
+  /** 3.3: helpers (room subagents from spawn_agent, native ones seen in an agent's own stream). */
+  subagents: Subagents;
 
   /** 1.2: the hub's data folder (the API server keeps local-pair.secret there). */
   get dataDir(): string { return this.opts.dataDir; }
@@ -146,6 +149,28 @@ export class Orchestrator {
     // 2.3: résumés (RESUME.md after graded runs) and shadow tasks for agents on probation.
     this.resumes = new Resumes({ store, control: () => this.control, say: (roomId, text) => { if (roomId) this.post(roomId, SYS, text, "system"); } });
     this.shadows = new ShadowRunner(this.shadowHost());
+    this.subagents = new Subagents(this.subagentHost()); // 3.3
+  }
+
+  /** 3.3: what the subagent service may use of the orchestrator. Helpers run through call() like everything else (quota, capacity and the routing log apply). */
+  private subagentHost(): SubagentHost {
+    const self = this;
+    return {
+      store: this.store, dataDir: this.opts.dataDir, workspaces: this.workspaces, governor: this.governor, floor: this.floor,
+      ref: (g) => this.goalSources.ref(g, g.folder ?? goalFolder(this.opts.dataDir, g.id)),
+      readyAgents: () => this.readyAgents(),
+      busy: (agentId, set) => {
+        if (set === true) this.busy.add(agentId); else if (set === false) this.busy.delete(agentId);
+        return this.busy.has(agentId) || this.chatting.has(agentId);
+      },
+      call: (agent, prompt, o) => this.call(agent, prompt, o),
+      runSignal: (taskId) => this.taskRuns.get(taskId)?.ctrl.signal,
+      log: (roomId, text, taskId) => { this.log(roomId, text, taskId); },
+      hooks: () => self.workspaceHooks,
+      scratch: (agentId, roomId) => this.workspace(agentId, roomId),
+      settings: () => this.cfg(),
+      rand: this.opts.rand,
+    };
   }
 
   /** 2.3: what the shadow runner may use of the orchestrator. Everything it runs goes through call() with `shadow: true`. */
@@ -219,7 +244,7 @@ export class Orchestrator {
   }
 
   // ---------- progress ledger (Magentic-One style: what we're doing vs. how it's going)
-  private ledgerText(g: Goal) { return ledgerMarkdown(g, this.store.listTasks({ goalId: g.id }), this.store.listAgents()); }
+  private ledgerText(g: Goal) { return ledgerMarkdown(g, this.store.listTasks({ goalId: g.id }), this.store.listAgents(), subagentSettings(this.store).budgetPerGoal); }
   private lastLedger = new Map<string, string>();
   private writeLedger(g: Goal) {
     if (!g.folder) return;
@@ -307,23 +332,25 @@ export class Orchestrator {
     const dir = join(this.opts.dataDir, "workspaces", agentId, roomId);
     mkdirSync(dir, { recursive: true }); return dir;
   }
-  private grantFor(agentId: string, roomId?: string, taskId?: string, hop = 0, cwd?: string, shadow = false) {
+  private grantFor(agentId: string, roomId?: string, taskId?: string, hop = 0, cwd?: string, shadow = false, readOnly = false) {
     const t = token();
     // 1.1: a run's own key is locked to its room, and carries its worktree so approval_prompt can refuse file tools outside it.
-    this.grants.set(t, { agentId, roomId, taskId, hop, expiresAt: now() + 2 * 3600_000, locked: !!roomId, cwd, ...(shadow ? { shadow: true } : {}) });
+    this.grants.set(t, { agentId, roomId, taskId, hop, expiresAt: now() + 2 * 3600_000, locked: !!roomId, cwd, ...(shadow ? { shadow: true } : {}), ...(readOnly ? { readOnly: true } : {}) });
     return t;
   }
 
-  async call(agent: AgentConfig, prompt: string, o: { jsonOnly?: boolean; roomId?: string; taskId?: string; signal?: AbortSignal; systemPrompt?: string; hop?: number; profile?: Profile; cwd?: string; shadow?: boolean /* 2.3 */ } = {}): Promise<RunResult> {
+  async call(agent: AgentConfig, prompt: string, o: { jsonOnly?: boolean; roomId?: string; taskId?: string; signal?: AbortSignal; systemPrompt?: string; hop?: number; profile?: Profile; cwd?: string; shadow?: boolean /* 2.3 */; readOnly?: boolean /* 3.3 */ } = {}): Promise<RunResult> {
     const url = this.opts.mcpUrl();
     const cwd = o.cwd ?? this.workspace(agent.id, o.roomId ?? "_orchestrator");
-    const grant = url && !o.jsonOnly ? { url, token: this.grantFor(agent.id, o.roomId, o.taskId, o.hop, cwd, o.shadow) } : undefined;
+    const grant = url && !o.jsonOnly ? { url, token: this.grantFor(agent.id, o.roomId, o.taskId, o.hop, cwd, o.shadow, o.readOnly) } : undefined;
     const adapter = this.store.getKV("practice_mode", false) ? adapters.mock : adapters[agent.adapter];
     const res = await adapter.run({
       agent, prompt, jsonOnly: o.jsonOnly, signal: o.signal, systemPrompt: o.systemPrompt,
       cwd, dataDir: this.opts.dataDir, mcp: grant, roomId: o.roomId, taskId: o.taskId, // 1.1: dataDir keeps the hub's own files off limits to a confined run
       model: o.profile?.model, effort: o.profile?.effort,
       claimTimeoutMs: this.cfg().claimTimeoutMinutes * 60_000,
+      readOnly: o.readOnly, // 3.3
+      onSubagent: o.taskId && !o.shadow && !o.jsonOnly ? (e) => this.subagents.native(o.taskId!, agent.id, e) : undefined, // 3.3: the agent's own subagents, for the tree
     });
     if (!res.ok) this.forgetStatus(agent.id); // re-check sign-in before routing to it again
     if (grant) this.grants.delete(grant.token);
@@ -877,6 +904,7 @@ export class Orchestrator {
    */
   recover() {
     const resumed: Goal[] = [];
+    this.subagents.cancelOrphans(); // 3.3: helpers that were running died with the hub; they are not picked up again
     for (const room of this.store.listRooms()) {
       for (const g of this.store.listGoals(room.id).filter((x) => ["planning", "awaiting_approval", "running", "paused"].includes(x.status))) {
         const tasks = this.store.listTasks({ goalId: g.id });
@@ -1386,6 +1414,7 @@ export class Orchestrator {
       res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: work });
       usage = addUsage(usage, res.usage); ms += res.durationMs; ranModel = res.model ?? ranModel;
     }
+    await this.subagents.settle(task.id); // 3.3: this run is over: helpers still running are stopped, changes the agent never accepted are dropped
     const changed = changedFiles(before, snapshot(work));
     this.working(goal.roomId, agent, false);
     // 0.2: close the routing record on every way out of this attempt.

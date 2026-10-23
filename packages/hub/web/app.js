@@ -24,6 +24,8 @@
     roomGrants: [], folderId: "", folderOpen: false,
     // 3.2 personas: the starter templates, the agent being edited and its form
     personas: { templates: [], id: "", form: null, err: "", busy: false },
+    // 3.3 tasks: the room's tasks (helpers included), shown as a tree from the room header
+    tasks: [], taskRoom: "",
   };
 
   // ---------- helpers
@@ -148,6 +150,7 @@
         } else if (visibleMsg(m) && m.author.kind !== "human") { st.unread.add(m.roomId); if (st.view === "rooms") renderRooms(); }
         break;
       }
+      case "task": case "subagent": upsertTask(e.task); break; // 3.3
       case "goal": st.goals[e.goal.id] = e.goal; if (e.goal.roomId === st.roomId) { renderMessages(); renderComposerState(); } break;
       case "task": if (e.task.roomId === st.roomId) { st.tasks[e.task.id] = e.task; if (st.view === "room") renderMessages(); } break; // 3.1: the verdict chips and the goal card
       case "working": {
@@ -241,6 +244,8 @@
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : room.name)
       : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : st.view === "scorecard" ? "Scorecard" : st.view === "personas" ? "Personas" : st.view === "persona" ? (st.agents[st.personas.id]?.name || "Persona") : "Agent Room";
     renderDot(); renderBadge();
+    $("#tasksBtn").hidden = st.view !== "room"; // 3.3
+    if (st.view === "tasks") $("#title").textContent = "Tasks"; // 3.3
     if (st.view === "resumes") $("#title").textContent = "Résumés"; // 2.3
     if (st.view === "appearance") $("#title").textContent = "Appearance"; // 3.1
     $("#jumpBtn").hidden = st.view === "pair";
@@ -259,6 +264,7 @@
     if (st.view === "appearance") return renderAppearance();
     if (st.view === "personas") return renderPersonas();
     if (st.view === "persona") return renderPersona();
+    if (st.view === "tasks") return renderTasks(); // 3.3
     renderMessages(); renderComposerState();
   }
 
@@ -267,6 +273,52 @@
     const n = st.approvals.length;
     $("#approvalsBtn").hidden = !n || st.view === "pair" || st.view === "approvals" || st.view === "diff";
     $("#approvalsCount").textContent = String(n);
+  }
+
+  // 3.3 Tasks: the room's latest goal as a compact tree. A helper (a task another agent started with spawn_agent, or one an agent's own tool
+  // launched) sits under the task that started it, with its agent's colour, its status and a read-only / writes / built-in tag.
+  const TASK_STATUS = { pending: "Waiting", assigned: "Assigned", running: "Working", review: "Being judged", revising: "Revising", waiting: "Needs your input", done: "Done", failed: "Failed", cancelled: "Cancelled" };
+  function taskTree(list) {
+    const ids = new Set(list.map((t) => t.id)), kids = new Map(), top = [];
+    for (const t of list) {
+      if (t.parentTaskId && ids.has(t.parentTaskId)) kids.set(t.parentTaskId, [...(kids.get(t.parentTaskId) || []), t]); else top.push(t);
+    }
+    const out = [], seen = new Set();
+    const walk = (t, depth) => {
+      if (seen.has(t.id)) return;
+      seen.add(t.id); out.push({ task: t, depth });
+      for (const c of (kids.get(t.id) || []).sort((a, b) => a.createdAt - b.createdAt)) walk(c, depth + 1);
+    };
+    for (const t of top.sort((a, b) => a.createdAt - b.createdAt)) walk(t, 0);
+    return out;
+  }
+  async function openTasks() {
+    if (st.view !== "room" || !st.roomId) return;
+    st.taskRoom = st.roomId; st.view = "tasks"; render();
+    try { const list = await api(`/rooms/${st.taskRoom}/tasks`); if (st.view === "tasks") { st.tasks = list; renderTasks(); } }
+    catch (e) { if (e.message !== "unpaired") toast(e.message); }
+  }
+  function upsertTask(t) {
+    if (!t || t.roomId !== st.taskRoom) return;
+    const i = st.tasks.findIndex((x) => x.id === t.id);
+    if (i >= 0) st.tasks[i] = t; else st.tasks.push(t);
+    if (st.view === "tasks") renderTasks();
+  }
+  function renderTasks() {
+    const goal = Object.values(st.goals).filter((g) => g.roomId === st.taskRoom).sort((a, b) => b.createdAt - a.createdAt)[0];
+    const rows = taskTree(goal ? st.tasks.filter((t) => t.goalId === goal.id) : []);
+    const row = ({ task: t, depth }) => {
+      const a = st.agents[t.assignee || t.owner];
+      const tag = t.kind === "subagent" ? (t.native ? "built-in" : t.readOnly === false ? "writes" : "read-only") : "";
+      const status = t.kind === "subagent" && t.status === "review" ? "Waiting for its parent" : (TASK_STATUS[t.status] || t.status);
+      return `<div class="trow d${Math.min(depth, 4)}"><span class="av" data-color="${esc(safeColor(a && a.color))}">${esc(glyph(a, t.assignee))}</span>`
+        + `<div class="tbody"><div class="ttitle">${esc(t.title)}${tag ? ` <span class="tag">${tag}</span>` : ""}</div>`
+        + `<div class="tsub s-${esc(t.status)}">${esc(status)}${a ? ` · ${esc(a.name)}` : ""}</div></div></div>`;
+    };
+    const help = goal && goal.state && goal.state.progress && goal.state.progress.subagents ? goal.state.progress.subagents.spawned : 0;
+    $("#view").innerHTML = (goal ? `<div class="card"><div class="detail">Current goal</div><div class="what">${esc((goal.contract && goal.contract.objective) || goal.text)}</div>${help ? `<div class="detail">${help} helper${help === 1 ? "" : "s"} started</div>` : ""}</div>` : "")
+      + (rows.length ? rows.map(row).join("") : `<div class="empty">${goal ? "No tasks yet." : "No goal yet."}</div>`);
+    paintColors();
   }
 
   function renderRooms() {
@@ -1207,7 +1259,8 @@
     catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
   });
 
-  $("#back").onclick = () => go(st.view === "diff" ? "approvals" : st.view === "persona" ? "personas" : "rooms");
+  $("#back").onclick = () => (st.view === "tasks" ? go("room", st.taskRoom) : go(st.view === "diff" ? "approvals" : st.view === "persona" ? "personas" : "rooms"));
+  $("#tasksBtn").onclick = () => void openTasks(); // 3.3
   $("#jumpNew").onclick = () => {
     const line = $("#newLine"), view = $("#view");
     if (line) view.scrollTo({ top: Math.max(0, line.offsetTop - view.offsetTop - 8), behavior: "smooth" });

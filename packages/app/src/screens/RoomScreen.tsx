@@ -9,6 +9,7 @@ import { JuryChips } from "../components/JuryChips"; // 2.2
 import { GoalCard } from "../components/GoalCard"; // 3.1
 import { TaskVerdict } from "../components/TaskVerdict"; // 3.1
 import { chipMessageIds } from "@agent-room/shared/src/goalview";
+import { HelperBadge, helperStatus, treeRows } from "../components/SubagentTree"; // 3.3
 import { lift, radius, space, type as t, usePalette } from "../theme";
 
 type Row = { kind: "day"; id: string; at: number } | { kind: "new"; id: string } | { kind: "msg"; id: string; m: Message; grouped: boolean };
@@ -365,7 +366,7 @@ function Activity({ log, onClose }: { log: Message[]; onClose: () => void }) {
     if (!goal?.folder || !hub) { setFiles([]); return; }
     hub.goalFiles(goal.id).then((r) => setFiles(r.files)).catch(() => setFiles([]));
   }, [goal?.id, goal?.folder, doneCount, hub]);
-  const list = Object.values(tasks).filter((x) => x.goalId === goal?.id).sort((a, b) => a.createdAt - b.createdAt);
+  const rows = treeRows(Object.values(tasks).filter((x) => x.goalId === goal?.id)); // 3.3: helpers sit under the task that started them
   return (
     <View style={{ flex: 1 }}>
       <View style={{ height: 58, flexDirection: "row", alignItems: "center", paddingHorizontal: space(4), borderBottomWidth: 1, borderColor: p.line }}>
@@ -388,6 +389,7 @@ function Activity({ log, onClose }: { log: Message[]; onClose: () => void }) {
             <Text style={[t.tiny, { color: p.faint }]}>
               {goal.state.progress.runs} task run{goal.state.progress.runs === 1 ? "" : "s"}
               {goal.state.progress.goalReplans ? `, ${goal.state.progress.goalReplans} recovery replan${goal.state.progress.goalReplans === 1 ? "" : "s"}` : ""}
+              {goal.state.progress.subagents?.spawned ? `, ${goal.state.progress.subagents.spawned} helper${goal.state.progress.subagents.spawned === 1 ? "" : "s"}` : ""}
               {goal.state.progress.verifyRounds ? `, final check run ${goal.state.progress.verifyRounds}×` : ""}
               {goal.state.progress.stall > 1 ? `, ${goal.state.progress.stall} reviews without progress` : ""}
             </Text>
@@ -402,18 +404,21 @@ function Activity({ log, onClose }: { log: Message[]; onClose: () => void }) {
               ))}
             </View>
           ) : null}
-          {list.map((task) => {
+          {rows.map(({ task, depth }) => {
             const a = agents.find((x) => x.id === (task.assignee ?? task.owner));
             const checks = task.criteria ?? [];
             const verdict = (id: string) => task.judgment?.criteria?.[id]?.verdict ?? task.report?.criteria[id]?.verdict;
             const color = task.status === "failed" ? p.danger : task.status === "done" ? p.ok : task.status === "waiting" ? p.warn : p.muted;
             return (
-              <View key={task.id} style={{ flexDirection: "row", gap: space(2), alignItems: "flex-start" }}>
+              <View key={task.id} style={{ flexDirection: "row", gap: space(2), alignItems: "flex-start", marginLeft: depth * space(4) }}>
                 {a ? <Avatar name={a.name} color={a.color} glyph={a.avatar} size={18} /> : <View style={{ width: 18, height: 18, borderRadius: 4, borderWidth: 1, borderColor: p.line }} />}
                 <View style={{ flex: 1, gap: 2 }}>
-                  <Text style={[t.small, { color: p.ink }]}>{task.title}</Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: space(2) }}>
+                    <Text style={[t.small, { color: p.ink, flexShrink: 1 }]}>{task.title}</Text>
+                    <HelperBadge task={task} />
+                  </View>
                   <Text style={[t.tiny, { color }]}>
-                    {STATUS[task.status]}{a ? ` · ${task.assignee ? "" : "for "}${a.name}` : ""}{(() => { const pr = a?.profiles?.find((x) => x.id === task.profileId); return pr ? ` (${pr.label})` : task.role && task.role !== "worker" ? ` as ${task.role}` : ""; })()}{task.attempts > 1 ? ` · try ${task.attempts}` : ""}{task.replans ? " · replanned" : ""}{task.origin === "verify" ? " · from final check" : task.origin === "recovery" ? " · replacement" : ""}{task.recovered && task.status !== "done" ? " · routed around" : ""}
+                    {helperStatus(task, STATUS[task.status])}{a ? ` · ${task.assignee ? "" : "for "}${a.name}` : ""}{(() => { const pr = a?.profiles?.find((x) => x.id === task.profileId); return pr ? ` (${pr.label})` : task.role && task.role !== "worker" ? ` as ${task.role}` : ""; })()}{task.attempts > 1 ? ` · try ${task.attempts}` : ""}{task.replans ? " · replanned" : ""}{task.origin === "verify" ? " · from final check" : task.origin === "recovery" ? " · replacement" : ""}{task.recovered && task.status !== "done" ? " · routed around" : ""}
                   </Text>
                   {checks.map((c) => {
                     const v = verdict(c.id);

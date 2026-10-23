@@ -5,6 +5,7 @@ import { TOOLS } from "@agent-room/shared";
 import type { Adapter, RunRequest, RunResult } from "./types.js";
 import { runProc, which } from "./proc.js";
 import { claudeConfinementArgs, scopeAllowedTools } from "../files/confine.js";
+import { NativeTracker } from "../subagents/native.js"; // 3.3
 
 /**
  * Drives the Claude Code CLI, signed in with the owner's Claude subscription.
@@ -34,6 +35,13 @@ export function claudePermissionArgs(tools: Record<string, boolean>, map = CLAUD
     // enabled + sensitive, not auto-approved: routed to the approval prompt tool
   }
   return { allowed, disallowed };
+}
+
+/** 3.3: what a read-only helper may not use. Bash is out entirely: its sandbox confines writes to the working folder, which is a copy of the parent's, but a command can still change it. */
+export const CLAUDE_WRITE_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"];
+/** 3.3: the permission lists with every write tool taken out of the allowed list and put in the denied one. */
+export function claudeReadOnly(p: { allowed: string[]; disallowed: string[] }) {
+  return { allowed: p.allowed.filter((t) => !CLAUDE_WRITE_TOOLS.includes(t.replace(/\(.*$/, ""))) /* "Bash(ls)" is Bash too */, disallowed: [...new Set([...p.disallowed, ...CLAUDE_WRITE_TOOLS])] };
 }
 
 export class ClaudeCodeAdapter implements Adapter {
@@ -69,7 +77,7 @@ export class ClaudeCodeAdapter implements Adapter {
       }));
       args.push("--permission-prompt-tool", "mcp__agent-room__approval_prompt");
     }
-    const { allowed, disallowed } = claudePermissionArgs(req.agent.tools, s.toolMap, req.agent.autoApprove);
+    const { allowed, disallowed } = req.readOnly ? claudeReadOnly(claudePermissionArgs(req.agent.tools, s.toolMap, req.agent.autoApprove)) : claudePermissionArgs(req.agent.tools, s.toolMap, req.agent.autoApprove); // 3.3
     // 1.1: file tools reach the task folder only (cwd), never a bare `Read`/`Write` that would allow any path. See files/confine.ts.
     args.push("--allowedTools", ...scopeAllowedTools(allowed, req.cwd));
     if (disallowed.length) args.push("--disallowedTools", disallowed.join(","));
@@ -82,12 +90,14 @@ export class ClaudeCodeAdapter implements Adapter {
     let finalText = "", streamed = "", isError = false;
     let model: string | undefined, usage: RunResult["usage"];
     const bin = (req.agent.settings.binary as string) || "claude";
+    const native = req.onSubagent ? new NativeTracker(req.onSubagent) : undefined; // 3.3: subagents the run launches
     const r = await runProc(bin, this.buildArgs(req), {
       cwd: req.cwd, signal: req.signal, timeoutMs: 30 * 60_000,
       onLine: (line) => {
         if (!line.trim()) return;
         try {
           const ev = JSON.parse(line);
+          native?.claude(ev); // 3.3
           if (ev.type === "system" && ev.subtype === "init" && typeof ev.model === "string") model = ev.model;
           if (ev.type === "assistant") {
             for (const c of ev.message?.content ?? []) {
@@ -107,6 +117,7 @@ export class ClaudeCodeAdapter implements Adapter {
     });
     const text = finalText || streamed;
     const ok = r.code === 0 && !isError && !!text;
+    native?.finish(ok); // 3.3
     return { ok, text, durationMs: Date.now() - t0, error: ok ? undefined : (r.stderr || text || `exit ${r.code}`).slice(0, 2000), usage, model };
   }
 }
