@@ -7,6 +7,7 @@ import { Orchestrator } from "./orchestrator/orchestrator.js";
 import { buildServer } from "./api/server.js";
 import { seed } from "./seed.js";
 import { tailscaleIp } from "./net.js";
+import { connectTunnel } from "./relay/tunnel.js";
 
 // Apps launched from Finder get a thin PATH; make sure the agent CLIs are findable.
 const home = homedir();
@@ -38,3 +39,10 @@ Agent Room hub ${demo ? "(demo mode, mock agents)" : ""}
   Pair code:  ${code}   (valid 10 minutes, one use; restart for a new one)
   Data:       ${dataDir}
 Only localhost and Tailscale addresses are served.`);
+
+// Optional outbound relay: cloud agents reach /mcp through it; nothing on this Mac listens for the relay.
+const { AGENT_ROOM_RELAY_URL: relayUrl, AGENT_ROOM_RELAY_HUB_ID: relayHubId, AGENT_ROOM_RELAY_SECRET: relaySecret } = process.env;
+if (relayUrl && relayHubId && relaySecret) {
+  connectTunnel({ relayUrl, hubId: relayHubId, secret: relaySecret, localBase: `http://127.0.0.1:${port}` });
+  console.log(`Relay: dialing out to ${new URL(relayUrl).host} as hub "${relayHubId}" (exposes /mcp and /health only).`);
+}
