@@ -1,6 +1,6 @@
 import { useShallow } from "zustand/react/shallow";
 import React, { useCallback, useEffect, useState } from "react";
-import { Text, View } from "react-native";
+import { Alert, Text, View } from "react-native";
 import type { DiscoveryState, McpInvite } from "@agent-room/shared";
 import type { HermesConnectResult } from "../api/client";
 import { useRoom } from "../state/store";
@@ -27,7 +27,9 @@ export function Discovery({ invite = true }: { invite?: boolean }) {
   }, [hub]);
   const auto = async (v: boolean) => { try { setState(await hub!.saveDiscoverySettings(v)); if (v) await look(); } catch (e) { setErr((e as Error).message); } };
   const connect = async () => { try { setErr(undefined); setHermes(await hub!.connectHermes()); } catch (e) { setErr((e as Error).message); } };
-  const askInvite = async () => { try { setErr(undefined); setInv(await hub!.invite("muse")); } catch (e) { setErr((e as Error).message); } };
+  const askInvite = async (rotate = false) => { try { setErr(undefined); setInv(await hub!.invite("muse", rotate)); } catch (e) { setErr((e as Error).message); } };
+  const newKey = () => Alert.alert("Make a new key for Muse?", "The key Muse has stops working right away. Muse disconnects until you give it the new invite.",
+    [{ text: "Cancel", style: "cancel" }, { text: "Make a new key", style: "destructive", onPress: () => { void askInvite(true); } }]);
 
   const last = state?.last;
   const hasHermes = agents.some((a) => a.id === "hermes") && !!last?.agents.some((a) => a.id === "hermes" && a.installed);
@@ -43,7 +45,7 @@ export function Discovery({ invite = true }: { invite?: boolean }) {
         </Text>
         <View style={{ flexDirection: "row", gap: space(2), flexWrap: "wrap" }}>
           <Button small kind="plain" label={busy ? "Looking…" : "Look again"} onPress={look} disabled={busy} />
-          {invite ? <Button small kind="plain" label="Invite Muse" onPress={askInvite} /> : null}
+          {invite ? <Button small kind="plain" label="Invite Muse" onPress={() => void askInvite()} /> : null}
           {hasHermes ? <Button small kind="plain" label="Connect Hermes" onPress={connect} /> : null}
         </View>
         {err ? <Text style={[t.small, { color: p.danger }]}>{err}</Text> : null}
@@ -62,8 +64,19 @@ export function Discovery({ invite = true }: { invite?: boolean }) {
 
       {inv ? (
         <View style={{ padding: space(4), gap: space(2), borderTopWidth: 1, borderColor: p.line }}>
-          <Text style={[t.small, { color: p.muted }]}>Give this to {inv.name} on its own device. It is the only step.</Text>
-          <CodeBlock label={`Invite for ${inv.name}`} text={inv.block} />
+          {inv.tokenHidden ? (
+            <>
+              <Text style={[t.small, { color: p.inkStrong, fontWeight: "700" }]}>Key already handed out.</Text>
+              <Text style={[t.small, { color: p.muted }]}>A key is shown only once, when it is made, and {inv.name} still has it. Nothing was changed. If you lost it, make a new key. That stops the old one.</Text>
+              <View style={{ flexDirection: "row" }}><Button small kind="plain" label="Make a new key" onPress={newKey} /></View>
+              <CodeBlock label={`Invite for ${inv.name} (YOUR_KEY is where the key goes)`} text={inv.block} />
+            </>
+          ) : (
+            <>
+              <Text style={[t.small, { color: p.muted }]}>Give this to {inv.name} on its own device. It is the only step. Copy it now: the key is not shown again.</Text>
+              <CodeBlock label={`Invite for ${inv.name}`} text={inv.block} />
+            </>
+          )}
         </View>
       ) : null}
     </View>

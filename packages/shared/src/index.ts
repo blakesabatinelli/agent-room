@@ -922,7 +922,10 @@ export interface McpInvite {
   name: string;
   /** MCP URL on the tailnet (MagicDNS name when there is one). */
   url: string;
+  /** The new key, shown once. Empty when this agent's key was already handed out (see tokenHidden). */
   token: string;
+  /** True when the key was already handed out: nothing is replaced, and POST .../invite { rotate: true } makes a new one. */
+  tokenHidden?: boolean;
   /** Copy-paste text for the agent's owner: URL, header, and what to tell the agent. */
   block: string;
   /** The same standing instructions as the MCP connection screen. */
@@ -959,3 +962,11 @@ export interface SetupTimer {
   /** The first finished goal ran on practice agents, so it says nothing about a real first goal. */
   firstGoalPractice?: boolean;
 }
+
+// ---- 1.1 integration: what the apps read from the folder and write-proposal routes
+/** One row of GET /write-proposals: no diff (that is GET /write-proposals/:id), with its size instead. */
+export type WriteProposalSummary = Omit<WriteProposal, "diff"> & { diffBytes: number };
+/** POST /folder-grants/check: would this folder be accepted? Nothing is stored. */
+export type FolderCheck =
+  | { ok: true; root: string; protected: boolean; because?: string }
+  | { ok: false; error: string; canForce: boolean };

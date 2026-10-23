@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +8,8 @@ import vm from "node:vm";
 import { buildServer } from "../src/api/server.js";
 import { unifiedDiff } from "../src/files/diff.js";
 import {
-  findProposalForApproval, flattenDiff, isFileWriteApproval, needsScrollGate, parseUnifiedDiff, scrolledToEnd, type ParsedDiff,
+  fetchProposalForApproval, findProposalForApproval, flattenChange, flattenDiff, isFileWriteApproval, needsScrollGate, parseChangeDiff, parseUnifiedDiff, scrolledToEnd,
+  splitFileDiffs, type ParsedDiff,
 } from "../../shared/src/diff.js";
 import { setup } from "./helpers.js";
 
@@ -30,6 +31,8 @@ const web = (() => {
     parseUnifiedDiff(d: string): ParsedDiff; flattenDiff(d: ParsedDiff): unknown[];
     needsScrollGate(v: number, c: number, s?: number): boolean; scrolledToEnd(o: number, v: number, c: number, s?: number): boolean;
     isFileWriteApproval(a: { tool: string; action: string }): boolean; findProposalForApproval: typeof findProposalForApproval;
+    fetchProposalForApproval: typeof fetchProposalForApproval; splitFileDiffs: typeof splitFileDiffs; parseChangeDiff: typeof parseChangeDiff;
+    flattenChange(c: unknown): unknown[]; opWords(op: string): string;
   };
 })();
 const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x));
@@ -292,7 +295,10 @@ test("phone app: every route app.js calls is a route the hub registers, and the 
   assert.ok(has("GET", "/folder-grants"), "lists grants");
   assert.ok(has("POST", "/folder-grants"), "adds grants");
   assert.ok(has("DELETE", "/folder-grants/:param"), "removes grants");
-  assert.ok(has("GET", "/write-proposals"), "reads the full diffs");
+  assert.ok(has("PUT", "/folder-grants/:param"), "changes a grant in place");
+  assert.ok(has("POST", "/folder-grants/check"), "asks before adding");
+  assert.ok(has("GET", "/write-proposals/:param"), "reads one whole proposal");
+  assert.ok(has("GET", "/folder-grants"), "lists the folders a room can use");
   assert.ok(has("POST", "/approvals/:param"), "decides approvals");
   assert.ok(has("GET", "/approvals"), "lists approvals");
 });
@@ -316,7 +322,7 @@ test("phone app: serves diff.js before app.js, no inline styles or scripts, swit
 });
 
 test("a real file write: the phone app gets the whole diff and finds it from the approval", async (t) => {
-  const { app, base, h, orch, store, room } = await boot(); t.after(() => app.close());
+  const { app, base, h, orch, store, room, dir } = await boot(); t.after(() => app.close());
   const root = realpathSync(mkdtempSync(join(tmpdir(), "grant-ui-")));
   const original = lines(1200, (i) => `config ${i} = ${"v".repeat(40)}`);
   writeFileSync(join(root, "big.conf"), original);
@@ -342,21 +348,52 @@ test("a real file write: the phone app gets the whole diff and finds it from the
   assert.ok(isFileWriteApproval(approval));
   assert.match(approval.detail, /DIFF TRUNCATED/, "the preview really is cut");
 
-  const proposals = (await (await fetch(`${base}/write-proposals`, { headers: h })).json()) as { id: string; approvalId?: string; diff: string; status: string; agentId: string }[];
-  const found = findProposalForApproval(approval, proposals);
-  assert.ok(found, "found from the approval");
-  assert.equal(web.findProposalForApproval(approval, proposals)?.id, found!.id);
-  const d = parseUnifiedDiff(found!.diff);
+  // 1.1 hub: the list leaves the diff out, and one proposal comes whole by id
+  const proposals = (await (await fetch(`${base}/write-proposals`, { headers: h })).json()) as { id: string; approvalId?: string; diffBytes: number; status: string; agentId: string }[];
+  assert.equal(proposals.length, 1);
+  assert.ok(!("diff" in proposals[0]) && proposals[0].diffBytes > 8000, "no diff in the list, its size instead");
+  assert.equal(findProposalForApproval(approval, proposals)?.id, approval.proposalId, "the list still backs the guarded fallbacks");
+  type Whole = { id: string; diff: string; kind?: string; files?: { relPath: string; op: string }[]; skipped?: { relPath: string; reason: string }[]; unappliable?: string; relPath: string; status: string; agentId: string };
+  const one = async (id: string) => { const r = await fetch(`${base}/write-proposals/${id}`, { headers: h }); if (!r.ok) throw new Error(((await r.json()) as { error: string }).error); return (await r.json()) as Whole; };
+  // both copies of the app logic fetch the one proposal by the approval's proposalId, never the whole list
+  for (const fetchFor of [fetchProposalForApproval, web.fetchProposalForApproval]) {
+    const calls: string[] = [];
+    const got = (await fetchFor(approval, { one: async (id: string) => { calls.push(`one ${id}`); return one(id); }, list: async () => { calls.push("list"); return proposals; } })) as Whole;
+    assert.deepEqual(plain(calls), [`one ${approval.proposalId}`]);
+    assert.equal(got.id, approval.proposalId);
+    assert.ok(got.diff.length > 8000);
+  }
+  const found = await one(approval.proposalId!);
+  const d = parseUnifiedDiff(found.diff);
   assert.equal(d.problem, undefined);
   assert.ok(d.added >= 200 && d.added === d.removed, `${d.added} lines changed, all of them shown`);
   assert.ok(found!.diff.length > 8000, "longer than the preview");
   assert.equal(replay(original, d).next, next.replace(/\n$/, ""));
   assert.deepEqual(plain(web.parseUnifiedDiff(found!.diff)), plain(d));
+  const chg = parseChangeDiff(found.diff, found.files as { relPath: string; op: "create" | "edit" | "delete" }[]);
+  assert.equal(chg.problem, undefined);
+  assert.deepEqual([chg.sections.length, chg.added, chg.removed], [1, d.added, d.removed]);
+  assert.deepEqual(plain(web.parseChangeDiff(found.diff, found.files as never)), plain(chg));
 
   // approving through the same route the app uses applies the full change
   const ok = await fetch(`${base}/approvals/${approval.id}`, { method: "POST", headers: h, body: JSON.stringify({ decision: "approved" }) });
   assert.equal(ok.status, 200);
   await until(() => readFileSync(join(root, "big.conf"), "utf8") === next);
+
+  // a switch changes the grant in place (PUT), and only turning Write off drops what is waiting
+  const put = await fetch(`${base}/folder-grants/${grant.id}`, { method: "PUT", headers: h, body: JSON.stringify({ label: "Config files" }) });
+  assert.equal(put.status, 200);
+  assert.equal(((await put.json()) as { id: string; label: string }).id, grant.id, "same grant, same id");
+  // the Add button asks first: a normal folder is fine, the hub's own data folder needs an override, "/" never
+  const check = async (path: string) => (await (await fetch(`${base}/folder-grants/check`, { method: "POST", headers: h, body: JSON.stringify({ path }) })).json()) as { ok: boolean; protected?: boolean; because?: string; error?: string; canForce?: boolean };
+  assert.deepEqual([(await check(root)).ok, (await check(root)).protected], [true, false]);
+  const prot = await check(dir);
+  assert.deepEqual([prot.ok, prot.protected], [true, true], "the hub's own folder needs Grant anyway");
+  assert.match(prot.because ?? "", /data folder/);
+  const never = await check("/");
+  assert.equal(never.ok, false);
+  assert.equal(never.canForce, false);
+  assert.ok(never.error!.length > 10, "the hub says why, in words the app shows as they are");
 
   // removing the grant, as the Remove button does
   assert.equal((await fetch(`${base}/folder-grants/${grant.id}`, { method: "DELETE", headers: h })).status, 200);
@@ -373,15 +410,138 @@ test("Mac app: Folders is in the sidebar and the page map, approvals use the ful
   assert.match(read("components/Sidebar.tsx"), /label="Folders"[^\n]*isPage\("folders"\)[^\n]*page\("folders"\)/);
   assert.match(read("App.tsx"), /folders: <FoldersScreen/);
   const client = read("api/client.ts");
-  for (const m of ['"/folder-grants"', "`/folder-grants/${", '"/write-proposals"']) assert.ok(client.includes(m), `client calls ${m}`);
+  for (const m of ['"/folder-grants"', "`/folder-grants/${", '"/folder-grants/check"', '"PUT", `/folder-grants/${', '"/write-proposals"', "`/write-proposals/${"]) assert.ok(client.includes(m), `client calls ${m}`);
+  assert.match(client, /folderGrantId \? \{ text, folderGrantId \}/, "a goal can start on a folder");
   const approvals = read("screens/ApprovalsScreen.tsx");
-  assert.match(approvals, /findProposalForApproval/);
+  assert.match(approvals, /fetchProposalForApproval/, "one proposal by the approval's proposalId, with the guarded fallbacks");
   assert.match(approvals, /isFileWriteApproval/);
+  assert.match(approvals, /unappliable/);
+  assert.match(approvals, /skipped/);
   const viewer = read("components/DiffViewer.tsx");
   assert.match(viewer, /scrolledToEnd/);
   assert.match(viewer, /needsScrollGate/);
   assert.match(viewer, /FlatList/, "long diffs are virtualised");
   assert.match(viewer, /disabled=\{!canApprove\}/);
+  assert.match(viewer, /unappliable \? null : <Button label="Approve"/, "a change that can't be applied only gets Reject");
+  const folders = read("screens/FoldersScreen.tsx");
+  assert.match(folders, /updateFolderGrant\(g\.id, \{ \[key\]: value \}\)/, "a switch is a PUT, not add then delete");
+  assert.doesNotMatch(folders, /added\.id/, "no add-then-delete toggle");
+  assert.match(folders, /checkFolder\(/);
+  assert.match(folders, /Grant anyway/);
+  assert.match(folders, /reason\.trim\(\)\.length < 8/);
+  assert.match(folders, /force: true/);
+  const room = read("screens/RoomScreen.tsx");
+  assert.match(room, /Work in folder/);
+  assert.match(room, /g\.agentId === "\*" && g\.read && \(!g\.roomId \|\| g\.roomId === roomId\)/);
+  assert.match(room, /hub\.post\(roomId, v, folder\?\.id\)/);
+  const agents = read("screens/AgentsScreen.tsx");
+  assert.match(agents, /Key hidden\./);
+  assert.match(agents, /conn\.tokenHidden/);
+  assert.match(read("components/Discovery.tsx"), /inv\.tokenHidden/);
   for (const f of ["screens/FoldersScreen.tsx", "screens/ApprovalsScreen.tsx", "components/DiffViewer.tsx"]) assert.doesNotMatch(read(f), /—|–/, `${f}: no em or en dashes`);
   assert.match(read("screens/FoldersScreen.tsx"), /Writes always come to you as changes to approve\./);
+});
+
+// ---------- 1.1 integration: several files in one approval, a change that can't be applied, the phone and Mac rules on the same inputs
+
+test("a task's write-back: one approval, every file in order, each with its operation, and the skipped ones named", async (t) => {
+  const { app, base, h, orch, store, room } = await boot(); t.after(() => app.close());
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "grant-task-")));
+  writeFileSync(join(root, "keep.txt"), "line 1\nline 2\nline 3\n");
+  writeFileSync(join(root, "gone.txt"), "bye\nbye\n");
+  const grant = (await (await fetch(`${base}/folder-grants`, { method: "POST", headers: h, body: JSON.stringify({ path: root, agentId: "*", read: true, write: true }) })).json()) as { id: string };
+  const r = orch.files.proposeTask({
+    grantId: grant.id, agentId: "claude", roomId: room.id, goalId: "goal_1", taskId: "task_1", title: "Tidy the notes",
+    changes: [
+      { relPath: "keep.txt", content: Buffer.from("line 1\nLINE 2\nline 3\nline 4\n") },
+      { relPath: "docs/new.md", content: Buffer.from("# New\n\nhello\n") },
+      { relPath: "gone.txt", content: null },
+      { relPath: "logo.png", content: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 1]) },
+    ],
+  });
+  assert.equal(r.ok, true);
+  await until(() => store.listApprovals("pending").length === 1);
+  const approval = store.listApprovals("pending")[0];
+  assert.ok(isFileWriteApproval(approval), "a task approval opens the same full-diff view");
+  assert.match(approval.action, /^write 3 files from "Tidy the notes"$/);
+  const whole = (await (await fetch(`${base}/write-proposals/${approval.proposalId}`, { headers: h })).json()) as {
+    kind: string; diff: string; files: { relPath: string; op: "create" | "edit" | "delete" }[]; skipped?: { relPath: string; reason: string }[];
+  };
+  assert.equal(whole.kind, "task");
+  assert.deepEqual(whole.files.map((f) => `${f.op} ${f.relPath}`), ["create docs/new.md", "delete gone.txt", "edit keep.txt"]);
+  assert.deepEqual(whole.skipped?.map((x) => x.relPath), ["logo.png"], "the file that will not be written is listed, with a reason");
+  assert.ok(whole.skipped![0].reason.length > 5);
+
+  // the plain parser can't read several files; the change reader can, and the phone copy answers the same
+  assert.ok(parseUnifiedDiff(whole.diff).problem, "one-file reader refuses a many-file diff");
+  const chg = parseChangeDiff(whole.diff, whole.files);
+  assert.equal(chg.problem, undefined);
+  assert.deepEqual(chg.sections.map((x) => `${x.op} ${x.path}`), ["create docs/new.md", "delete gone.txt", "edit keep.txt"]);
+  assert.deepEqual([chg.added, chg.removed], [3 + 2, 2 + 1]);
+  assert.deepEqual(plain(web.parseChangeDiff(whole.diff, whole.files)), plain(chg));
+  assert.deepEqual(plain(web.flattenChange(chg)), plain(flattenChange(chg)));
+  const rows = flattenChange(chg);
+  assert.deepEqual(rows.filter((x) => x.type === "file").map((x) => (x as { path: string }).path), ["docs/new.md", "gone.txt", "keep.txt"]);
+  assert.equal(rows.filter((x) => x.type === "line").length, chg.sections.reduce((n, x) => n + x.parsed.lineCount, 0), "every line is there");
+  // a diff that doesn't match its file list is never approvable
+  assert.ok(parseChangeDiff(whole.diff, whole.files.slice(1)).problem);
+  assert.ok(parseChangeDiff(whole.diff.split("\n--- a/gone.txt")[0], whole.files).problem, "a diff cut short of a listed file");
+
+  const ok = await fetch(`${base}/approvals/${approval.id}`, { method: "POST", headers: h, body: JSON.stringify({ decision: "approved" }) });
+  assert.equal(ok.status, 200);
+  await until(() => readFileSync(join(root, "docs/new.md"), "utf8") === "# New\n\nhello\n");
+  assert.equal(readFileSync(join(root, "keep.txt"), "utf8"), "line 1\nLINE 2\nline 3\nline 4\n");
+});
+
+test("a change that can't be applied: the hub's reason comes with it, and the phone app and Mac app offer only Reject", async (t) => {
+  const { app, base, h, orch, store, room } = await boot(); t.after(() => app.close());
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "grant-bad-")));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), "grant-out-")));
+  mkdirSync(join(root, "d"));
+  symlinkSync(outside, join(root, "d", "link"));
+  const grant = (await (await fetch(`${base}/folder-grants`, { method: "POST", headers: h, body: JSON.stringify({ path: root, agentId: "claude", read: false, write: true }) })).json()) as { id: string };
+  const res = orch.files.proposeWrite("claude", room.id, "d/link/x.txt", "x\n", grant.id);
+  assert.equal(res.ok, true);
+  await until(() => store.listApprovals("pending").length === 1);
+  const approval = store.listApprovals("pending")[0];
+  const whole = (await (await fetch(`${base}/write-proposals/${approval.proposalId}`, { headers: h })).json()) as { unappliable?: string; diff: string; files: { relPath: string; op: "create" | "edit" | "delete" }[] };
+  assert.ok(whole.unappliable && whole.unappliable.length > 10, "the hub says why");
+  assert.match(appJs, /p\.unappliable \? null : h\("button"/, "phone: no Approve button for it");
+  assert.match(appJs, /p\.unappliable \? "" : `<button class="btn small" data-review/, "phone: no Review button on the card either");
+  assert.equal(parseChangeDiff(whole.diff, whole.files).sections.length, 1);
+  assert.equal(readFileSync(join(appSrc, "components/DiffViewer.tsx"), "utf8").includes("unappliable ? null : <Button"), true);
+});
+
+test("an approval whose proposalId is gone falls back to the guarded list, and says so when nothing matches", async () => {
+  for (const fetchFor of [fetchProposalForApproval, web.fetchProposalForApproval]) {
+    const P = (id: string, o: Record<string, unknown> = {}) => ({ id, agentId: "claude", status: "pending", ...o });
+    const A = (o: Record<string, unknown> = {}) => ({ id: "ap_1", agentId: "claude", detail: "", ...o });
+    const api = (list: ReturnType<typeof P>[], gone: string[] = []) => ({
+      one: async (id: string) => { if (gone.includes(id)) throw new Error("Proposal not found."); return { ...P(id), diff: "x" }; },
+      list: async () => list,
+    });
+    // linked by the proposal's own approvalId after the id the approval carries is gone
+    assert.equal((await fetchFor(A({ proposalId: "wp_gone" }), api([P("wp_b", { approvalId: "ap_1" })], ["wp_gone"])))?.id, "wp_b");
+    // nothing links and the id is unknown: the error is the one the hub gave, not a silent empty
+    await assert.rejects(() => fetchFor(A({ proposalId: "wp_gone" }), api([P("wp_other")], ["wp_gone"])) as Promise<unknown>, /Proposal not found/);
+    // no id at all and nothing in the list: no proposal, so no Approve
+    assert.equal(await fetchFor(A(), api([P("wp_other")])), undefined);
+    // the preview text link is still guarded against another agent's proposal
+    assert.equal(await fetchFor(A({ detail: "Write proposal wp_a: x" }), api([P("wp_a", { agentId: "codex" })])), undefined);
+  }
+});
+
+test("phone app: the folder picker, Grant anyway, PUT switches and the one-proposal fetch are really in app.js and the page", () => {
+  const html = readFileSync(join(webDir, "index.html"), "utf8");
+  assert.match(html, /id="folderPick"/);
+  assert.match(appJs, /folderGrantId: st\.folderId/, "the picked folder goes with the message");
+  assert.match(appJs, /`\/folder-grants\?roomId=\$\{encodeURIComponent\(id\)\}`/);
+  assert.match(appJs, /st\.roomGrants = gs\.filter\(\(g\) => g\.agentId === "\*" && g\.read\)/);
+  assert.match(appJs, /method: "PUT", body: \{ \[key\]: value \}/);
+  assert.doesNotMatch(appJs, /added\.id/, "no add-then-delete toggle");
+  assert.match(appJs, /"\/folder-grants\/check"/);
+  assert.match(appJs, /Grant anyway/);
+  assert.match(appJs, /reason\.trim\(\)\.length < 8/);
+  assert.match(appJs, /force: true, reason: f\.override\.reason\.trim\(\)/);
+  assert.match(appJs, /fetchProposalForApproval\(a, \{ one: \(id\) => api\(`\/write-proposals\/\$\{id\}`\)/);
 });

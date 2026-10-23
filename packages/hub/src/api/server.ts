@@ -23,7 +23,7 @@ import { defaultTailscale, type Tailscale } from "../remote/tailscale.js";
 import { AuthLimiter, forwardedIp, isRemoteRequest, rpcSummary } from "../remote/guard.js";
 import { composeRemote, remoteHost } from "../remote/status.js";
 import { DiscoveryService } from "../discovery/service.js"; // 1.3
-import { ensureMcpToken } from "../discovery/tokens.js"; // 1.3
+import { issueKey } from "../discovery/tokens.js"; // 1.3
 import { buildInvite, presetAgent } from "../discovery/invite.js"; // 1.3
 import { emptyCapabilities, cleanNeeds } from "../discovery/connectors.js"; // 1.3
 import { platformBlock } from "../discovery/apply.js"; // 1.3
@@ -533,7 +533,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   });
 
   // ---------- 1.3 agent discovery, Muse's pairing step, declared data sources
-  const discovery = discoveryDep ?? new DiscoveryService(store, { control: () => orch.control, mcpUrl: () => `http://127.0.0.1:${port()}/mcp` });
+  const discovery = discoveryDep ?? new DiscoveryService(store, { control: () => orch.control, mcpUrl: () => `http://127.0.0.1:${port()}/mcp`, tokens: mcpTokens });
   app.decorate("discovery", discovery);
   app.get("/discovery", async () => discovery.state());
   app.post("/discovery/run", async () => { await discovery.run(); return discovery.state(); });
@@ -559,8 +559,11 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     }
     const host = remoteHost(await tailscale.status());
     if (!host) return reply.code(409).send({ error: `${a.name} joins from another device over Tailscale, and Tailscale isn't connected on this Mac yet. Connect it under Remote access, then ask again.` });
-    const { token: t } = ensureMcpToken(store, a, "owner");
-    const conn = await connectionFor(a, t);
+    // Keys are stored as hashes (1.1): the first invite makes the key and shows it once. A second one says so and leaves the key
+    // alone, because a new key would cut off an agent that is already connected. { rotate: true } is the owner's "make a new key".
+    const rotate = (req.body as { rotate?: boolean } | undefined)?.rotate === true;
+    const k = issueKey(mcpTokens, a, { rotate, actor: "owner" });
+    const conn = await connectionFor(a, k.token);
     store.audit("owner", "agent.invite", a.id);
     return buildInvite(a, conn, conn.tailscaleUrl ?? `http://${host}:${port()}/mcp`);
   });

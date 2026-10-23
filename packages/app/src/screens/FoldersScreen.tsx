@@ -1,7 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
 import React, { useCallback, useEffect, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import type { FolderGrant, WriteProposal } from "@agent-room/shared";
+import type { FolderGrant, WriteProposalSummary } from "@agent-room/shared";
 import { useRoom } from "../state/store";
 import { Button, Empty, Field, Screen, Section, Toggle } from "../components/ui";
 import { launcher } from "../native/hub";
@@ -34,7 +34,7 @@ export function FoldersScreen() {
   const p = usePalette();
   const { hub, rooms, agents } = useRoom(useShallow((s) => ({ hub: s.hub, rooms: s.rooms, agents: s.agents })));
   const [grants, setGrants] = useState<FolderGrant[] | undefined>();
-  const [proposals, setProposals] = useState<WriteProposal[]>([]);
+  const [proposals, setProposals] = useState<WriteProposalSummary[]>([]);
   const [loadError, setLoadError] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<string | undefined>();
@@ -48,11 +48,13 @@ export function FoldersScreen() {
   const [write, setWrite] = useState(false);   // writes are off until the owner turns them on
   const [formError, setFormError] = useState("");
   const [adding, setAdding] = useState(false);
+  // A folder the hub normally refuses (credentials, settings, system) can still be shared on purpose, with a written reason.
+  const [override, setOverride] = useState<{ because?: string; reason: string } | undefined>();
 
   const load = useCallback(async () => {
     if (!hub) return;
     try {
-      const [g, pr] = await Promise.all([hub.folderGrants(), hub.writeProposals().catch(() => [] as WriteProposal[])]);
+      const [g, pr] = await Promise.all([hub.folderGrants(), hub.writeProposals().catch(() => [] as WriteProposalSummary[])]);
       setGrants(g); setProposals(pr); setLoadError("");
     } catch (e) { setLoadError((e as Error).message); setGrants((cur) => cur ?? []); }
   }, [hub]);
@@ -63,18 +65,14 @@ export function FoldersScreen() {
   const pendingFor = (g: FolderGrant) => proposals.filter((x) => x.grantId === g.id && x.status === "pending").length;
   const sorted = [...(grants ?? [])].sort((a, b) => a.path.localeCompare(b.path) || (a.roomId ?? "").localeCompare(b.roomId ?? "") || a.agentId.localeCompare(b.agentId) || a.createdAt - b.createdAt);
 
-  // The hub has no "edit" for a grant, so a switch adds the changed grant first and then removes the old one.
-  // Writes the agent had waiting from the old grant are dropped; it can ask again.
+  // One call changes the grant in place (PUT /folder-grants/:id). Only turning Write off drops the writes waiting on it; the agent can ask again.
   const setAccess = async (g: FolderGrant, key: "read" | "write", value: boolean) => {
     if (!hub) return;
     const next = { read: g.read, write: g.write, [key]: value };
     if (!next.read && !next.write) { setNote("A folder needs Read or Write. Remove it to stop all access."); return; }
     setBusy(g.id); setNote(""); setAsk(undefined);
-    try {
-      const added = await hub.addFolderGrant({ path: g.path, label: g.label, roomId: g.roomId, agentId: g.agentId, ...next });
-      try { await hub.removeFolderGrant(g.id); } catch (e) { await hub.removeFolderGrant(added.id).catch(() => {}); throw e; }
-      await load();
-    } catch (e) { setNote((e as Error).message); } finally { setBusy(undefined); }
+    try { await hub.updateFolderGrant(g.id, { [key]: value }); await load(); }
+    catch (e) { setNote((e as Error).message); } finally { setBusy(undefined); }
   };
   const remove = async (g: FolderGrant) => {
     if (!hub) return;
@@ -82,24 +80,35 @@ export function FoldersScreen() {
     try { await hub.removeFolderGrant(g.id); await load(); } catch (e) { setNote((e as Error).message); } finally { setBusy(undefined); }
   };
   const toggle = (g: FolderGrant, key: "read" | "write", value: boolean) => {
-    if (pendingFor(g) > 0) setAsk({ id: g.id, kind: key, value }); else void setAccess(g, key, value);
+    if (key === "write" && !value && pendingFor(g) > 0) setAsk({ id: g.id, kind: key, value }); else void setAccess(g, key, value);
   };
 
   const choose = async () => {
     try { const picked = await launcher?.chooseFolder?.(); if (picked) { setPath(picked); setFormError(""); } }
     catch (e) { setFormError((e as Error).message); }
   };
-  const add = async () => {
+  const cap = (m: string) => m.charAt(0).toUpperCase() + m.slice(1);
+  const reset = () => { setPath(""); setLabel(""); setRoomId(""); setAgentId("*"); setRead(true); setWrite(false); setOverride(undefined); };
+  /** Ask the hub first (POST /folder-grants/check). A folder that needs an override gets the reason box; a folder that is never allowed gets plain words. */
+  const add = async (force?: { reason: string }) => {
     if (!hub) return;
     if (!path.trim()) { setFormError("Type the folder's full path, like /Users/you/Documents/notes."); return; }
     if (!read && !write) { setFormError("Turn on Read, Write or both."); return; }
     setAdding(true); setFormError("");
     try {
-      await hub.addFolderGrant({ path: path.trim(), label: label.trim() || undefined, roomId: roomId || undefined, agentId, read, write });
-      setPath(""); setLabel(""); setRoomId(""); setAgentId("*"); setRead(true); setWrite(false);
+      if (!force) {
+        const c = await hub.checkFolder(path.trim());
+        if (!c.ok) { setFormError(cap(c.error)); setOverride(c.canForce ? { reason: override?.reason ?? "" } : undefined); return; }
+        if (c.protected) { setOverride({ because: c.because, reason: override?.reason ?? "" }); return; }
+      }
+      await hub.addFolderGrant({ path: path.trim(), label: label.trim() || undefined, roomId: roomId || undefined, agentId, read, write, ...(force ? { force: true, reason: force.reason.trim() } : {}) });
+      reset();
       await load();
-    } catch (e) { const m = (e as Error).message; setFormError(m.charAt(0).toUpperCase() + m.slice(1)); }   // the hub says why a folder can't be shared (home folder, credentials, not found)
-    finally { setAdding(false); }
+    } catch (e) {
+      const err = e as Error & { canForce?: boolean; because?: string };
+      setFormError(cap(err.message));   // the hub says why a folder can't be shared (home folder, credentials, not found)
+      setOverride(err.canForce ? { because: err.because, reason: override?.reason ?? "" } : undefined);
+    } finally { setAdding(false); }
   };
 
   const plural = (n: number) => `${n} change${n === 1 ? " is" : "s are"}`;
@@ -127,7 +136,7 @@ export function FoldersScreen() {
                 {asked ? (
                   <>
                     <Text style={[t.small, { color: p.warn }]}>
-                      {asked.kind === "remove" ? "Agents lose access right away." : `${plural(pending)} waiting for your approval from this folder. Changing this drops ${pending === 1 ? "it" : "them"}, and the agent can ask again.`}
+                      {asked.kind === "remove" ? "Agents lose access right away." : `${plural(pending)} waiting for your approval from this folder. Turning Write off drops ${pending === 1 ? "it" : "them"}, and the agent can ask again.`}
                       {asked.kind === "remove" && pending ? ` ${plural(pending)} waiting for approval and will be dropped.` : ""}
                     </Text>
                     <View style={{ flexDirection: "row", gap: space(2) }}>
@@ -148,7 +157,7 @@ export function FoldersScreen() {
 
         <Section title="Add a folder" hint="Pick who can use it and what they can do.">
           <View style={{ padding: space(4) }}>
-            <Field label="Folder on this Mac" value={path} onChangeText={(v) => { setPath(v); setFormError(""); }} placeholder="/Users/you/Documents/notes"
+            <Field label="Folder on this Mac" value={path} onChangeText={(v) => { setPath(v); setFormError(""); setOverride(undefined); }} placeholder="/Users/you/Documents/notes"
               autoCapitalize="none" autoCorrect={false} onSubmitEditing={() => void add()}
               hint={launcher?.chooseFolder ? undefined : "Type the full path. The Choose button isn't available in this build."} />
             {launcher?.chooseFolder ? <View style={{ flexDirection: "row", marginTop: -space(2), marginBottom: space(4) }}><Button small kind="plain" label="Choose…" onPress={() => void choose()} /></View> : null}
@@ -160,7 +169,19 @@ export function FoldersScreen() {
               <Toggle label="Write" hint="Agents can propose changes. Writes always come to you as changes to approve." value={write} onChange={setWrite} />
             </View>
             {formError ? <Text style={[t.small, { color: p.danger, marginBottom: space(3) }]}>{formError}</Text> : null}
-            <View style={{ flexDirection: "row" }}><Button label={adding ? "Adding…" : "Add folder"} disabled={adding || !path.trim()} onPress={() => void add()} /></View>
+            {override ? (
+              <View style={{ gap: space(2), marginBottom: space(4), padding: space(3), borderWidth: 1, borderColor: p.warn, borderRadius: radius.lg }}>
+                <Text style={[t.small, { color: p.inkStrong, fontWeight: "700" }]}>{override.because ? `This folder is normally kept private: ${override.because}.` : "This folder is normally kept private."}</Text>
+                <Text style={[t.small, { color: p.muted }]}>Share it only if you mean to. Say why, in a sentence. It goes in the audit log.</Text>
+                <Field label="Why share it?" value={override.reason} onChangeText={(v) => setOverride({ because: override.because, reason: v })} placeholder="For example: my notes app keeps its files here" multiline />
+                <View style={{ flexDirection: "row", gap: space(2) }}>
+                  <Button kind="danger" label={adding ? "Adding…" : "Grant anyway"} disabled={adding || override.reason.trim().length < 8} onPress={() => void add({ reason: override.reason })} />
+                  <Button kind="plain" label="Cancel" onPress={() => { setOverride(undefined); setFormError(""); }} />
+                </View>
+                {override.reason.trim().length < 8 ? <Text style={[t.tiny, { color: p.faint }]}>At least 8 characters.</Text> : null}
+              </View>
+            ) : null}
+            {override ? null : <View style={{ flexDirection: "row" }}><Button label={adding ? "Checking…" : "Add folder"} disabled={adding || !path.trim()} onPress={() => void add()} /></View>}
           </View>
         </Section>
       </ScrollView>

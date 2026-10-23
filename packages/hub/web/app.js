@@ -14,8 +14,11 @@
     online: false, ws: null, wsDelay: 1000,
     capacity: null,
     // 1.1 file access: folder grants, the write proposals behind file approvals (full diffs), and the approval open for review
-    grants: null, proposals: null, proposalsErr: "", reviewId: "",
-    gform: { path: "", label: "", roomId: "", agentId: "*", read: true, write: false, err: "", busy: false },
+    // `proposals` is the diff-less list (for the Folders screen); `full` holds each approval's whole proposal, fetched by id
+    grants: null, proposals: null, proposalsErr: "", reviewId: "", full: {}, fullErr: {}, fullLoading: {},
+    gform: { path: "", label: "", roomId: "", agentId: "*", read: true, write: false, err: "", busy: false, override: null },
+    // a goal can work in a granted folder: the grants this room can use, the one picked, and whether the picker is open
+    roomGrants: [], folderId: "", folderOpen: false,
   };
 
   // ---------- helpers
@@ -47,7 +50,7 @@
     });
     const body = await res.json().catch(() => ({}));
     if (res.status === 401 && path !== "/pair") { signOut("This phone isn't paired anymore. Pair it again."); throw new Error("unpaired"); }
-    if (!res.ok) throw new Error(body.error || `The hub returned ${res.status}.`);
+    if (!res.ok) throw Object.assign(new Error(body.error || `The hub returned ${res.status}.`), { canForce: body.canForce === true, because: body.because, code: body.code });
     return body;
   }
 
@@ -203,6 +206,8 @@
     if (!keepScroll) st.readAt = mark.at; // frozen for this visit so the "New" line stays put
     st.messages = msgs; for (const g of goals) st.goals[g.id] = g;
     renderMessages(); renderComposerState();
+    // 1.1: folders this room's goals can work in (open to every agent and readable). The hub checks again when the message is sent.
+    api(`/folder-grants?roomId=${encodeURIComponent(id)}`).then((gs) => { if (st.roomId === id) { st.roomGrants = gs.filter((g) => g.agentId === "*" && g.read); renderFolderPick(); } }).catch(() => {});
     const last = msgs[msgs.length - 1]; if (last) markRead(id, last.createdAt);
   }
 
@@ -210,7 +215,7 @@
   function go(view, roomId) {
     st.view = view;
     $("#jumpNew").hidden = true;
-    if (view === "room") { st.roomId = roomId; st.messages = []; st.readAt = 0; st.positioned = ""; st.unread.delete(roomId); }
+    if (view === "room") { st.roomId = roomId; st.messages = []; st.readAt = 0; st.positioned = ""; st.unread.delete(roomId); st.roomGrants = []; st.folderId = ""; st.folderOpen = false; }
     else st.roomId = "";
     render();
     if (view === "room") loadRoom(roomId).catch((e) => { if (e.message !== "unpaired") toast(e.message); });
@@ -305,40 +310,52 @@
   }
 
   // ---------- 1.1 file writes: the full diff, read to the end before Approve
-  const proposalFor = (a) => (st.proposals ? ARDiff.findProposalForApproval(a, st.proposals) : undefined);
+  const proposalFor = (a) => st.full[a.id];
   const agentName = (id) => st.agents[id]?.name || id;
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  // A task writes several files: what each does, and the ones that will not be written.
+  const fileList = (p) => (p.kind === "task" && p.files?.length ? `<div class="detail">${p.files.map((f) => `${esc(ARDiff.opWords(f.op))}: ${esc(f.relPath)}`).join("\n")}</div>` : "");
+  const skippedList = (p) => (p.skipped?.length ? `<div class="detail warn">${esc(plural(p.skipped.length, "file", "files"))} won't be written:\n${p.skipped.map((x) => `${esc(x.relPath)}: ${esc(x.reason)}`).join("\n")}</div>` : "");
+  const proposalTitle = (p) => (p.kind === "task" ? `write ${plural(p.files?.length || 0, "file", "files")} from "${p.title || "a task"}"` : `${p.baseSha256 ? "change" : "create"} ${p.relPath}`);
 
   function fileApprovalCard(a) {
     const p = proposalFor(a);
     const who = esc(agentName(a.agentId));
     const reject = `<button class="btn small plain" data-approval="${esc(a.id)}" data-decision="rejected">Reject</button>`;
     if (!p) {
-      const msg = st.proposalsLoading ? "Loading the full change…" : st.proposalsErr ? `Can't load the full change: ${esc(st.proposalsErr)}` : "The full change isn't available, so it can't be approved here. You can reject it.";
+      const loading = st.fullLoading[a.id], err = st.fullErr[a.id];
+      const msg = loading || (!err && !triedProposals.has(a.id)) ? "Loading the full change…" : err ? `Can't load the full change: ${esc(err)}` : "The full change isn't available, so it can't be approved here. You can reject it.";
       return `<div class="card"><div class="what">${who} wants to ${esc(a.action)}</div><div class="detail">${msg}</div>
-        <div class="actions">${st.proposalsLoading ? "" : `<button class="btn small plain" data-reload="proposals">Try again</button>`}${reject}</div></div>`;
+        <div class="actions">${loading ? "" : `<button class="btn small plain" data-reload="proposals">Try again</button>`}${reject}</div></div>`;
     }
-    const d = ARDiff.parseUnifiedDiff(p.diff);
-    return `<div class="card"><div class="what">${who} wants to ${p.baseSha256 ? "change" : "create"} ${esc(p.relPath)}</div>
-      <div class="detail"><span class="plus">+${d.added}</span> <span class="minus">-${d.removed}</span> in ${d.hunks.length} ${d.hunks.length === 1 ? "place" : "places"}. Open the full change to approve it.</div>
+    const d = ARDiff.parseChangeDiff(p.diff, p.files);
+    return `<div class="card"><div class="what">${who} wants to ${esc(proposalTitle(p))}</div>
+      <div class="detail"><span class="plus">+${d.added}</span> <span class="minus">-${d.removed}</span> in ${plural(d.places, "place", "places")}.${p.unappliable ? "" : " Open the full change to approve it."}</div>
+      ${fileList(p)}${skippedList(p)}
+      ${p.unappliable ? `<div class="detail warn">Can't be applied: ${esc(p.unappliable)}</div>` : ""}
       ${d.problem ? `<div class="detail warn">${esc(d.problem)}</div>` : ""}
-      <div class="actions"><button class="btn small" data-review="${esc(a.id)}">Review change</button>${reject}</div></div>`;
+      <div class="actions">${p.unappliable ? "" : `<button class="btn small" data-review="${esc(a.id)}">Review change</button>`}${reject}</div></div>`;
   }
 
-  // The full diffs come from the hub's list of write proposals. Fetched when a file approval has no diff yet, once per approval.
+  // The full change is one proposal, fetched by the approval's proposalId (GET /write-proposals/:id), once per approval.
+  // The list route has no diffs; it only backs the guarded fallbacks in ARDiff.fetchProposalForApproval.
   const triedProposals = new Set();
   function wantProposals() {
-    const missing = st.approvals.filter((a) => ARDiff.isFileWriteApproval(a) && !proposalFor(a) && !triedProposals.has(a.id));
-    if (!missing.length || st.proposalsLoading) return;
-    for (const a of missing) triedProposals.add(a.id);
-    void loadProposals();
+    for (const a of st.approvals) {
+      if (!ARDiff.isFileWriteApproval(a) || proposalFor(a) || triedProposals.has(a.id) || st.fullLoading[a.id]) continue;
+      triedProposals.add(a.id);
+      void loadFull(a);
+    }
   }
 
-  async function loadProposals() {
-    st.proposalsErr = ""; st.proposalsLoading = true;
-    try { st.proposals = await api("/write-proposals"); }
-    catch (e) { if (e.message === "unpaired") return; st.proposalsErr = e.message; }
-    finally { st.proposalsLoading = false; }
-    if (st.view === "approvals") renderApprovals(); else if (st.view === "diff") renderReview(); else if (st.view === "folders") paintGrantList();
+  async function loadFull(a) {
+    delete st.fullErr[a.id]; st.fullLoading[a.id] = true;
+    try {
+      const p = await ARDiff.fetchProposalForApproval(a, { one: (id) => api(`/write-proposals/${id}`), list: () => api("/write-proposals") });
+      if (p) st.full[a.id] = p;
+    } catch (e) { if (e.message === "unpaired") return; st.fullErr[a.id] = e.message; }
+    finally { st.fullLoading[a.id] = false; }
+    if (st.view === "approvals") renderApprovals(); else if (st.view === "diff") renderReview();
   }
 
   const h = (tag, props, ...kids) => {
@@ -362,28 +379,34 @@
     if (!a) { view.replaceChildren(h("div", { class: "empty", text: "This one was already decided." })); review = null; return; }
     const p = proposalFor(a);
     if (!p) {
-      view.replaceChildren(h("div", { class: "empty", text: st.proposalsLoading ? "Loading the full change…" : st.proposalsErr ? `Can't load the full change: ${st.proposalsErr}` : "The full change isn't available, so it can't be approved here." }),
-        h("div", { class: "actions pad" }, st.proposalsLoading ? null : h("button", { class: "btn small plain", "data-reload": "proposals", text: "Try again" }),
+      const loading = st.fullLoading[a.id], err = st.fullErr[a.id];
+      view.replaceChildren(h("div", { class: "empty", text: loading ? "Loading the full change…" : err ? `Can't load the full change: ${err}` : "The full change isn't available, so it can't be approved here." }),
+        h("div", { class: "actions pad" }, loading ? null : h("button", { class: "btn small plain", "data-reload": "proposals", text: "Try again" }),
           h("button", { class: "btn small plain", "data-approval": a.id, "data-decision": "rejected", text: "Reject" })));
       wantProposals();
       review = null; return;
     }
-    const d = ARDiff.parseUnifiedDiff(p.diff);
-    const rows = ARDiff.flattenDiff(d);
+    const d = ARDiff.parseChangeDiff(p.diff, p.files);
+    const rows = ARDiff.flattenChange(d);
+    const task = p.kind === "task";
+    const title = task ? `${plural(p.files?.length || 0, "file", "files")} from "${p.title || "a task"}"` : p.relPath;
     const head = h("div", { class: "dv-head" },
-      h("div", { class: "dv-path", text: p.relPath }),
-      h("div", { class: "dv-sub" }, `${agentName(a.agentId)} ${p.baseSha256 ? "wants to change this file" : "wants to create this file"}. `,
-        h("span", { class: "plus", text: `+${d.added}` }), " ", h("span", { class: "minus", text: `-${d.removed}` }), ` in ${d.hunks.length} ${d.hunks.length === 1 ? "place" : "places"}.`),
+      h("div", { class: "dv-path", text: title }),
+      h("div", { class: "dv-sub" }, task ? `${agentName(a.agentId)} finished this task and wants to write its files to your folder. ` : `${agentName(a.agentId)} ${p.baseSha256 ? "wants to change this file" : "wants to create this file"}. `,
+        h("span", { class: "plus", text: `+${d.added}` }), " ", h("span", { class: "minus", text: `-${d.removed}` }), ` in ${plural(d.places, "place", "places")}${d.sections.length > 1 ? ` across ${d.sections.length} files` : ""}.`),
+      p.unappliable ? h("div", { class: "detail warn", text: `Can't be applied: ${p.unappliable}` }) : null,
+      p.skipped?.length ? h("div", { class: "detail warn", text: `${plural(p.skipped.length, "file", "files")} won't be written:\n${p.skipped.map((x) => `${x.relPath}: ${x.reason}`).join("\n")}` }) : null,
       d.problem ? h("div", { class: "detail warn", text: d.problem }) : null);
-    const body = h("div", { class: "dv-body", role: "region", "aria-label": `Changes to ${p.relPath}` });
+    const body = h("div", { class: "dv-body", role: "region", "aria-label": `Changes to ${title}` });
     const hint = h("div", { class: "dv-hint" });
-    const approve = h("button", { class: "btn small", "data-approval": a.id, "data-decision": "approved", text: "Approve", disabled: true });
+    // A change the hub says can't be applied only gets Reject.
+    const approve = p.unappliable ? null : h("button", { class: "btn small", "data-approval": a.id, "data-decision": "approved", text: "Approve", disabled: true });
     const reject = h("button", { class: "btn small plain", "data-approval": a.id, "data-decision": "rejected", text: "Reject" });
     const bar = h("div", { class: "dv-bar" }, hint, h("div", { class: "actions" }, approve, reject));
     const more = h("div", { class: "dv-more", hidden: true, text: "Loading more…" });
     view.replaceChildren(head, body, more, bar);
     view.scrollTop = 0;
-    review = { approvalId: a.id, rows, shown: 0, problem: d.problem, body, more, approve, hint, view, done: false };
+    review = { approvalId: a.id, rows, shown: 0, problem: d.problem || (p.unappliable ? "unappliable" : undefined), body, more, approve, hint, view, done: false };
     appendRows();
     // Fits on one screen: nothing to scroll, so nothing to gate. Otherwise the owner reads to the end first.
     requestAnimationFrame(updateGate);
@@ -396,6 +419,7 @@
     const upto = Math.min(r.rows.length, r.shown + ROWS_PER_CHUNK);
     for (let i = r.shown; i < upto; i++) {
       const row = r.rows[i];
+      if (row.type === "file") { frag.append(h("div", { class: `dl file ${row.op}` }, h("span", { class: "fp", text: row.path }), h("span", { class: "fo" }, `${ARDiff.opWords(row.op)} `, h("span", { class: "plus", text: `+${row.added}` }), " ", h("span", { class: "minus", text: `-${row.removed}` })))); continue; }
       if (row.type === "hunk") { frag.append(h("div", { class: "dl hunk", text: row.header })); continue; }
       const L = row.line;
       frag.append(h("div", { class: `dl ${L.kind}` },
@@ -418,7 +442,7 @@
     const atEnd = allShown && ARDiff.scrolledToEnd(v.scrollTop, v.clientHeight, v.scrollHeight);
     if (atEnd || (!gated && allShown)) r.done = true;   // once read to the end it stays read
     const ok = r.done && !r.problem && allShown;
-    r.approve.disabled = !ok;
+    if (r.approve) r.approve.disabled = !ok;
     r.hint.textContent = r.problem ? "This change can't be approved here. You can reject it." : ok ? "You've seen the whole change." : "Scroll to the end to approve.";
   }
 
@@ -440,7 +464,15 @@
       sw("gfRead", "Read", "Agents can look at files here.", form.read),
       sw("gfWrite", "Write", "Agents can propose changes. Writes always come to you as changes to approve.", form.write),
       h("div", { class: "err", id: "gfErr", role: "alert", text: form.err }),
-      h("button", { class: "btn", type: "submit", id: "gfAdd", text: "Add folder", disabled: form.busy }));
+      form.override ? h("div", { class: "override", id: "gfOverride" },
+        h("div", { class: "ot", text: form.override.because ? `This folder is normally kept private: ${form.override.because}.` : "This folder is normally kept private." }),
+        h("div", { class: "oh", text: "Share it only if you mean to. Say why, in a sentence. It goes in the audit log." }),
+        field("gfReason", "Why share it?", h("input", { id: "gfReason", "data-gform": "gfReason", value: form.override.reason, maxLength: 300, placeholder: "For example: my notes app keeps its files here", autocomplete: "off" })),
+        h("div", { class: "actions" },
+          h("button", { class: "btn danger small", type: "button", id: "gfForce", "data-gform-force": "1", text: "Grant anyway", disabled: form.busy || form.override.reason.trim().length < 8 }),
+          h("button", { class: "btn plain small", type: "button", "data-gform-cancel": "1", text: "Cancel" })),
+        h("div", { class: "oh", id: "gfMin", text: "At least 8 characters.", hidden: form.override.reason.trim().length >= 8 })) : null,
+      h("button", { class: "btn", type: "submit", id: "gfAdd", text: form.busy ? "Checking…" : "Add folder", disabled: form.busy, hidden: !!form.override }));
     v.replaceChildren(
       h("div", { class: "card" }, h("div", { class: "what", text: "Folders agents can use" }), h("div", { class: "detail", text: "Agents can read files here. Writes always come to you as changes to approve." })),
       h("div", { id: "grantList" }), f);
@@ -481,22 +513,17 @@
     }));
   }
 
-  // The hub has no "edit" for a grant, so a switch adds the changed grant first and then removes the old one.
-  // Anything the agent had waiting for approval from the old grant is dropped; it can ask again.
+  // One call changes the grant in place. Only turning Write off drops the writes waiting on it; the agent can ask again.
   async function setGrantAccess(input) {
     const g = st.grants.find((x) => x.id === input.dataset.grant); if (!g) return;
     const key = input.dataset.access, value = input.checked;
     const next = { read: g.read, write: g.write, [key]: value };
     if (!next.read && !next.write) { input.checked = !value; toast("A folder needs Read or Write. Remove it to stop all access."); return; }
     const n = pendingFor(g);
-    if (n && !confirm(`${n} change${n === 1 ? " is" : "s are"} waiting for your approval from this folder. Changing this drops ${n === 1 ? "it" : "them"}, and the agent can ask again. Continue?`)) { input.checked = !value; return; }
+    if (key === "write" && !value && n && !confirm(`${n} change${n === 1 ? " is" : "s are"} waiting for your approval from this folder. Turning Write off drops ${n === 1 ? "it" : "them"}, and the agent can ask again. Continue?`)) { input.checked = !value; return; }
     input.disabled = true;
-    try {
-      const added = await api("/folder-grants", { method: "POST", body: { path: g.path, label: g.label, roomId: g.roomId, agentId: g.agentId, read: next.read, write: next.write } });
-      try { await api(`/folder-grants/${g.id}`, { method: "DELETE" }); }
-      catch (e) { await api(`/folder-grants/${added.id}`, { method: "DELETE" }).catch(() => {}); throw e; }
-      await loadGrants();
-    } catch (e) { input.checked = !value; input.disabled = false; if (e.message !== "unpaired") toast(e.message); }
+    try { await api(`/folder-grants/${g.id}`, { method: "PUT", body: { [key]: value } }); await loadGrants(); }
+    catch (e) { input.checked = !value; input.disabled = false; if (e.message !== "unpaired") toast(e.message); }
   }
 
   async function removeGrant(btn) {
@@ -508,21 +535,32 @@
     catch (e) { btn.disabled = false; if (e.message !== "unpaired") toast(e.message); }
   }
 
-  async function addGrant() {
+  // Asks the hub first (POST /folder-grants/check). A folder that needs an override gets a reason box and "Grant anyway";
+  // one that is never allowed gets the hub's words and nothing else. `force` is set only by the Grant anyway button.
+  async function addGrant(force) {
     const f = st.gform;
-    if (!f.path.trim()) { f.err = "Type the folder's full path, like /Users/you/Documents/notes."; $("#gfErr").textContent = f.err; return; }
-    if (!f.read && !f.write) { f.err = "Turn on Read, Write or both."; $("#gfErr").textContent = f.err; return; }
-    f.busy = true; f.err = ""; $("#gfErr").textContent = ""; $("#gfAdd").disabled = true;
+    const cap = (m) => m.charAt(0).toUpperCase() + m.slice(1);
+    const say = (text) => { f.err = text; const el = $("#gfErr"); if (el) el.textContent = text; };
+    if (!f.path.trim()) return say("Type the folder's full path, like /Users/you/Documents/notes.");
+    if (!f.read && !f.write) return say("Turn on Read, Write or both.");
+    f.busy = true; say(""); { const b = $("#gfAdd"); if (b) b.disabled = true; const g = $("#gfForce"); if (g) g.disabled = true; }
+    const redraw = () => { f.busy = false; if (st.view === "folders") renderFolders(); };
     try {
-      await api("/folder-grants", { method: "POST", body: { path: f.path.trim(), label: f.label.trim() || undefined, roomId: f.roomId || undefined, agentId: f.agentId, read: f.read, write: f.write } });
-      Object.assign(f, { path: "", label: "", roomId: "", agentId: "*", read: true, write: false });
+      if (!force) {
+        const c = await api("/folder-grants/check", { method: "POST", body: { path: f.path.trim() } });
+        if (!c.ok) { f.err = cap(c.error); f.override = c.canForce ? { because: "", reason: f.override?.reason || "" } : null; return redraw(); }
+        if (c.protected) { f.override = { because: c.because || "", reason: f.override?.reason || "" }; return redraw(); }
+      }
+      await api("/folder-grants", { method: "POST", body: { path: f.path.trim(), label: f.label.trim() || undefined, roomId: f.roomId || undefined, agentId: f.agentId, read: f.read, write: f.write, ...(force ? { force: true, reason: f.override.reason.trim() } : {}) } });
+      Object.assign(f, { path: "", label: "", roomId: "", agentId: "*", read: true, write: false, override: null });
       await loadGrants();
-      if (st.view === "folders") renderFolders();
+      redraw();
     } catch (e) {
       if (e.message === "unpaired") return;
-      f.err = e.message.charAt(0).toUpperCase() + e.message.slice(1);   // the hub says why a folder can't be shared (home folder, credentials, not found)
-      const el = $("#gfErr"); if (el) el.textContent = f.err;
-    } finally { f.busy = false; const b = $("#gfAdd"); if (b) b.disabled = false; }
+      f.err = cap(e.message);   // the hub says why a folder can't be shared (home folder, credentials, not found)
+      f.override = e.canForce ? { because: e.because || "", reason: f.override?.reason || "" } : null;
+      redraw();
+    } finally { f.busy = false; const b = $("#gfAdd"); if (b) { b.disabled = false; b.textContent = "Add folder"; } }
   }
 
   // Per-agent tool switches. A sub-setting is nested under its parent (indented, with a left rule); labels never carry spaces.
@@ -645,6 +683,26 @@
     $("#working").textContent = names.length ? `${names.join(" and ")} ${names.length > 1 ? "are" : "is"} working…` : busy.length ? "Figuring out who should take this…" : "";
     const running = Object.values(st.goals).some((g) => g.roomId === st.roomId && (g.status === "running" || g.status === "planning"));
     $("#steer").hidden = !(running || busy.length);
+    renderFolderPick();
+  }
+
+  // "Work in folder": only for a goal in a room (not a DM), and not while a goal is already running or waiting on a plan.
+  function renderFolderPick() {
+    const host = $("#folderPick"); if (!host) return;
+    const room = st.rooms.find((r) => r.id === st.roomId);
+    const goalOn = Object.values(st.goals).some((g) => g.roomId === st.roomId && ["running", "planning", "paused", "awaiting_approval"].includes(g.status));
+    const show = st.view === "room" && !!room && !room.dmAgentId && !goalOn && st.roomGrants.length > 0;
+    host.hidden = !show;
+    if (!show) { host.replaceChildren(); return; }
+    const name = (g) => g.label || g.path.split("/").filter(Boolean).pop() || g.path;
+    const sel = st.roomGrants.find((g) => g.id === st.folderId);
+    if (st.folderId && !sel) st.folderId = "";
+    const chip = (props, text, on) => h("button", { class: `fchip${on ? " on" : ""}`, type: "button", ...props, text });
+    host.replaceChildren(
+      chip({ "data-folder-toggle": "1", "aria-expanded": st.folderOpen ? "true" : "false" }, sel ? `In folder: ${name(sel)}` : "Work in folder", !!sel),
+      st.folderOpen ? h("div", { class: "fopts" },
+        h("div", { class: "fnote", text: `Agents work on a copy.${sel ? (sel.write ? " What they change comes back to you to approve." : " It is read only, so nothing is written back.") : ""}` }),
+        h("div", { class: "frow" }, chip({ "data-folder": "" }, "No folder", !sel), ...st.roomGrants.map((g) => chip({ "data-folder": g.id, role: "radio", "aria-checked": g.id === st.folderId ? "true" : "false" }, `${name(g)}${g.write ? "" : " (read only)"}`, g.id === st.folderId)))) : null);
   }
 
   // Colors go on through the DOM, not inline style attributes, so the page's CSP can forbid inline styles.
@@ -654,7 +712,11 @@
   async function sendMessage(text) {
     text = text.trim(); if (!text || !st.roomId) return;
     $("#sendBtn").disabled = true;
-    try { await api(`/rooms/${st.roomId}/messages`, { method: "POST", body: { text } }); $("#input").value = ""; grow(); }
+    try {
+      // 1.1: the picked folder goes with the message. A folder the hub refuses comes back as a 400 with its reason, shown as is.
+      await api(`/rooms/${st.roomId}/messages`, { method: "POST", body: st.folderId && !text.startsWith("/") ? { text, folderGrantId: st.folderId } : { text } });
+      $("#input").value = ""; grow(); st.folderId = ""; st.folderOpen = false; renderFolderPick();
+    }
     catch (e) { if (e.message !== "unpaired") toast(e.message); }
     finally { $("#sendBtn").disabled = false; }
   }
@@ -672,8 +734,12 @@
       }
       if (t.dataset.nav === "folders") { st.grants = null; go("folders"); void loadGrants(); return; }
       if (t.dataset.review) { st.reviewId = t.dataset.review; go("diff"); return; }
-      if (t.dataset.reload === "proposals") { triedProposals.clear(); st.proposalsErr = ""; if (st.view === "approvals") renderApprovals(); else renderReview(); return; }
+      if (t.dataset.reload === "proposals") { triedProposals.clear(); st.fullErr = {}; if (st.view === "approvals") renderApprovals(); else renderReview(); return; }
       if (t.dataset.grantRemove) { await removeGrant(t); return; }
+      if (t.dataset.folderToggle) { st.folderOpen = !st.folderOpen; renderFolderPick(); return; }
+      if (t.dataset.folder !== undefined) { st.folderId = t.dataset.folder; st.folderOpen = false; renderFolderPick(); return; }
+      if (t.dataset.gformForce) { void addGrant(true); return; }
+      if (t.dataset.gformCancel) { st.gform.override = null; st.gform.err = ""; renderFolders(); return; }
       if (t.dataset.nav === "control") { go("control"); loadControl().catch(() => {}); return; }
       if (t.dataset.control === "lint") {
         t.disabled = true;
@@ -743,7 +809,16 @@
   });
   document.addEventListener("input", (e) => {
     const id = e.target.dataset?.gform;
-    if (id === "gfPath") st.gform.path = e.target.value; else if (id === "gfLabel") st.gform.label = e.target.value;
+    if (id === "gfPath") {
+      st.gform.path = e.target.value;
+      if (st.gform.override) { st.gform.override = null; st.gform.err = ""; renderFolders(); $("#gfPath")?.focus(); }   // a different folder needs its own check
+    } else if (id === "gfLabel") st.gform.label = e.target.value;
+    else if (id === "gfReason" && st.gform.override) {
+      st.gform.override.reason = e.target.value;
+      const ok = e.target.value.trim().length >= 8;
+      const b = $("#gfForce"); if (b) b.disabled = !ok || st.gform.busy;
+      const m = $("#gfMin"); if (m) m.hidden = ok;
+    }
   });
   document.addEventListener("submit", (e) => { if (e.target.id === "grantForm") { e.preventDefault(); void addGrant(); } });
 

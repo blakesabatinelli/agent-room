@@ -69,8 +69,77 @@
     return proposals.find(function (x) { return x.id === m[1] && x.status === "pending" && x.agentId === a.agentId && (x.approvalId === undefined || x.approvalId === a.id); });
   }
 
+  // ---- 1.1 integration: one proposal, possibly several files (port of fetchProposalForApproval, splitFileDiffs, parseChangeDiff, flattenChange)
+  function fetchProposalForApproval(a, api) {
+    var first, hadFirst = false;
+    var tryOne = a.proposalId ? api.one(a.proposalId).then(function (p) { return { p: p }; }, function (e) { first = e; hadFirst = true; return null; }) : Promise.resolve(null);
+    return tryOne.then(function (hit) {
+      if (hit) return hit.p;
+      return api.list().then(function (list) {
+        var found = findProposalForApproval({ id: a.id, agentId: a.agentId, detail: a.detail, proposalId: undefined }, list);
+        if (found) return api.one(found.id);
+        if (hadFirst) throw first;
+        return undefined;
+      }, function (e) { throw hadFirst ? first : e; });
+    });
+  }
+
+  function splitFileDiffs(diff) {
+    var lines = String(diff).split("\n");
+    var parts = [[]];
+    var remOld = 0, remNew = 0, hasHunk = false;
+    for (var i = 0; i < lines.length; i++) {
+      var raw = lines[i];
+      var cur = parts[parts.length - 1];
+      if (remOld > 0 || remNew > 0) {
+        var c = raw.charAt(0);
+        if (c === "+") remNew--; else if (c === "-") remOld--; else if (c === " " || raw === "") { remOld--; remNew--; }
+        cur.push(raw); continue;
+      }
+      var h = HUNK.exec(raw);
+      if (h) { remOld = h[2] === undefined ? 1 : Number(h[2]); remNew = h[4] === undefined ? 1 : Number(h[4]); hasHunk = true; cur.push(raw); continue; }
+      if (hasHunk && raw.indexOf("--- ") === 0 && (lines[i + 1] || "").indexOf("+++ ") === 0) {
+        while (cur.length && cur[cur.length - 1] === "") cur.pop();
+        parts.push([raw]); hasHunk = false; continue;
+      }
+      cur.push(raw);
+    }
+    return parts.map(function (p) { return p.join("\n"); });
+  }
+
+  function parseChangeDiff(diff, files) {
+    var sections = splitFileDiffs(diff).map(function (text) {
+      var parsed = parseUnifiedDiff(text);
+      var path = parsed.newPath !== null ? parsed.newPath : parsed.oldPath;
+      var listed = files ? files.find(function (f) { return f.relPath === path; }) : undefined;
+      return { path: path, op: listed ? listed.op : (parsed.isNew ? "create" : parsed.newPath === null && parsed.oldPath !== null ? "delete" : "edit"), parsed: parsed };
+    });
+    var out = { sections: sections, added: 0, removed: 0, places: 0 };
+    sections.forEach(function (s) { out.added += s.parsed.added; out.removed += s.parsed.removed; out.places += s.parsed.hunks.length; });
+    var bad = sections.find(function (s) { return s.parsed.problem; });
+    if (bad) out.problem = bad.parsed.problem;
+    else if (files && files.length !== sections.length) out.problem = "This change lists " + files.length + " file" + (files.length === 1 ? "" : "s") + " but the diff shows " + sections.length + ", so it is not the whole change.";
+    else if (files && sections.some(function (s) { return !files.some(function (f) { return f.relPath === s.path; }); })) out.problem = "The diff shows a file the change doesn't list, so it is not safe to approve here.";
+    return out;
+  }
+
+  function flattenChange(c) {
+    var rows = [];
+    c.sections.forEach(function (s, si) {
+      if (c.sections.length > 1) rows.push({ type: "file", path: s.path === null ? "?" : s.path, op: s.op, added: s.parsed.added, removed: s.parsed.removed });
+      s.parsed.hunks.forEach(function (h, i) {
+        rows.push({ type: "hunk", hunk: si * 100000 + i, header: h.header });
+        h.lines.forEach(function (line) { rows.push({ type: "line", hunk: si * 100000 + i, line: line }); });
+      });
+    });
+    return rows;
+  }
+
+  function opWords(op) { return op === "create" ? "New file" : op === "delete" ? "Deleted" : "Changed"; }
+
   root.ARDiff = {
     parseUnifiedDiff: parseUnifiedDiff, flattenDiff: flattenDiff, needsScrollGate: needsScrollGate, scrolledToEnd: scrolledToEnd,
     isFileWriteApproval: isFileWriteApproval, findProposalForApproval: findProposalForApproval, SCROLL_SLACK: SCROLL_SLACK,
+    fetchProposalForApproval: fetchProposalForApproval, splitFileDiffs: splitFileDiffs, parseChangeDiff: parseChangeDiff, flattenChange: flattenChange, opWords: opWords,
   };
 })(typeof window !== "undefined" ? window : globalThis);

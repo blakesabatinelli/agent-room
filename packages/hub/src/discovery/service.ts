@@ -3,9 +3,10 @@ import type { DiscoveryResult, DiscoverySettings, DiscoveryState } from "@agent-
 import type { ControlFolder } from "../control/folder.js";
 import type { Store } from "../db/store.js";
 import { applyDiscovery } from "./apply.js";
-import { connectHermes, installHermesSkill, type HermesConnect } from "./connect.js";
+import { connectHermes, hermesConfiguredKey, installHermesSkill, type HermesConnect } from "./connect.js";
 import { defaultEnv, discover, type DiscoveryEnv } from "./index.js";
-import { ensureMcpToken } from "./tokens.js";
+import { McpTokens } from "../mcp/tokens.js";
+import { freshKey, keyWorks } from "./tokens.js";
 import { localModelsFor } from "./usage.js";
 
 export interface DiscoveryOptions {
@@ -15,6 +16,8 @@ export interface DiscoveryOptions {
   control?: () => ControlFolder | undefined;
   /** The hub's MCP URL as the hub's own machine reaches it, for agents on this Mac (Hermes). */
   mcpUrl: () => string | undefined;
+  /** The hub's key store (hashed at rest). Defaults to one over the same Store. */
+  tokens?: McpTokens;
 }
 
 /**
@@ -25,7 +28,8 @@ export interface DiscoveryOptions {
 export class DiscoveryService {
   private inflight?: Promise<DiscoveryResult>;
   private timer?: NodeJS.Timeout;
-  constructor(private store: Store, private opts: DiscoveryOptions) {}
+  private tokens: McpTokens;
+  constructor(private store: Store, private opts: DiscoveryOptions) { this.tokens = opts.tokens ?? new McpTokens(store); }
 
   settings(): DiscoverySettings { return { connectAutomatically: true, ...this.store.getKV<Partial<DiscoverySettings>>("discovery_settings", {}) }; }
   saveSettings(s: Partial<DiscoverySettings>): DiscoverySettings {
@@ -82,8 +86,11 @@ export class DiscoveryService {
   private connectHermesNow(env: DiscoveryEnv, id: string, name: string, actor = "hub"): HermesConnect {
     const url = this.opts.mcpUrl();
     if (!url) return { status: "failed", detail: "The hub isn't listening yet.", configPath: "", snippet: "" };
-    const { token } = ensureMcpToken(this.store, { id, name }, actor);
-    const r = connectHermes(env, { url, token });
+    // Keys are only stored as hashes, so the key already written into Hermes's config.yaml is the one copy. Keep it while the
+    // hub still accepts it; otherwise make a new one, and only at the moment the file is about to be written.
+    const configured = hermesConfiguredKey(env);
+    const keep = keyWorks(this.tokens, id, configured) ? configured : undefined;
+    const r = connectHermes(env, { url, token: keep ?? (() => freshKey(this.tokens, { id, name }, actor)) });
     if (r.status === "failed") this.store.audit(actor, "hermes.connect.failed", r.detail);
     else if (r.status !== "skipped") {
       const skill = installHermesSkill(env);

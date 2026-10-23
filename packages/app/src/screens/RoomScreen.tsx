@@ -1,7 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View, useWindowDimensions } from "react-native";
-import type { Message, Task } from "@agent-room/shared";
+import type { FolderGrant, Message, Task } from "@agent-room/shared";
 import { presence, useRoom } from "../state/store";
 import { DayDivider, MessageRow } from "../components/MessageRow";
 import { Avatar, Button, Dot, IconButton } from "../components/ui";
@@ -82,7 +82,21 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
   // Seeing the room marks it read up to the newest message, on every paired device.
   const newest = messages.at(-1)?.createdAt ?? 0;
   useEffect(() => { if (ready && roomId && newest) void hub?.markRead(roomId, newest).catch(() => {}); }, [ready, roomId, newest]);
-  useEffect(() => { setText(""); setDetails(false); }, [roomId]);
+  useEffect(() => { setText(""); setDetails(false); setFolderId(""); setPickOpen(false); }, [roomId]);
+
+  // 1.1: a goal can work in a folder the owner granted. Only grants that can carry a goal are offered: open to every
+  // agent, readable, and for this room (or every room). The hub checks again and says why if it refuses.
+  const [grants, setGrants] = useState<FolderGrant[]>([]);
+  const [folderId, setFolderId] = useState("");
+  const [pickOpen, setPickOpen] = useState(false);
+  useEffect(() => {
+    let live = true;
+    if (!hub || !roomId) { setGrants([]); return; }
+    hub.folderGrants().then((all) => { if (live) setGrants(all.filter((g) => g.agentId === "*" && g.read && (!g.roomId || g.roomId === roomId))); }).catch(() => { if (live) setGrants([]); });
+    return () => { live = false; };
+  }, [hub, roomId]);
+  const folder = grants.find((g) => g.id === folderId);
+  const folderName = (g: FolderGrant) => g.label || g.path.split("/").filter(Boolean).pop() || g.path;
 
   // @mention autocomplete
   const mentionQuery = /(^|\s)@([\w-]*)$/.exec(text)?.[2];
@@ -95,7 +109,8 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
     if (suggestions.length && mentionQuery !== undefined) return pickMention(suggestions[0].id);
     const v = text.trim(); if (!v || !hub || !roomId) return;
     setText(""); setHeight(22);
-    try { await hub.post(roomId, v); } catch (e) { s.setError((e as Error).message); setText(v); }
+    try { await hub.post(roomId, v, folder?.id); setFolderId(""); setPickOpen(false); }
+    catch (e) { s.setError((e as Error).message); setText(v); }   // a refused folder comes back with the hub's reason
   };
   const rate = async (taskId: string, score: number) => {
     await hub?.rate(taskId, score);
@@ -222,8 +237,30 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
             onSubmitEditing={send}
             {...({ submitBehavior: "submit", submitKeyEvents: [{ key: "Enter" }] } as object)}
             style={[t.body, { color: p.ink, paddingHorizontal: space(3), paddingTop: space(2.5), paddingBottom: space(1), minHeight: 22, height: height + space(3.5) }]} />
+          {pickOpen && !dmAgent && !steering && !reviewing && grants.length ? (
+            <View style={{ paddingHorizontal: space(3), paddingBottom: space(2), gap: space(1.5) }}>
+              <Text style={[t.tiny, { color: p.muted }]}>Agents work on a copy of the folder.{folder && folder.write ? " What they change comes back to you as a change to approve." : " It is read only, so nothing is written back."}</Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space(1.5) }}>
+                {[{ id: "", name: "No folder" }, ...grants.map((g) => ({ id: g.id, name: `${folderName(g)}${g.write ? "" : " (read only)"}` }))].map((o) => {
+                  const on = o.id === folderId;
+                  return (
+                    <Pressable key={o.id || "none"} accessibilityRole="radio" accessibilityState={{ selected: on }} onPress={() => { setFolderId(o.id); setPickOpen(false); }}
+                      style={{ paddingHorizontal: space(3), paddingVertical: space(1), borderRadius: 99, borderWidth: 1, borderColor: on ? p.accent : p.lineStrong, backgroundColor: on ? p.tint : "transparent" }}>
+                      <Text style={[t.tiny, { color: on ? p.accent : p.ink, fontWeight: on ? "700" : "400" }]}>{o.name}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+          ) : null}
           <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: space(2), paddingBottom: space(1.5), gap: space(1) }}>
             {!dmAgent ? <IconButton glyph="@" label="Mention an agent" onPress={() => { setText(`${text}${text && !text.endsWith(" ") ? " " : ""}@`); input.current?.focus(); }} /> : null}
+            {!dmAgent && !steering && !reviewing && grants.length ? (
+              <Pressable accessibilityRole="button" accessibilityLabel="Work in folder" accessibilityState={{ expanded: pickOpen }} onPress={() => setPickOpen((o) => !o)}
+                style={{ paddingHorizontal: space(2), paddingVertical: 2, borderRadius: radius.sm, borderWidth: 1, borderColor: folder ? p.accent : p.line, backgroundColor: folder ? p.tint : "transparent" }}>
+                <Text style={[t.tiny, { color: folder ? p.accent : p.muted, fontWeight: folder ? "700" : "400" }]}>{folder ? `In folder: ${folderName(folder)}` : "Work in folder"}</Text>
+              </Pressable>
+            ) : null}
             {steering ? (
               <View style={{ flexDirection: "row", gap: space(1), flex: 1, marginLeft: space(1) }}>
                 {[["/redirect ", "Redirect", "Restart the work in progress with a change"], ["/replan ", "Change direction", "Keep what's finished and replan the rest"], ["/stop", "Stop", "Stop all work in this room"]].map(([cmd, label, hint]) => (

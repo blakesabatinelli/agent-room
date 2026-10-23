@@ -1,6 +1,6 @@
 import type {
   AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
-  Message, OrchestratorSettings, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal,
+  Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -25,7 +25,11 @@ export class Hub {
       headers: { ...(init.body !== undefined ? { "content-type": "application/json" } : {}), ...(this.token ? { authorization: `Bearer ${this.token}` } : {}), ...(init.headers ?? {}) },
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw Object.assign(new Error((body as { error?: string }).error ?? `Hub returned ${res.status}`), { approvalUrl: (body as { approvalUrl?: string }).approvalUrl });
+    if (!res.ok) {
+      const b = body as { error?: string; approvalUrl?: string; code?: string; canForce?: boolean; because?: string };
+      // 1.1: a refused folder carries { code, canForce, because } so the screen can offer "Grant anyway" only where the hub allows it.
+      throw Object.assign(new Error(b.error ?? `Hub returned ${res.status}`), { approvalUrl: b.approvalUrl, code: b.code, canForce: b.canForce === true, because: b.because });
+    }
     return body as T;
   }
   private send<T>(method: string, path: string, body?: unknown) { return this.req<T>(path, { method, body: body === undefined ? undefined : JSON.stringify(body) }); }
@@ -56,7 +60,8 @@ export class Hub {
   readMark = (roomId: string) => this.req<{ at: number }>(`/rooms/${roomId}/read`);
   markRead = (roomId: string, at: number) => this.send<{ at: number }>("PUT", `/rooms/${roomId}/read`, { at });
   messages = (roomId: string, since = 0) => this.req<Message[]>(`/rooms/${roomId}/messages?since=${since}`);
-  post = (roomId: string, text: string) => this.send("POST", `/rooms/${roomId}/messages`, { text });
+  /** `folderGrantId` starts the goal on a granted folder (1.1); the hub answers 400 with the reason when that folder can't carry a goal. */
+  post = (roomId: string, text: string, folderGrantId?: string) => this.send("POST", `/rooms/${roomId}/messages`, folderGrantId ? { text, folderGrantId } : { text });
   pause = (roomId: string, paused: boolean) => this.send("POST", `/rooms/${roomId}/pause`, { paused });
   stop = (roomId: string) => this.send("POST", `/rooms/${roomId}/stop`);
   goals = (roomId: string) => this.req<Goal[]>(`/rooms/${roomId}/goals`);
@@ -107,13 +112,21 @@ export class Hub {
   runDiscovery = () => this.send<DiscoveryState>("POST", "/discovery/run");
   saveDiscoverySettings = (connectAutomatically: boolean) => this.send<DiscoveryState>("PUT", "/discovery/settings", { connectAutomatically });
   connectHermes = () => this.send<HermesConnectResult>("POST", "/discovery/hermes/connect");
-  invite = (id: string) => this.send<McpInvite>("POST", `/agents/${id}/invite`);
+  /** The key is shown once. A repeat invite comes back with tokenHidden; `rotate` makes a new key and stops the old one. */
+  invite = (id: string, rotate = false) => this.send<McpInvite>("POST", `/agents/${id}/invite`, rotate ? { rotate: true } : {});
   // 1.1 folder grants and file writes
   folderGrants = () => this.req<FolderGrant[]>("/folder-grants");
-  addFolderGrant = (g: { path: string; label?: string; roomId?: string; agentId: string; read: boolean; write: boolean }) => this.send<FolderGrant>("POST", "/folder-grants", g);
+  /** `force` + `reason` (8 or more characters) are only for a folder the hub normally refuses; the refusal's `canForce` says when. */
+  addFolderGrant = (g: { path: string; label?: string; roomId?: string; agentId: string; read: boolean; write: boolean; force?: boolean; reason?: string }) => this.send<FolderGrant>("POST", "/folder-grants", g);
+  /** Change who a grant covers or what it allows. The path never changes. */
+  updateFolderGrant = (id: string, patch: FolderGrantUpdate) => this.send<FolderGrant>("PUT", `/folder-grants/${id}`, patch);
+  /** Would this folder be accepted? Nothing is stored. */
+  checkFolder = (path: string) => this.send<FolderCheck>("POST", "/folder-grants/check", { path });
   removeFolderGrant = (id: string) => this.send("DELETE", `/folder-grants/${id}`);
-  /** Every write proposal with its full diff. File approvals are decided from this, never from the approval's preview text. */
-  writeProposals = () => this.req<WriteProposal[]>("/write-proposals");
+  /** Every write proposal WITHOUT its diff (diffBytes instead). The full change is writeProposal(id). */
+  writeProposals = () => this.req<WriteProposalSummary[]>("/write-proposals");
+  /** One proposal whole: the diff, files[] and skipped[] of a task, unappliable. File approvals are decided from this, never from the approval's preview text. */
+  writeProposal = (id: string) => this.req<WriteProposal>(`/write-proposals/${id}`);
   mcpToken = (agentId: string, name: string) => this.send<{ token: string; url: string }>("POST", "/mcp-tokens", { agentId, name });
 
   /** Live events with automatic reconnect. Returns a stop function. */

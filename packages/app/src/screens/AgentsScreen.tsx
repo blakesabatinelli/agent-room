@@ -199,7 +199,8 @@ function McpSetup({ a }: { a: AgentConfig }) {
 
       <Step n={1} title="Create a private connection">
         <Text style={[t.small, { color: p.muted }]}>
-          {info?.exists || conn ? `${a.name} has a key. It stays the same across restarts; only make a new one if the old key leaked.` : "This makes a key that only works for this agent."}
+          {conn?.tokenHidden ? `${a.name} has a key, but a key is only shown when it is made. Make a new key to copy a working setup.`
+            : info?.exists || conn ? `${a.name} has a key. Copy it now: it is hidden once the hub restarts, and then you make a new one.` : "This makes a key that only works for this agent."}
         </Text>
         <View style={{ flexDirection: "row", gap: space(2) }}>
           {info?.exists || conn
@@ -213,6 +214,13 @@ function McpSetup({ a }: { a: AgentConfig }) {
       {conn ? (
         <>
           <Step n={2} title={`Add Agent Room to ${a.name}`}>
+            {conn.tokenHidden ? (
+              <View style={{ gap: space(2), padding: space(3), borderRadius: radius.lg, borderWidth: 1, borderColor: p.warn, backgroundColor: p.sunken }}>
+                <Text style={[t.small, { color: p.inkStrong, fontWeight: "700" }]}>Key hidden.</Text>
+                <Text style={[t.small, { color: p.muted }]}>The text below has YOUR_KEY where the key goes. It won't connect until you put a key there. If {a.name} already has its key, nothing changes. If not, make a new key.</Text>
+                <View style={{ flexDirection: "row" }}><Button small kind="primary" label="Make a new key" onPress={rotate} /></View>
+              </View>
+            ) : null}
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space(1.5) }}>
               {conn.snippets?.map((x) => (
                 <Pressable key={x.id} onPress={() => setTab(x.id)}

@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { isMap, parseDocument, stringify } from "yaml";
+import { isMap, parse, parseDocument, stringify } from "yaml";
 import type { DiscoveryEnv } from "./env.js";
 import { hermesHome } from "./hermes.js";
 
@@ -20,6 +20,17 @@ export interface HermesConnect {
   backupPath?: string;
   /** The exact text to paste by hand, always present so a failure still has a way forward. */
   snippet: string;
+}
+
+/** The key currently written into Hermes's config for the hub, if any. */
+export function hermesConfiguredKey(env: Pick<DiscoveryEnv, "home" | "vars" | "readFile">): string | undefined {
+  const text = env.readFile(`${hermesHome(env as DiscoveryEnv)}/config.yaml`);
+  if (text === undefined) return undefined;
+  try {
+    const auth = (parse(text) as { mcp_servers?: Record<string, { headers?: { Authorization?: unknown } }> } | null)?.mcp_servers?.[HERMES_ENTRY]?.headers?.Authorization;
+    const m = typeof auth === "string" ? /^Bearer\s+(\S+)$/.exec(auth) : null;
+    return m?.[1];
+  } catch { return undefined; }
 }
 
 export const hermesEntry = (url: string, token: string) => ({ url, headers: { Authorization: `Bearer ${token}` }, timeout: 120 });
@@ -50,19 +61,24 @@ const stamp = (d: Date) => d.toISOString().replace(/[-:]/g, "").replace(/\..*$/,
  * `agent-room` entry (comments and everything else in the file stay), after copying the file to
  * `config.yaml.agent-room-backup-<time>`. A config that can't be parsed is left alone.
  */
-export function connectHermes(env: Pick<DiscoveryEnv, "home" | "vars" | "readFile" | "isDir">, o: { url: string; token: string; now?: Date }): HermesConnect {
+export function connectHermes(env: Pick<DiscoveryEnv, "home" | "vars" | "readFile" | "isDir">, o: { url: string; token: string | (() => string); now?: Date }): HermesConnect {
   const home = hermesHome(env as DiscoveryEnv);
   const configPath = `${home}/config.yaml`;
-  const snippet = hermesSnippet(o.url, o.token);
-  const fail = (detail: string): HermesConnect => ({ status: "failed", detail, configPath, snippet });
+  // A function makes the key only when a write is about to happen (the hub keeps keys as hashes, so making one replaces the old one).
+  // Until then, and when nothing is written, the snippet carries the placeholder YOUR_KEY.
+  const lazy = typeof o.token === "function";
+  let key = typeof o.token === "string" ? o.token : undefined;
+  const resolve = () => (key ??= (o.token as () => string)());
+  const snippetNow = () => hermesSnippet(o.url, key ?? "YOUR_KEY");
+  const fail = (detail: string): HermesConnect => ({ status: "failed", detail, configPath, snippet: snippetNow() });
   const text = env.readFile(configPath);
-  if (text === undefined && !env.isDir(home)) return { status: "skipped", detail: "Hermes isn't set up on this Mac (no ~/.hermes folder).", configPath, snippet };
-  const entry = hermesEntry(o.url, o.token);
+  if (text === undefined && !env.isDir(home)) return { status: "skipped", detail: "Hermes isn't set up on this Mac (no ~/.hermes folder).", configPath, snippet: snippetNow() };
 
   if (text === undefined) {
+    const entry = hermesEntry(o.url, resolve());
     try { writeAtomic(configPath, stringify({ mcp_servers: { [HERMES_ENTRY]: entry } }, { lineWidth: 0 }), 0o600); }
     catch (e) { return fail(`Couldn't write ${configPath}: ${(e as Error).message}`); }
-    return { status: "connected", detail: `Added Agent Room to ${configPath}. Start a new Hermes session or run /reload-mcp.`, configPath, snippet };
+    return { status: "connected", detail: `Added Agent Room to ${configPath}. Start a new Hermes session or run /reload-mcp.`, configPath, snippet: snippetNow() };
   }
   const doc = parseDocument(text, { prettyErrors: false });
   if (doc.errors.length) return fail(`Hermes's config.yaml has a problem I won't touch (${doc.errors[0].message.split("\n")[0]}). Paste the snippet into it yourself.`);
@@ -70,17 +86,19 @@ export function connectHermes(env: Pick<DiscoveryEnv, "home" | "vars" | "readFil
   if (servers !== undefined && servers !== null && !(isMap(servers) || (servers as { value?: unknown }).value === null)) return fail("`mcp_servers` in Hermes's config.yaml isn't a list of named servers. Paste the snippet into it yourself.");
   const current = doc.getIn(["mcp_servers", HERMES_ENTRY]);
   const currentJs = current && typeof (current as { toJSON?: unknown }).toJSON === "function" ? (current as { toJSON: () => unknown }).toJSON() : current;
-  if (currentJs !== undefined && same(currentJs, entry)) return { status: "unchanged", detail: "Hermes already has the Agent Room connection.", configPath, snippet };
+  // A function key means the key in the file (if any) isn't one the hub accepts, so the entry can't count as unchanged.
+  if (!lazy && currentJs !== undefined && same(currentJs, hermesEntry(o.url, resolve()))) return { status: "unchanged", detail: "Hermes already has the Agent Room connection.", configPath, snippet: snippetNow() };
 
   const backupPath = `${configPath}.agent-room-backup-${stamp(o.now ?? new Date())}`;
   try {
     if (!existsSync(backupPath)) writeFileSync(backupPath, text, { mode: 0o600, flag: "wx" });
+    const entry = hermesEntry(o.url, resolve());
     if (servers === undefined || servers === null || !isMap(servers)) doc.set("mcp_servers", doc.createNode({}));
     doc.setIn(["mcp_servers", HERMES_ENTRY], doc.createNode(entry));
     writeAtomic(configPath, doc.toString({ lineWidth: 0 }), 0o600);
   } catch (e) { return { ...fail(`Couldn't update ${configPath}: ${(e as Error).message}`), backupPath }; }
   return {
-    status: currentJs === undefined ? "connected" : "updated", configPath, backupPath, snippet,
+    status: currentJs === undefined ? "connected" : "updated", configPath, backupPath, snippet: snippetNow(),
     detail: `${currentJs === undefined ? "Added Agent Room to" : "Updated the Agent Room entry in"} ${configPath} (original saved as ${backupPath.split("/").pop()}). Start a new Hermes session or run /reload-mcp.`,
   };
 }

@@ -2,38 +2,46 @@ import { useShallow } from "zustand/react/shallow";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
 import type { Approval, WriteProposal } from "@agent-room/shared";
-import { findProposalForApproval, isFileWriteApproval, parseUnifiedDiff } from "@agent-room/shared/src/diff";
+import { fetchProposalForApproval, isFileWriteApproval, opWords, parseChangeDiff } from "@agent-room/shared/src/diff";
 import { useRoom } from "../state/store";
 import { Button, Empty, Screen, Strip } from "../components/ui";
 import { FileChangeReview } from "../components/DiffViewer";
 import { space, type as t, usePalette } from "../theme";
 
+/** What the card says a proposal is: one file, or everything one task changed. */
+const verb = (pr: WriteProposal) => (pr.kind === "task" ? "write" : pr.baseSha256 ? "change" : "create");
+const what = (pr: WriteProposal) => (pr.kind === "task" ? `${pr.files?.length ?? 0} file${pr.files?.length === 1 ? "" : "s"} from "${pr.title ?? "a task"}"` : pr.relPath);
+
 export function ApprovalsScreen() {
   const p = usePalette();
   const { approvals, agents, hub, setError } = useRoom(useShallow((s) => ({ approvals: s.approvals, agents: s.agents, hub: s.hub, setError: s.setError })));
 
-  // The full diffs live on the hub's write proposals. A file approval is never decided from its preview text.
-  const [proposals, setProposals] = useState<WriteProposal[] | undefined>();
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState("");
+  // The full change is one proposal, fetched by the approval's proposalId (GET /write-proposals/:id). A file approval is
+  // never decided from its preview text. The list route has no diffs; it only backs the guarded fallbacks.
+  const [proposals, setProposals] = useState<Record<string, WriteProposal>>({});
+  const [loading, setLoading] = useState<Record<string, boolean>>({});
+  const [loadError, setLoadError] = useState<Record<string, string>>({});
   const [reviewing, setReviewing] = useState<string | undefined>();
   const tried = useRef(new Set<string>());
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (a: Approval) => {
     if (!hub) return;
-    setLoading(true); setLoadError("");
-    try { setProposals(await hub.writeProposals()); }
-    catch (e) { setLoadError((e as Error).message); }
-    finally { setLoading(false); }
+    setLoading((l) => ({ ...l, [a.id]: true }));
+    setLoadError((l) => { const { [a.id]: _, ...rest } = l; return rest; });
+    try {
+      const found = await fetchProposalForApproval(a, { one: (id) => hub.writeProposal(id), list: () => hub.writeProposals() });
+      if (found) setProposals((m) => ({ ...m, [a.id]: found }));
+    } catch (e) { setLoadError((l) => ({ ...l, [a.id]: (e as Error).message })); }
+    finally { setLoading((l) => ({ ...l, [a.id]: false })); }
   }, [hub]);
 
-  const proposalFor = (a: Approval) => (proposals ? findProposalForApproval(a, proposals) : undefined);
   useEffect(() => {
-    const missing = approvals.filter((a) => isFileWriteApproval(a) && !(proposals && findProposalForApproval(a, proposals)) && !tried.current.has(a.id));
-    if (!missing.length || loading) return;
-    for (const a of missing) tried.current.add(a.id);
-    void load();
-  }, [approvals, proposals, loading, load]);
+    for (const a of approvals) {
+      if (!isFileWriteApproval(a) || proposals[a.id] || tried.current.has(a.id)) continue;
+      tried.current.add(a.id);
+      void load(a);
+    }
+  }, [approvals, proposals, load]);
 
   const decide = async (a: Approval, decision: "approved" | "rejected") => {
     try { await hub?.decide(a.id, decision); setReviewing(undefined); }
@@ -41,16 +49,17 @@ export function ApprovalsScreen() {
   };
 
   const open = reviewing ? approvals.find((a) => a.id === reviewing) : undefined;
-  const openProposal = open ? proposalFor(open) : undefined;
+  const openProposal = open ? proposals[open.id] : undefined;
   if (open && openProposal) {
     const agent = agents.find((x) => x.id === open.agentId);
+    const who = agent?.name ?? open.agentId;
     return (
       <Screen title="Review change" subtitle={agent ? `${agent.name} is waiting` : undefined}>
-        <FileChangeReview key={openProposal.id} path={openProposal.relPath}
-          subtitle={`${agent?.name ?? open.agentId} wants to ${openProposal.baseSha256 ? "change" : "create"} this file.`}
-          diff={openProposal.diff}
+        <FileChangeReview key={openProposal.id} path={openProposal.kind === "task" ? what(openProposal) : openProposal.relPath}
+          subtitle={openProposal.kind === "task" ? `${who} finished "${openProposal.title ?? "a task"}" and wants to write its files to your folder.` : `${who} wants to ${verb(openProposal)} this file.`}
+          diff={openProposal.diff} files={openProposal.files} skipped={openProposal.skipped} unappliable={openProposal.unappliable}
           onBack={() => setReviewing(undefined)}
-          onApprove={() => { if (!parseUnifiedDiff(openProposal.diff).problem) void decide(open, "approved"); }}
+          onApprove={() => { if (!openProposal.unappliable && !parseChangeDiff(openProposal.diff, openProposal.files).problem) void decide(open, "approved"); }}
           onReject={() => void decide(open, "rejected")} />
       </Screen>
     );
@@ -63,29 +72,44 @@ export function ApprovalsScreen() {
         {approvals.map((a) => {
           const agent = agents.find((x) => x.id === a.agentId);
           const file = isFileWriteApproval(a);
-          const proposal = file ? proposalFor(a) : undefined;
-          const parsed = proposal ? parseUnifiedDiff(proposal.diff) : undefined;
+          const proposal = file ? proposals[a.id] : undefined;
+          const parsed = proposal ? parseChangeDiff(proposal.diff, proposal.files) : undefined;
+          const isLoading = !!loading[a.id], err = loadError[a.id];
           return (
             <View key={a.id} style={{ flexDirection: "row", gap: space(3), padding: space(4), borderRadius: 12, backgroundColor: p.surface, borderWidth: 1, borderColor: p.line }}>
               <Strip color={agent?.color ?? p.muted} />
               <View style={{ flex: 1, gap: space(2) }}>
                 {file ? (
                   <>
-                    <Text style={[t.heading, { color: p.ink }]}>{agent?.name ?? a.agentId} wants to {proposal ? (proposal.baseSha256 ? "change" : "create") : "write"} {proposal?.relPath ?? a.action.replace(/^write /, "")}</Text>
-                    {parsed ? (
-                      <Text style={[t.small, { color: p.muted }]}>
-                        <Text style={{ color: p.diffAddInk, fontWeight: "700" }}>+{parsed.added}</Text> <Text style={{ color: p.diffDelInk, fontWeight: "700" }}>-{parsed.removed}</Text>
-                        {` in ${parsed.hunks.length} ${parsed.hunks.length === 1 ? "place" : "places"}. Open the full change to approve it.`}
-                      </Text>
+                    <Text style={[t.heading, { color: p.ink }]}>{agent?.name ?? a.agentId} wants to {proposal ? verb(proposal) : "write"} {proposal ? what(proposal) : a.action.replace(/^write /, "")}</Text>
+                    {parsed && proposal ? (
+                      <>
+                        <Text style={[t.small, { color: p.muted }]}>
+                          <Text style={{ color: p.diffAddInk, fontWeight: "700" }}>+{parsed.added}</Text> <Text style={{ color: p.diffDelInk, fontWeight: "700" }}>-{parsed.removed}</Text>
+                          {` in ${parsed.places} ${parsed.places === 1 ? "place" : "places"}.${proposal.unappliable ? "" : " Open the full change to approve it."}`}
+                        </Text>
+                        {proposal.kind === "task" && proposal.files?.length ? (
+                          <View style={{ gap: 2 }}>
+                            {proposal.files.map((f) => <Text key={f.relPath} selectable style={[t.small, { color: p.ink }]}>{opWords(f.op)}: {f.relPath}</Text>)}
+                          </View>
+                        ) : null}
+                        {proposal.skipped?.length ? (
+                          <View style={{ gap: 2 }}>
+                            <Text style={[t.small, { color: p.warn, fontWeight: "700" }]}>{proposal.skipped.length} file{proposal.skipped.length === 1 ? "" : "s"} won't be written:</Text>
+                            {proposal.skipped.map((x) => <Text key={x.relPath} selectable style={[t.small, { color: p.muted }]}>{x.relPath}: {x.reason}</Text>)}
+                          </View>
+                        ) : null}
+                        {proposal.unappliable ? <Text style={[t.small, { color: p.danger }]}>Can't be applied: {proposal.unappliable}</Text> : null}
+                      </>
                     ) : (
-                      <Text style={[t.small, { color: loadError ? p.danger : p.muted }]}>
-                        {loading || (!proposals && !loadError) ? "Loading the full change…" : loadError ? `Can't load the full change: ${loadError}` : "The full change isn't available, so it can't be approved here. You can reject it."}
+                      <Text style={[t.small, { color: err ? p.danger : p.muted }]}>
+                        {isLoading || (!err && !tried.current.has(a.id)) ? "Loading the full change…" : err ? `Can't load the full change: ${err}` : "The full change isn't available, so it can't be approved here. You can reject it."}
                       </Text>
                     )}
                     {parsed?.problem ? <Text style={[t.small, { color: p.danger }]}>{parsed.problem}</Text> : null}
                     <View style={{ flexDirection: "row", gap: space(2) }}>
-                      {proposal ? <Button label="Review change" onPress={() => setReviewing(a.id)} /> : null}
-                      {!proposal && !loading ? <Button kind="plain" label="Try again" onPress={() => { tried.current.clear(); void load(); }} /> : null}
+                      {proposal && !proposal.unappliable ? <Button label="Review change" onPress={() => setReviewing(a.id)} /> : null}
+                      {!proposal && !isLoading ? <Button kind="plain" label="Try again" onPress={() => void load(a)} /> : null}
                       <Button kind="plain" label="Reject" onPress={() => void decide(a, "rejected")} />
                     </View>
                   </>

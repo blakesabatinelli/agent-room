@@ -27,7 +27,7 @@ import { parseClaudeMcpList } from "../src/discovery/claude.js";
 import { parseCodexToml } from "../src/discovery/toml.js";
 import { needsGate, needsMessage } from "../src/discovery/routing.js";
 import { DiscoveryService } from "../src/discovery/service.js";
-import { ensureMcpToken } from "../src/discovery/tokens.js";
+import { McpTokens, hashToken } from "../src/mcp/tokens.js";
 import { localModelsFor, normalizeMcpReport, sameModel } from "../src/discovery/usage.js";
 import { HW, setup } from "./helpers.js";
 
@@ -287,8 +287,12 @@ test("AC2: the service joins Hermes with the hub's own key at hub start, honours
   assert.deepEqual(r.applied!.created, ["hermes"]);
   assert.equal(store.getAgent("hermes")!.enabled, true);
   assert.equal(r.applied!.hermes!.status, "connected");
-  const key = Object.entries(store.getKV<Record<string, { agentId: string }>>("mcp_tokens", {})).find(([, v]) => v.agentId === "hermes")![0];
-  assert.equal((parse(readFileSync(cfg, "utf8")) as any).mcp_servers["agent-room"].headers.Authorization, `Bearer ${key}`, "the same key the MCP server accepts");
+  // 1.1: the hub keeps only a hash of the key, so the one copy is the one written into Hermes's config.
+  const key = ((parse(readFileSync(cfg, "utf8")) as any).mcp_servers["agent-room"].headers.Authorization as string).replace(/^Bearer /, "");
+  const keys = new McpTokens(store);
+  assert.equal(keys.lookup(key)?.record.agentId, "hermes", "the key the MCP server accepts");
+  assert.ok(!JSON.stringify(store.getKV("mcp_tokens_v2", [])).includes(key) && JSON.stringify(store.getKV("mcp_tokens_v2", [])).includes(hashToken(key)), "stored only as a hash");
+  assert.deepEqual(store.getKV("mcp_tokens", {}), {}, "nothing in the legacy plaintext place");
   assert.ok(!JSON.stringify(store.listAudit()).includes(key), "the key is never audited");
   assert.ok(!JSON.stringify(svc.state()).includes(key), "or shown to the apps");
   assert.ok(existsSync(join(m.home, ".hermes/skills/agent-room/SKILL.md")));
@@ -296,6 +300,21 @@ test("AC2: the service joins Hermes with the hub's own key at hub start, honours
   // A second run changes nothing.
   assert.equal((await svc.run()).applied!.hermes!.status, "unchanged");
   assert.equal(store.listAudit().filter((a) => a.action === "hermes.connected").length, 1, "quiet when nothing changed");
+  assert.equal(keys.forAgent("hermes").length, 1, "the working key was kept, not rotated");
+  assert.equal(keys.lookup(key)?.record.agentId, "hermes");
+  // A key the hub no longer accepts (revoked) is replaced by a new one, since the old one can't be read back.
+  keys.revokeAgent("hermes");
+  assert.equal((await svc.run()).applied!.hermes!.status, "updated");
+  const key2 = ((parse(readFileSync(cfg, "utf8")) as any).mcp_servers["agent-room"].headers.Authorization as string).replace(/^Bearer /, "");
+  assert.notEqual(key2, key);
+  assert.equal(keys.lookup(key2)?.record.agentId, "hermes");
+  assert.equal(keys.lookup(key), undefined);
+  // A key that works but was made elsewhere and replaced (rotated by the owner) is replaced in the file too.
+  keys.rotate(keys.forAgent("hermes")[0].id);
+  assert.equal((await svc.run()).applied!.hermes!.status, "updated");
+  assert.equal(keys.lookup(key2), undefined);
+  assert.equal(keys.forAgent("hermes").length, 1, "one record, rotated in place");
+  assert.ok(!JSON.stringify(store.listAudit()).includes(key2));
 
   // "Connect automatically" off: Hermes is found but its config is not touched.
   const off = machine(HERMES_MAC), s2 = bare().store;
@@ -317,6 +336,22 @@ test("AC2: the service joins Hermes with the hub's own key at hub start, honours
   svc3.saveSettings({ connectAutomatically: true });
   assert.equal((await svc3.run()).applied!.hermes, undefined);
   assert.equal(readFileSync(join(m3.home, ".hermes/config.yaml"), "utf8"), HERMES_YAML);
+});
+
+test("AC2: when nothing is written to Hermes's config, its working key is left alone and the snippet carries a placeholder", async () => {
+  for (const files of [{} as Record<string, string>, { ".hermes/config.yaml": "model: [unclosed\n  - x: : :\n" }]) {
+    const { store } = bare();
+    store.saveAgent({ id: "hermes", name: "Hermes", provider: "hermes", adapter: "mcp", enabled: true, color: "#E8912D", settings: {}, tools: { web: true, filesystem: true, shell: false, gmail: false, slack: false, drive: false, salesforce: false } });
+    const keys = new McpTokens(store);
+    const mine = keys.create({ agentId: "hermes", name: "Hermes" }).token; // e.g. pasted into Hermes by hand from the Connect screen
+    const m = machine({ files });
+    const svc = new DiscoveryService(store, { env: m.env, mcpUrl: () => "http://127.0.0.1:4010/mcp" });
+    const r = svc.connectHermes("owner");
+    assert.ok(r.status === "skipped" || r.status === "failed", r.status);
+    assert.ok(r.snippet.includes("YOUR_KEY") && !r.snippet.includes(mine), "no key to show, so the placeholder");
+    assert.equal(keys.lookup(mine)?.record.agentId, "hermes", "the key the owner has still works");
+    assert.equal(keys.forAgent("hermes").length, 1);
+  }
 });
 
 // ---------------------------------------------------------------- AC4: local model servers
@@ -460,10 +495,11 @@ async function bootHermes(t: { after: (f: () => void) => void }) {
   const app = await buildServer({ ...ctx, ownerName: "Blake", discovery: svc });
   await app.listen({ host: "127.0.0.1", port: 0 });
   const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
-  const key = ensureMcpToken(ctx.store, { id: "hermes", name: "Hermes" }).token;
+  const key = new McpTokens(ctx.store).create({ agentId: "hermes", name: "Hermes" }).token;
   const client = new Client({ name: "hermes", version: "1" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${key}` } } }));
+  // Registered before connecting: a refused key (401) must not leave the server or the client open and hang the whole file.
   t.after(() => { void client.close(); void app.close(); });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${key}` } } }));
   inbox.seen("hermes");
   /** One piece of work handed to Hermes and handed back with this report. */
   const work = async (goalText: string, report: Record<string, unknown>) => {
@@ -670,10 +706,23 @@ test("AC2: Muse joins from its tailnet device with one pairing step", async (t) 
   await client.connect(new StreamableHTTPClientTransport(new URL(`${e.base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${r.body.token}` } } }));
   assert.ok((await client.listTools()).tools.some((x) => x.name === "submit_result"));
   await client.close();
-  // Asking again hands back the same key, not a new one that would cut Muse off.
-  assert.equal((await e.call("POST", "/agents/muse/invite")).body.token, r.body.token);
+  // Keys are stored as hashes and shown once. Asking again says so and leaves Muse's key working (a new key would cut Muse off).
+  const again = await e.call("POST", "/agents/muse/invite");
+  assert.equal(again.status, 200);
+  assert.equal(again.body.token, "");
+  assert.equal(again.body.tokenHidden, true);
+  assert.ok(again.body.block.includes("YOUR_KEY") && !again.body.block.includes(r.body.token));
+  assert.equal(new McpTokens(e.store).lookup(r.body.token)?.record.agentId, "muse", "still works");
+  assert.deepEqual(e.store.getKV("mcp_tokens", {}), {}, "no plaintext keys stored");
+  assert.ok(!JSON.stringify(e.store.getKV("mcp_tokens_v2", [])).includes(r.body.token));
+  // The owner's "make a new key" replaces it: the new key works, the old one stops.
+  const rot = await e.call("POST", "/agents/muse/invite", { rotate: true });
+  assert.ok(rot.body.token && rot.body.token !== r.body.token && !rot.body.tokenHidden);
+  assert.equal(new McpTokens(e.store).lookup(r.body.token), undefined);
+  assert.equal(new McpTokens(e.store).lookup(rot.body.token)?.record.agentId, "muse");
+  assert.equal(e.store.getKV<unknown[]>("mcp_tokens_v2", []).length, 1);
   assert.ok(e.store.listAudit().some((a) => a.action === "agent.invite" && a.detail === "muse"));
-  assert.ok(!e.store.listAudit().some((a) => a.detail.includes(r.body.token)));
+  assert.ok(!e.store.listAudit().some((a) => a.detail.includes(r.body.token) || a.detail.includes(rot.body.token)));
   assert.equal((await e.call("POST", "/agents/nobody/invite")).status, 404);
 });
 

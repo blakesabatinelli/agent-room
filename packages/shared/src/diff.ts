@@ -127,3 +127,98 @@ export function findProposalForApproval<P extends ProposalLike>(a: ApprovalLike,
   if (!m) return undefined;
   return proposals.find((x) => x.id === m[1] && x.status === "pending" && x.agentId === a.agentId && (x.approvalId === undefined || x.approvalId === a.id));
 }
+
+// ---- 1.1 integration: one proposal, possibly several files
+
+/**
+ * What a file approval opens: the proposal fetched whole, by id (GET /write-proposals/:id). The list route leaves the
+ * diff out, so the guarded fallbacks (the proposal's own approvalId, the preview text) work on that list and then fetch the one they find.
+ */
+export async function fetchProposalForApproval<P extends ProposalLike>(
+  a: ApprovalLike,
+  api: { one: (id: string) => Promise<P>; list: () => Promise<ProposalLike[]> },
+): Promise<P | undefined> {
+  let first: unknown;
+  if (a.proposalId) { try { return await api.one(a.proposalId); } catch (e) { first = e; } }
+  let list: ProposalLike[];
+  try { list = await api.list(); } catch (e) { throw first ?? e; }
+  const found = findProposalForApproval({ ...a, proposalId: undefined }, list);
+  if (found) return api.one(found.id);
+  if (first) throw first;
+  return undefined;
+}
+
+export type FileOp = "create" | "edit" | "delete";
+
+export interface DiffSection { path: string | null; op: FileOp; parsed: ParsedDiff }
+export interface ParsedChange {
+  sections: DiffSection[];
+  added: number;
+  removed: number;
+  /** Number of places (hunks) over all files. */
+  places: number;
+  /** Set when this cannot stand in for the whole change. An app must not offer Approve while it is set. */
+  problem?: string;
+}
+
+/**
+ * A task's write-back is one diff with a `--- a/x` / `+++ b/x` header per file. Cuts it into one piece per file.
+ * Hunk-aware: a removed line that reads "-- x" inside a hunk is a line, not the start of the next file.
+ */
+export function splitFileDiffs(diff: string): string[] {
+  const lines = diff.split("\n");
+  const parts: string[][] = [[]];
+  let remOld = 0, remNew = 0, hasHunk = false;
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const cur = parts[parts.length - 1];
+    if (remOld > 0 || remNew > 0) {
+      const c = raw.charAt(0);
+      if (c === "+") remNew--; else if (c === "-") remOld--; else if (c === " " || raw === "") { remOld--; remNew--; }
+      cur.push(raw); continue;
+    }
+    const h = HUNK.exec(raw);
+    if (h) { remOld = h[2] === undefined ? 1 : Number(h[2]); remNew = h[4] === undefined ? 1 : Number(h[4]); hasHunk = true; cur.push(raw); continue; }
+    if (hasHunk && raw.startsWith("--- ") && (lines[i + 1] ?? "").startsWith("+++ ")) {
+      while (cur.length && cur[cur.length - 1] === "") cur.pop();
+      parts.push([raw]); hasHunk = false; continue;
+    }
+    cur.push(raw);
+  }
+  return parts.map((p) => p.join("\n"));
+}
+
+/** Reads a proposal's diff as one section per file. `files` (a task proposal's list) names each file's operation and must match what the diff shows. */
+export function parseChangeDiff(diff: string, files?: { relPath: string; op: FileOp }[]): ParsedChange {
+  const sections: DiffSection[] = splitFileDiffs(diff).map((text) => {
+    const parsed = parseUnifiedDiff(text);
+    const path = parsed.newPath ?? parsed.oldPath;
+    const listed = files?.find((f) => f.relPath === path);
+    return { path, op: listed?.op ?? (parsed.isNew ? "create" : parsed.newPath === null && parsed.oldPath !== null ? "delete" : "edit"), parsed };
+  });
+  const out: ParsedChange = { sections, added: 0, removed: 0, places: 0 };
+  for (const s of sections) { out.added += s.parsed.added; out.removed += s.parsed.removed; out.places += s.parsed.hunks.length; }
+  const bad = sections.find((s) => s.parsed.problem);
+  if (bad) out.problem = bad.parsed.problem;
+  else if (files && files.length !== sections.length) out.problem = `This change lists ${files.length} file${files.length === 1 ? "" : "s"} but the diff shows ${sections.length}, so it is not the whole change.`;
+  else if (files && sections.some((s) => !files.some((f) => f.relPath === s.path))) out.problem = "The diff shows a file the change doesn't list, so it is not safe to approve here.";
+  return out;
+}
+
+export type ChangeRow = DiffRow | { type: "file"; path: string; op: FileOp; added: number; removed: number };
+
+/** One flat list for a virtualised list: a header per file (only when there is more than one), then its hunks and lines. */
+export function flattenChange(c: ParsedChange): ChangeRow[] {
+  const rows: ChangeRow[] = [];
+  c.sections.forEach((s, si) => {
+    if (c.sections.length > 1) rows.push({ type: "file", path: s.path ?? "?", op: s.op, added: s.parsed.added, removed: s.parsed.removed });
+    s.parsed.hunks.forEach((h, i) => {
+      rows.push({ type: "hunk", hunk: si * 100000 + i, header: h.header });
+      for (const line of h.lines) rows.push({ type: "line", hunk: si * 100000 + i, line });
+    });
+  });
+  return rows;
+}
+
+/** A file's operation in plain words. */
+export const opWords = (op: FileOp) => (op === "create" ? "New file" : op === "delete" ? "Deleted" : "Changed");
