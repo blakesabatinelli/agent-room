@@ -748,7 +748,13 @@ export interface TailscaleStatus {
   dnsName?: string;
   tailnet?: string;
   /** What Tailscale Funnel is doing right now, read from the CLI. */
-  funnel: { on: boolean; url?: string; extraPaths: string[] };
+  funnel: {
+    on: boolean; url?: string; extraPaths: string[];
+    /** A funneled /mcp handler that proxies somewhere other than this hub's /mcp. `on` stays false for it. */
+    wrongTarget?: string;
+    /** Raw TCP forwards in Tailscale's serve config that end at this hub's port (traffic through them looks local). */
+    forwards?: { port: number; target: string; public: boolean }[];
+  };
   /** One plain sentence for the UI. */
   detail: string;
   checkedAt: number;
@@ -768,10 +774,14 @@ export interface RemoteStatus extends Omit<TailscaleStatus, "funnel"> {
     /** What the owner asked for in the hub (off by default). */
     intent: boolean;
     /** Set when Tailscale and the hub disagree. The hub only reports this; it never changes Funnel by itself. */
-    drift?: "on_in_tailscale" | "off_in_tailscale";
+    drift?: "on_in_tailscale" | "off_in_tailscale" | "wrong_target";
+    /** With drift "wrong_target": where Tailscale's /mcp handler really points. */
+    wrongTarget?: string;
     /** Other paths or raw TCP that Funnel exposes on the same port. Anything here is a problem. */
     extraPaths: string[];
   };
+  /** Loud problems the owner must fix, in plain words (for example a raw TCP forward to the hub). Empty when all is well. */
+  warnings: string[];
 }
 
 // ---- 1.1 Local file access

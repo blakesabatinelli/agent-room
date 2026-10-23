@@ -49,7 +49,7 @@ if (!demo) {
 await orch.pruneWorktrees().catch(() => undefined);
 const resumed = orch.recover();
 if (resumed.length) console.log(`Resumed ${resumed.length} goal${resumed.length > 1 ? "s" : ""} after restart.`);
-const tsStatus = await tailscale.status(true);
+const tsStatus = await tailscale.status(true, port);
 const ts = remoteHost(tsStatus);
 // 1.2: report (never change) any difference between Tailscale's Funnel setting and the owner's.
 const remote = await (app as unknown as { remoteCheck: () => Promise<import("@agent-room/shared").RemoteStatus | undefined> }).remoteCheck();
@@ -58,11 +58,13 @@ console.log(`
 Agent Room hub ${demo ? "(demo mode, mock agents)" : ""}
   Local:      http://127.0.0.1:${port}
   Tailscale:  ${ts ? `http://${ts}:${port}` : tsStatus.detail + " Phones and other devices need it."}
-  Funnel:     ${remote?.funnel.on ? `ON, ${remote.funnel.url} (/mcp only)` : "off"}${remote?.funnel.drift ? `   WARNING: ${remote.funnel.drift === "on_in_tailscale" ? "on in Tailscale but off in Agent Room" : "off in Tailscale but on in Agent Room"}` : ""}
+  Funnel:     ${remote?.funnel.on ? `ON, ${remote.funnel.url} (/mcp only)` : "off"}${remote?.funnel.drift ? `   WARNING: ${remote.funnel.drift === "on_in_tailscale" ? "on in Tailscale but off in Agent Room" : remote.funnel.drift === "wrong_target" ? `/mcp points at ${remote.funnel.wrongTarget}, not this hub` : "off in Tailscale but on in Agent Room"}` : ""}
   Pair code:  ${code}   (valid 10 minutes, one use; restart for a new one)
   Data:       ${dataDir}
   Control:    ${control?.root ?? "not available"}
 Only localhost and Tailscale addresses are served.`);
+// 1.2: loud, once at start (and in the audit log): a raw TCP forward to the hub makes remote callers look local.
+for (const w of remote?.warnings ?? []) console.warn(`WARNING: ${w}`);
 
 // Optional outbound relay: cloud agents reach /mcp through it; nothing on this Mac listens for the relay.
 const { AGENT_ROOM_RELAY_URL: relayUrl, AGENT_ROOM_RELAY_HUB_ID: relayHubId, AGENT_ROOM_RELAY_SECRET: relaySecret } = process.env;

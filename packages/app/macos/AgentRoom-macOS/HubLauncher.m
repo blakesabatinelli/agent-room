@@ -3,6 +3,7 @@
 // with no shell. Xcode dev runs have no bundle, so they fall back to ./run.sh in the repo's hub folder (Info.plist AgentRoomHubDir).
 // Copied into the macOS Xcode target by Setup.command.
 #import <Foundation/Foundation.h>
+#import <unistd.h>
 #import <React/RCTBridgeModule.h>
 
 @interface HubLauncher : NSObject <RCTBridgeModule>
@@ -20,6 +21,23 @@ static NSString *ARDataDir(void) {
 }
 static NSString *ARLogPath(void) {
   return [ARDataDir() stringByAppendingPathComponent:@"hub.log"];
+}
+// 1.2: the secret the hub writes at every start. POST /pair/local needs it, so a remote caller that only reaches the hub through a local
+// TCP forwarder can't pair. Returns nil unless the file is a plain file (not a link) owned by this user and closed to group and others.
+static NSString *ARLocalPairSecret(void) {
+  NSString *path = [ARDataDir() stringByAppendingPathComponent:@"local-pair.secret"];
+  NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil]; // describes a symlink itself, never follows it
+  if (!attrs || ![attrs[NSFileType] isEqualToString:NSFileTypeRegular]) return nil;
+  if ([attrs[NSFileOwnerAccountID] unsignedIntValue] != (unsigned int)getuid()) return nil;
+  if (([attrs[NSFilePosixPermissions] unsignedShortValue] & 0077) != 0) return nil;
+  NSData *data = [NSData dataWithContentsOfFile:path];
+  NSString *text = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+  text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+  // The hub writes 32 random bytes as 64 lowercase hex characters. Anything else is not ours.
+  if (text.length != 64) return nil;
+  NSCharacterSet *notHex = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet];
+  if ([text rangeOfCharacterFromSet:notHex].location != NSNotFound) return nil;
+  return text;
 }
 static NSString *ARAgentPlist(void) {
   return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/LaunchAgents/com.agentroom.hub.plist"];
@@ -127,6 +145,12 @@ RCT_EXPORT_METHOD(ensureRunning:(RCTPromiseResolveBlock)resolve rejecter:(RCTPro
     if (ARWaitHealthy(30)) resolve(@{ @"started": @YES, @"log": ARLogPath() });
     else reject(@"timeout", [NSString stringWithFormat:@"The hub didn't start. Details are in %@", ARLogPath()], nil);
   });
+}
+
+// Resolves to the hub's local pairing secret, or null when the file is missing or isn't private to this user.
+RCT_EXPORT_METHOD(localPairSecret:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  NSString *secret = ARLocalPairSecret();
+  resolve(secret ?: [NSNull null]);
 }
 
 RCT_EXPORT_METHOD(startAtLoginEnabled:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {

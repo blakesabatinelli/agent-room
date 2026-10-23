@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HardwareInfo } from "@agent-room/shared";
@@ -26,3 +26,6 @@ export function setup(opts: { rand?: () => number; retryDelayMs?: number; gitBin
   const room = store.listRooms()[0];
   return { dir, store, approvals, orch, room, governor };
 }
+
+/** 1.2: headers the Mac app sends to POST /pair/local: the secret the hub wrote into its data folder. */
+export const localPairHeaders = (dir: string) => ({ "content-type": "application/json", "x-agent-room-local-secret": readFileSync(join(dir, "local-pair.secret"), "utf8") });

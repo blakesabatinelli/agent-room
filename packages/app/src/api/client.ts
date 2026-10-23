@@ -36,7 +36,8 @@ export class Hub {
 
   health = () => this.req<{ ok: boolean }>("/health");
   pair = (code: string, deviceName: string) => this.send<{ token: string; ownerName: string }>("POST", "/pair", { code, deviceName });
-  pairLocal = () => this.send<{ token: string; ownerName: string }>("POST", "/pair/local", { deviceName: "This Mac" });
+  /** `secret` is the hub's local pairing secret (native/hub.ts readLocalPairSecret). Without it the hub refuses. */
+  pairLocal = (secret: string) => this.req<{ token: string; ownerName: string }>("/pair/local", { method: "POST", body: JSON.stringify({ deviceName: "This Mac" }), headers: { "x-agent-room-local-secret": secret } });
   setup = () => this.req<SetupInfo>("/setup");
   saveSetup = (s: { practiceMode?: boolean; onboarded?: boolean }) => this.send("PUT", "/setup", s);
   // 1.7: in-app sign-in. mode "terminal" is the old Terminal flow, kept as a fallback.

@@ -13,7 +13,7 @@ import { buildServer } from "../src/api/server.js";
 import { parseSignIn, redactSignIn, needsTty, callbackPortBusy } from "../src/install/parse.js";
 import { SignInManager, type LoginProc, type SignInDeps } from "../src/install/signin.js";
 import { KV_FIRST_GOAL_DONE, KV_STARTED, markFirstGoalDone, markSetupStarted, setupTimer } from "../src/install/timer.js";
-import { setup } from "./helpers.js";
+import { localPairHeaders, setup } from "./helpers.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(here, "../../..");
@@ -235,7 +235,7 @@ async function boot(signin?: SignInManager) {
   const app = await buildServer({ ...ctx, ownerName: "Blake", signin });
   await app.listen({ host: "127.0.0.1", port: 0 });
   const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
-  const { token } = (await (await fetch(`${base}/pair/local`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json()) as { token: string };
+  const { token } = (await (await fetch(`${base}/pair/local`, { method: "POST", headers: localPairHeaders(ctx.dir), body: "{}" })).json()) as { token: string };
   const h = { authorization: `Bearer ${token}`, "content-type": "application/json" };
   const get = async <T>(path: string) => (await (await fetch(`${base}${path}`, { headers: h })).json()) as T;
   const post = (path: string, body: unknown = {}) => fetch(`${base}${path}`, { method: "POST", headers: h, body: JSON.stringify(body) });

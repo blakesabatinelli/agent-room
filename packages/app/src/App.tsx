@@ -32,7 +32,7 @@ export default function App() {
   );
   if (startupError) return (
     <View style={{ flex: 1, backgroundColor: p.canvas, alignItems: "center", justifyContent: "center", padding: space(8), gap: space(4) }}>
-      <Text style={[t.title, { color: p.inkStrong }]}>The hub didn't start</Text>
+      <Text style={[t.title, { color: p.inkStrong }]}>Agent Room couldn't start</Text>
       <Text selectable style={[t.body, { color: p.muted, maxWidth: 520, textAlign: "center" }]}>{startupError}</Text>
       <Button label="Try again" onPress={() => { setReady(false); restore().finally(() => setReady(true)); }} />
     </View>

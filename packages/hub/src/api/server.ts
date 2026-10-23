@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";
 import { z } from "zod";
-import { TOOLS, type AgentConfig, type GrantRefusal, type McpConnection, type ServerEvent } from "@agent-room/shared";
+import { TOOLS, type AgentConfig, type GrantRefusal, type McpConnection, type RemoteStatus, type ServerEvent } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { Approvals } from "../orchestrator/approvals.js";
@@ -22,6 +22,7 @@ import type { McpGrant } from "../orchestrator/orchestrator.js";
 import { defaultTailscale, type Tailscale } from "../remote/tailscale.js";
 import { AuthLimiter, forwardedIp, isRemoteRequest, rpcSummary } from "../remote/guard.js";
 import { composeRemote, remoteHost } from "../remote/status.js";
+import { LOCAL_SECRET_HEADER, localSecretMatches, writeLocalSecret } from "../remote/localpair.js";
 import { DiscoveryService } from "../discovery/service.js"; // 1.3
 import { issueKey } from "../discovery/tokens.js"; // 1.3
 import { buildInvite, presetAgent } from "../discovery/invite.js"; // 1.3
@@ -55,12 +56,23 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     try { done(null, JSON.parse(text)); } catch (e) { (e as Error & { statusCode?: number }).statusCode = 400; done(e as Error, undefined); }
   });
   await app.register(websocket);
+  // 1.2: the first hook after the websocket plugin's own (which must run first: it marks the upgraded socket so the plugin closes it after the
+  // reply). A proxied (Funnel) request that carries an Upgrade header of any kind is 404 here, whatever path it names and before any route,
+  // websocket or otherwise, can act on it. Only a plain POST/GET /mcp is served to a remote caller.
+  app.addHook("onRequest", async (req, reply) => {
+    if (req.headers.upgrade !== undefined && isRemoteRequest(req)) return reply.code(404).send({ error: "Not found." });
+  });
 
   let code = pairingCode();
   let codeIssued = Date.now();
-  const currentCode = () => { if (Date.now() - codeIssued > 10 * 60_000) { code = pairingCode(); codeIssued = Date.now(); } return code; };
+  // 1.2: failed guesses are counted per source address and start again whenever the code changes (10 minutes, or after a successful pairing).
+  const pairFailures = new Map<string, number>();
+  const rotateCode = () => { code = pairingCode(); codeIssued = Date.now(); pairFailures.clear(); };
+  const currentCode = () => { if (Date.now() - codeIssued > 10 * 60_000) rotateCode(); return code; };
   app.decorate("pairingCode", () => currentCode());
-  let pairFailures = 0;
+  // 1.2: the Mac app's proof that it is the Mac app (see remote/localpair.ts). New on every hub start, read from the data folder by the app.
+  const localSecret = writeLocalSecret(orch.dataDir);
+  let lastLocalDenied = 0;
 
   const authLimiter = new AuthLimiter(remoteAuth?.burst ?? 10, remoteAuth?.refillMs ?? 6000);
 
@@ -124,19 +136,28 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   app.post("/pair", async (req, reply) => {
     const b = z.object({ code: z.string(), deviceName: z.string().min(1).max(80) }).safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: "Send code and deviceName." });
-    if (pairFailures >= 10) return reply.code(429).send({ error: "Too many wrong codes. Restart the hub for a new code." });
-    if (b.data.code !== currentCode()) { pairFailures++; return reply.code(403).send({ error: "That pairing code is wrong or expired." }); }
+    const current = currentCode(); // may rotate the code, which also clears the failure counts
+    const from = req.socket.remoteAddress ?? "unknown";
+    if ((pairFailures.get(from) ?? 0) >= 10) return reply.code(429).send({ error: "Too many wrong codes from this device. Wait for the code to change, then try again." });
+    if (b.data.code !== current) {
+      if (pairFailures.size >= 1000 && !pairFailures.has(from)) pairFailures.clear(); // bounded memory; a flood of addresses just starts the count over
+      pairFailures.set(from, (pairFailures.get(from) ?? 0) + 1);
+      return reply.code(403).send({ error: "That pairing code is wrong or expired." });
+    }
     const t = token();
     store.addDevice(t, b.data.deviceName);
-    code = pairingCode(); codeIssued = Date.now(); // one-time
+    rotateCode(); // one-time
     store.audit("owner", "device.paired", b.data.deviceName);
     return { token: t, ownerName };
   });
 
   /**
    * Zero-step pairing for the Mac app itself. Only answers a native client on this Mac:
-   * loopback connection, a localhost Host header (blocks DNS rebinding) and no Origin
-   * header (browsers always send one on POST, so web pages can't use this).
+   * loopback connection, a localhost Host header (blocks DNS rebinding), no Origin
+   * header (browsers always send one on POST, so web pages can't use this) and, above all,
+   * the secret the hub wrote to <data dir>/local-pair.secret (x-agent-room-local-secret).
+   * The first three are cheap filters. They prove nothing against a local TCP forwarder
+   * (`tailscale funnel --tls-terminated-tcp`, `ssh -L`, `socat`), which the hub sees as 127.0.0.1; the secret does.
    */
   // 1.2: a proxied request (Tailscale Funnel/serve) arrives from 127.0.0.1 too; it is never "the app on this Mac".
   const isLoopback = (req: { socket: { remoteAddress?: string }; headers: Record<string, string | string[] | undefined> }) =>
@@ -145,6 +166,11 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     const host = (req.headers.host ?? "").split(":")[0];
     if (!isLoopback(req) || !["127.0.0.1", "localhost"].includes(host) || req.headers.origin)
       return reply.code(403).send({ error: "Local pairing only works from the app on this Mac." });
+    if (!localSecretMatches(localSecret, req.headers[LOCAL_SECRET_HEADER])) {
+      // Audited, but at most once a minute: a flood of guesses must not flood the log.
+      if (Date.now() - lastLocalDenied > 60_000) { lastLocalDenied = Date.now(); store.audit("hub", "device.pair_local.denied", "Local pairing refused: missing or wrong local secret"); }
+      return reply.code(403).send({ error: "Local pairing only works from the app on this Mac." });
+    }
     const t = token();
     store.addDevice(t, (req.body as { deviceName?: string } | undefined)?.deviceName ?? "This Mac");
     store.audit("owner", "device.paired", "This Mac (local)");
@@ -156,7 +182,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     const agents = store.listAgents();
     const status = await Promise.all(agents.map(async (a) => ({ id: a.id, name: a.name, enabled: a.enabled, color: a.color, adapter: a.adapter, ...(await adapters[a.adapter].status(a)) })));
     for (const a of agents) orch.forgetStatus(a.id);
-    const host = remoteHost(await tailscale.status());
+    const host = remoteHost(await tailscale.status(false, port()));
     const timer = setupTimer(store);
     return {
       agents: status,
@@ -187,16 +213,36 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
 
   // ---------- 1.2 remote access over Tailscale (paired devices only; a proxied/Funnel request never gets here)
   const funnelIntent = () => store.getKV<boolean>("remote_funnel", false);
-  const remoteNow = async (fresh = false) => composeRemote(await tailscale.status(fresh), funnelIntent(), port());
+  // Every status read runs the checks below (drift, extra paths, a /mcp handler aimed elsewhere, raw TCP forwards to the hub). Each problem is
+  // audited once per change, so a later read of the same problem is silent and a new or returning one is recorded.
+  let lastDrift = "";
+  const noteRemote = (r: RemoteStatus) => {
+    const f = r.funnel;
+    const forwards = r.warnings.length ? `forward:${r.warnings.join("|")}` : "";
+    const now = [f.drift ?? "", f.wrongTarget ?? "", ...f.extraPaths, forwards].join(",");
+    if (now && now !== lastDrift) {
+      if (f.drift === "wrong_target") store.audit("hub", "remote.funnel.drift", `Funnel serves /mcp from Tailscale but it points at ${f.wrongTarget}, not this hub (wrong_target)`);
+      else if (f.drift) store.audit("hub", "remote.funnel.drift", f.drift === "on_in_tailscale" ? "Funnel is on in Tailscale but off in Agent Room" : "Funnel is off in Tailscale but on in Agent Room");
+      if (f.extraPaths.length) store.audit("hub", "remote.funnel.extra_paths", `Funnel also exposes: ${f.extraPaths.join(", ")}`);
+      for (const w of r.warnings) store.audit("hub", "remote.tcp_forward", w);
+    }
+    lastDrift = now;
+  };
+  const remoteNow = async (fresh = false) => {
+    const r = composeRemote(await tailscale.status(fresh, port()), funnelIntent(), port());
+    try { noteRemote(r); } catch { /* the audit log never breaks a status read */ }
+    return r;
+  };
   app.get("/remote/status", async (req) => remoteNow((req.query as { fresh?: string }).fresh === "1"));
   // Funnel is the owner's call: { on: true } exposes /mcp at a public https address; { on: false } removes it.
   app.post("/remote/funnel", async (req, reply) => {
     const b = z.object({ on: z.boolean() }).safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: "Send on: true or false." });
-    const r = b.data.on ? await tailscale.enableFunnel(port()) : await tailscale.disableFunnel();
+    const r = b.data.on ? await tailscale.enableFunnel(port()) : await tailscale.disableFunnel(port());
     if (!b.data.on) store.setKV("remote_funnel", false); // the owner asked for off; if Tailscale still has it on, that shows up as drift
     if (!r.ok) {
       store.audit("owner", "remote.funnel.failed", `${b.data.on ? "on" : "off"}: ${r.error}`);
+      if (r.status) { try { noteRemote(composeRemote(r.status, funnelIntent(), port())); } catch { /* audit only */ } } // what Tailscale shows after the failed switch
       return reply.code(409).send({ error: r.error, approvalUrl: r.approvalUrl });
     }
     if (b.data.on) store.setKV("remote_funnel", true);
@@ -209,18 +255,8 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     return tailscale.openApp();
   });
   // Start-up check (main.ts calls it): the hub reports when Tailscale and the owner's setting disagree, and never changes either.
-  let lastDrift = "";
   app.decorate("remoteCheck", async () => {
-    try {
-      const r = await remoteNow(true);
-      const now = [r.funnel.drift ?? "", ...r.funnel.extraPaths].join(",");
-      if (now && now !== lastDrift) {
-        if (r.funnel.drift) store.audit("hub", "remote.funnel.drift", r.funnel.drift === "on_in_tailscale" ? "Funnel is on in Tailscale but off in Agent Room" : "Funnel is off in Tailscale but on in Agent Room");
-        if (r.funnel.extraPaths.length) store.audit("hub", "remote.funnel.extra_paths", `Funnel also exposes: ${r.funnel.extraPaths.join(", ")}`);
-      }
-      lastDrift = now;
-      return r;
-    } catch { return undefined; }
+    try { return await remoteNow(true); } catch { return undefined; }
   });
 
   // ---------- MCP (agents + external MCP apps)
@@ -230,14 +266,21 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     const from = remote ? forwardedIp(req) : "";
     if (remote && authLimiter.blocked(from)) return reply.code(429).send({ error: "Too many failed attempts. Try again in a minute." });
     const t = bearer(req.headers.authorization);
-    let grant: McpGrant | undefined = t ? orch.grants.get(t) : undefined;
+    // 1.2: the orchestrator's short-lived task grants are for agents the hub itself started on this Mac. A proxied caller never gets one, even
+    // if it somehow holds one: it can only use an external MCP key (below), which the owner made on purpose and can revoke.
+    let grant: McpGrant | undefined = t && !remote ? orch.grants.get(t) : undefined;
     if (!grant && t) {
       const hit = mcpTokens.lookup(t); // by hash
       if (hit && !hit.expired) { grant = { agentId: hit.record.agentId, roomId: hit.record.roomId, locked: !!hit.record.roomId, tokenId: hit.record.id }; mcpTokens.touch(hit.record.id); }
       else if (hit) store.audit(hit.record.agentId, "mcp.token.expired", `${hit.record.id} was used after it expired${remote ? ` from ${from}` : ""}`);
     }
     if (!grant || (grant.expiresAt && grant.expiresAt < Date.now())) {
-      if (remote) { authLimiter.fail(from); store.audit("remote", "mcp.remote.denied", `from ${from}`); }
+      if (remote) {
+        const lockedOut = authLimiter.fail(from);
+        store.audit("remote", "mcp.remote.denied", `from ${from}`);
+        // Once per lockout, at the failure that causes it. Never carries the token. Calls refused while locked out are not audited.
+        if (lockedOut) store.audit("remote", "mcp.remote.locked_out", `from ${from}: too many failed attempts, locked out`);
+      }
       return reply.code(401).send({ error: "Invalid MCP token." });
     }
     if (remote) store.audit(grant.agentId, "mcp.remote", `agent=${grant.agentId}${grant.tokenId ? ` key=${grant.tokenId}` : ""} ${rpcSummary(req.body)} from ${from}`);
@@ -456,7 +499,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   const connectionFor = async (a: AgentConfig, shown: string | undefined): Promise<McpConnection> => {
     // 1.1: only a hash of the key is stored, so after a hub restart the key can't be shown again. The snippets keep a placeholder; rotating makes a key that can be shown.
     const t = shown ?? "YOUR_KEY";
-    const st = await tailscale.status();
+    const st = await tailscale.status(false, port());
     const host = remoteHost(st); // MagicDNS name first, then the tailnet IP
     const ip = process.env.AGENT_ROOM_TAILSCALE_IP ?? (st.state === "running" ? st.ip : undefined);
     const localUrl = `http://127.0.0.1:${port()}/mcp`;
@@ -557,7 +600,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
       if (!a) return reply.code(404).send({ error: "Agent not found." });
       store.saveAgent(a); store.audit("owner", "agent.saved", a.id);
     }
-    const host = remoteHost(await tailscale.status());
+    const host = remoteHost(await tailscale.status(false, port()));
     if (!host) return reply.code(409).send({ error: `${a.name} joins from another device over Tailscale, and Tailscale isn't connected on this Mac yet. Connect it under Remote access, then ask again.` });
     // Keys are stored as hashes (1.1): the first invite makes the key and shows it once. A second one says so and leaves the key
     // alone, because a new key would cut off an agent that is already connected. { rotate: true } is the owner's "make a new key".

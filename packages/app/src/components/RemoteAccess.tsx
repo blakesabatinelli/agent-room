@@ -97,7 +97,9 @@ export function RemoteAccess({ funnel = false }: { funnel?: boolean }) {
             {st.funnel.on && st.funnel.url ? line("Public address", st.funnel.url) : <Text style={[t.small, { color: p.muted }]}>Off. Nothing on this Mac is reachable from the internet.</Text>}
             {st.funnel.drift === "on_in_tailscale" ? <Text style={[t.small, { color: p.danger }]}>Funnel is on in Tailscale, but you haven't turned it on here. It was switched on outside Agent Room. Switch it off here to close it.</Text> : null}
             {st.funnel.drift === "off_in_tailscale" ? <Text style={[t.small, { color: p.warn }]}>You switched Funnel on here, but Tailscale has it off now. Switch it off and on again to restore it.</Text> : null}
+            {st.funnel.drift === "wrong_target" ? <Text style={[t.small, { color: p.danger }]}>Tailscale serves /mcp, but it points at {st.funnel.wrongTarget ?? "something else"}, not Agent Room. Funnel is shown as off here. Fix it in Tailscale.</Text> : null}
             {st.funnel.extraPaths.length ? <Text style={[t.small, { color: p.danger }]}>Funnel is also exposing {st.funnel.extraPaths.join(", ")} on this Mac. Run "tailscale funnel reset" in Terminal to close it.</Text> : null}
+            {st.warnings.map((w) => <Text key={w} style={[t.small, { color: p.danger, fontWeight: "600" }]}>WARNING: {w}</Text>)}
           </View>
         </>
       ) : null}
