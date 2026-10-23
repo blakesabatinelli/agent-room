@@ -149,6 +149,7 @@ export const useRoom = create<State>((set, get) => ({
         break;
       case "read": if (s.unread[e.roomId]) set({ unread: { ...s.unread, [e.roomId]: 0 } }); break;
       case "task": if (e.task.roomId === s.roomId) set({ tasks: { ...s.tasks, [e.task.id]: e.task } }); break;
+      case "subagent": if (e.task.roomId === s.roomId) set({ tasks: { ...s.tasks, [e.task.id]: e.task } }); break; // 3.3: the same task, told again with its parent's id
       case "goal": if (e.goal.roomId === s.roomId) set({ goals: { ...s.goals, [e.goal.id]: e.goal } }); break;
       case "agent": set({ agents: [...s.agents.filter((a) => a.id !== e.agent.id), e.agent].sort((a, b) => a.name.localeCompare(b.name)) }); break;
       case "agent_status":

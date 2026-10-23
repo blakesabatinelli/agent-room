@@ -225,3 +225,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .rline { margin-top: 6px; font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
 .rline.warn { color: var(--warn); }
 .rbtn { margin-top: 10px; }
+/* 3.3 tasks: the room's tasks as a tree, helpers indented under the task that started them */
+.pill.quiet { background: var(--bg); color: var(--accent); border: 1px solid var(--line-strong); }
+.trow { display: flex; align-items: flex-start; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+.trow .av { width: 24px; height: 24px; border-radius: 6px; font-size: 12px; }
+.trow.d1 { padding-left: 34px; } .trow.d2 { padding-left: 52px; } .trow.d3 { padding-left: 70px; } .trow.d4 { padding-left: 88px; }
+.trow .tbody { flex: 1; min-width: 0; }
+.ttitle { font-size: 15px; color: var(--strong); overflow-wrap: anywhere; }
+.tsub { margin-top: 2px; font-size: 13px; color: var(--muted); }
+.tsub.s-done { color: var(--ok); } .tsub.s-failed { color: var(--danger); } .tsub.s-waiting { color: var(--warn); }
+.tag { display: inline-block; margin-left: 4px; padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: 99px; font-size: 11px; font-weight: 600; color: var(--muted); vertical-align: 1px; }

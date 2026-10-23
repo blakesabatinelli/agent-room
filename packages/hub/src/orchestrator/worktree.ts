@@ -71,6 +71,8 @@ export interface TaskWorkspace {
   snap?: Record<string, string>;
   /** Files left with conflict markers by the last failed accept. */
   conflicted?: string[];
+  /** 3.3: set on a subagent's workspace: it was cut from this task's worktree, and accepted work merges back into it (never into the goal base). */
+  parentTaskId?: string;
 }
 export interface WritebackChange { relPath: string; /** null = deleted */ content: Buffer | null }
 /** 1.1: what an accepted task did to a granted folder, for the caller to act on. */
@@ -177,7 +179,7 @@ export class TaskWorkspaces {
       return existsSync(m.path) ? m : undefined;
     } catch { return undefined; }
   }
-  private save(m: TaskWorkspace) { mkdirSync(this.root(m.goalId), { recursive: true }); writeFileSync(this.metaFile(m.goalId, m.taskId), JSON.stringify(m)); }
+  save(m: TaskWorkspace) { mkdirSync(this.root(m.goalId), { recursive: true }); writeFileSync(this.metaFile(m.goalId, m.taskId), JSON.stringify(m)); }
   private listMeta(goalId: string): TaskWorkspace[] {
     let names: string[] = [];
     try { names = readdirSync(this.root(goalId)); } catch { return []; }
@@ -192,7 +194,7 @@ export class TaskWorkspaces {
    * clean environment, and, for a repository the hub owns, its config put back first. `owner: true` is for the OWNER's repository
    * (reading its head, fetching from it, pushing to it): its config is the owner's and is never rewritten.
    */
-  private git(cwd: string, args: string[], stdin?: string, owner = false) {
+  git(cwd: string, args: string[], stdin?: string, owner = false, extraEnv?: Record<string, string> /* 3.3: GIT_INDEX_FILE for a snapshot that leaves the real index alone */) {
     const b = this.bound.get(cwd);
     if (!owner) {
       const repo = b?.repo ?? (isDir(join(cwd, ".git")) ? cwd : undefined);
@@ -208,7 +210,7 @@ export class TaskWorkspaces {
     ], {
       cwd, stdin, timeoutMs: 120_000,
       env: {
-        ...hardenedGitEnv(), ...(b?.env ?? {}),
+        ...hardenedGitEnv(), ...(b?.env ?? {}), ...(extraEnv ?? {}),
         GIT_AUTHOR_NAME: HUB_IDENTITY.name, GIT_AUTHOR_EMAIL: HUB_IDENTITY.email,
         GIT_COMMITTER_NAME: HUB_IDENTITY.name, GIT_COMMITTER_EMAIL: HUB_IDENTITY.email,
       },
@@ -231,7 +233,7 @@ export class TaskWorkspaces {
   private names(stdout: string) { return stdout.split("\0").filter(Boolean).sort(); }
 
   /** Run one goal's workspace operations one at a time. */
-  private locked<T>(goalId: string, fn: () => Promise<T>): Promise<T> {
+  locked<T>(goalId: string, fn: () => Promise<T>): Promise<T> {
     const next = (this.chains.get(goalId) ?? Promise.resolve()).catch(() => undefined).then(fn);
     this.chains.set(goalId, next.catch(() => undefined));
     return next;
@@ -340,7 +342,7 @@ export class TaskWorkspaces {
   }
 
   /** Bind a task's work folder to the repository it belongs to, from what git wrote when the hub made it (not from what is in the folder now). */
-  private bindTask(m: TaskWorkspace) { if (m.kind === "git") this.bind(m.path, m.base, m.gitdir); }
+  bindTask(m: TaskWorkspace) { if (m.kind === "git") this.bind(m.path, m.base, m.gitdir); }
 
   /**
    * 1.1 granted-git: the hub's own clone of the owner's repo, at <goal>/_repo. Only the history of the owner's checked-out head is fetched
@@ -501,7 +503,7 @@ export class TaskWorkspaces {
    * the hub's own git commands, which run outside the agent's sandbox, read a config the agent wrote (core.fsmonitor and friends run commands).
    * Before the hub runs git in a work folder the pointer is put back exactly as git wrote it.
    */
-  private restorePointer(m: TaskWorkspace) {
+  restorePointer(m: TaskWorkspace) {
     if (m.kind !== "git" || !m.gitdir) return;
     const p = join(m.path, ".git");
     try { const st = lstatSync(p); if (st.isFile() && readFileSync(p, "utf8") === m.gitdir) return; rmSync(p, { recursive: true, force: true }); } catch { /* missing: written below */ }
@@ -545,7 +547,7 @@ export class TaskWorkspaces {
     return { ok: false, conflict };
   }
 
-  private async acceptCopy(m: TaskWorkspace): Promise<AcceptResult> {
+  async acceptCopy(m: TaskWorkspace): Promise<AcceptResult> {
     const was = new Map(Object.entries(m.snap ?? {}));
     const mine = snapshot(m.path), theirs = snapshot(m.base);
     // 1.1: hard-linked files are never copied into the base (see acceptGit).

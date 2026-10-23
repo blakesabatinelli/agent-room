@@ -30,6 +30,7 @@ IDs D1-D9 match the decisions register in `PLAN.md` section 10. Status is **Open
 
 - **Proposal (the brief's leaning):** depth 2; a spawn budget per goal (default 6 subagents, owner-adjustable); read-only fan-out is free of the per-task write rule; any subagent that writes gets its own worktree; the parent stays accountable and its subagents' output is judged as part of the parent's task.
 - **Owner to confirm.** Start strict, loosen with data (watch tokens per goal: the risk register's early warning is +50%).
+- **As built (3.3):** settings `subagents` = `maxDepth` 2, `budgetPerGoal` 6, `maxParallel` 3 per parent, all owner-adjustable. The budget counts read-only helpers too (they cost tokens as much as writers) and each helper also counts as a run in the goal's task-run budget. Subagents an agent's own tool launches are shown in the tree and counted in the ledger but not budgeted. A writing helper's changes reach its parent's worktree only when the parent accepts them.
 
 ## D9: Remote access (Decided by owner, 2026-10-23)
 

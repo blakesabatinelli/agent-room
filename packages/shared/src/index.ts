@@ -361,6 +361,7 @@ export const SETTING_DEFAULTS = {
   stallLimit: 4, maxGoalReplans: 2, maxVerifyRounds: 2, maxTaskRuns: 40,
   memoryTtlDays: { fact: 90, preference: 365, status: 14 }, memoryExportBytes: 4096, // 2.5
   probationRuns: 5, // 2.3
+  subagents: { maxDepth: 2, budgetPerGoal: 6, maxParallel: 3 }, // 3.3 (D8)
 };
 
 /** Suggested profiles per provider, following the delegation policy's routing table. */
@@ -405,7 +406,9 @@ export type ServerEvent =
   /** The owner has read a room up to this time (synced across the Mac and phone). */
   | { type: "read"; roomId: string; at: number }
   /** A control file changed on disk or in the app and was loaded (1.9). */
-  | { type: "control"; at: number; changed: string[]; notices: ControlNotice[] };
+  | { type: "control"; at: number; changed: string[]; notices: ControlNotice[] }
+  /** 3.3: a subagent (room or native) started, changed or finished. `task` is the child; parentTaskId is the task it belongs to. */
+  | { type: "subagent"; parentTaskId: string; task: Task };
 
 // ---- 0.4 Document standard
 export type DocStatus = "draft" | "review" | "final";
@@ -512,7 +515,8 @@ export type RoutingReason =
   | "planner_choice"   // the planner answered "direct" and named the agent
   | "only_candidate"   // one agent connected
   | "command"         // 2.6: the owner typed /<agent>:<command>, so no policy chose
-  | "shadow";         // 2.3: a probation agent practising on a copy of a real task
+  | "shadow"          // 2.3: a probation agent practising on a copy of a real task
+  | "subagent";       // 3.3: a helper an agent launched with spawn_agent (picked by the parent, or by learned routing); not judged
 
 export interface RoutingCandidate {
   agentId: string;
@@ -538,7 +542,7 @@ export interface RoutingRecord {
   taskTitle: string;
   taskType: string;
   /** "task" = a planned task attempt; "direct" = a conversational answer with no plan; "shadow" (2.3) = a probation agent's practice copy of a real task. */
-  kind: "task" | "direct" | "shadow";
+  kind: "task" | "direct" | "shadow" | "subagent";
   /** Attempt number on this task (1 = first try). */
   attempt: number;
   revision: boolean;
@@ -1521,3 +1525,25 @@ export interface ReturnLedger {
 
 /** Subscription.monthlyUsd: what the owner pays for the plan each month (the return ledger divides it by accepted tasks). */
 export interface Subscription { monthlyUsd?: number }
+
+// ---- 3.3 Subagents across the platform
+/** Fields 3.4 (the office) renders subagents from. A planned task has depth 0, kind "task" (or none) and no parent. */
+export interface Task {
+  /** The task this one was launched from. */
+  parentTaskId?: string;
+  /** 0 for planned tasks, parent's depth + 1 for subagents. */
+  depth?: number;
+  /** Agent id that launched it. */
+  spawnedBy?: string;
+  kind?: "task" | "subagent";
+  /** The helper may not write: no write tools, nothing merged. */
+  readOnly?: boolean;
+  /** A subagent the agent's own tool launched inside its run (Claude Code Agent/Task tool, Codex), seen from its event stream. Not routed, judged or budgeted. */
+  native?: boolean;
+  /** A writing room subagent's changes wait in its own worktree for the parent to accept (accept_subagent) or discard them. */
+  pendingMerge?: { files: string[]; conflictRounds: number };
+}
+/** Subagent counts for a goal (the ledger shows them). `spawned` counts against subagents.budgetPerGoal; `native` is for visibility only. */
+export interface GoalProgress { subagents?: { spawned: number; native: number } }
+export interface SubagentSettings { maxDepth: number; budgetPerGoal: number; maxParallel: number }
+export interface OrchestratorSettings { subagents?: Partial<SubagentSettings> }

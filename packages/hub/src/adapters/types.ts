@@ -1,4 +1,5 @@
 import type { AgentConfig, RunUsage } from "@agent-room/shared";
+import type { NativeEvent } from "../subagents/native.js"; // 3.3
 
 export interface RunRequest {
   agent: AgentConfig;
@@ -22,6 +23,10 @@ export interface RunRequest {
   claimTimeoutMs?: number;
   signal?: AbortSignal;
   onChunk?: (text: string) => void;
+  /** 3.3: a read-only helper: no write tools (Claude Code), `--sandbox read-only` (Codex). The hub's own file tools refuse its writes too. */
+  readOnly?: boolean;
+  /** 3.3: subagents the agent launches inside its own tool, as the event stream shows them. */
+  onSubagent?: (e: NativeEvent) => void;
 }
 
 export interface RunResult {

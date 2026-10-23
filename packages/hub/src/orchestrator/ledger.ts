@@ -144,7 +144,7 @@ export function readDeliverables(folder: string | undefined, files: string[], bu
 const mark = (s: Task["status"]) => s === "done" ? "x" : s === "failed" || s === "cancelled" ? "-" : " ";
 
 /** The progress ledger as Markdown. Agents read it; only the orchestrator writes it. */
-export function ledgerMarkdown(goal: Goal, tasks: Task[], agents: AgentConfig[]): string {
+export function ledgerMarkdown(goal: Goal, tasks: Task[], agents: AgentConfig[], subagentBudget = 6 /* 3.3 */): string {
   const name = (id?: string) => agents.find((a) => a.id === id)?.name ?? id ?? "unassigned";
   const c = goal.contract;
   const reqs = c?.requirements ?? [];
@@ -154,6 +154,7 @@ export function ledgerMarkdown(goal: Goal, tasks: Task[], agents: AgentConfig[])
     ``,
     `Status: ${goal.status}${p ? ` · ${p.runs} task runs · ${goal.state?.progress?.goalReplans ?? 0} replans` : ""}`,
     `Next: ${goal.state?.nextAction || "—"}`,
+    ...(p?.subagents && (p.subagents.spawned || p.subagents.native) ? [`Helpers: ${p.subagents.spawned} of ${subagentBudget} started${p.subagents.native ? `, ${p.subagents.native} built-in (not counted)` : ""}`] : []), // 3.3
     ``,
     `## Requirements (what done means)`,
     ...(reqs.length ? reqs.map((r) => `- [${r.status === "met" ? "x" : " "}] ${r.id} ${r.text}${r.status === "unmet" ? ` — NOT MET${r.evidence ? `: ${r.evidence}` : ""}` : ""}  (${tasks.filter((t) => t.covers?.includes(r.id) && t.status !== "cancelled").map((t) => t.title).join(", ") || "no task yet"})`) : ["- (none)"]),

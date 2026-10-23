@@ -33,7 +33,7 @@ function readContext(cwd: string): string | undefined {
  */
 export class MockAdapter implements Adapter {
   /** Every run, for tests: which profile reached the agent. */
-  static calls: { agentId: string; model?: string; effort?: string; kind: string; prompt: string; cwd: string; context?: string }[] = [];
+  static calls: { agentId: string; model?: string; effort?: string; kind: string; prompt: string; cwd: string; context?: string; readOnly?: boolean }[] = [];
   static transientSeen = new Map<string, number>();
   private static barriers = new Map<string, { arrived: number; open: boolean; open_: () => void; opened: Promise<void> }>();
   /** Wait until `n` runs with this key have started (see the `barrier` knob). Returns false if the signal aborted first. */
@@ -54,7 +54,7 @@ export class MockAdapter implements Adapter {
     const p = req.prompt;
     const st = req.agent.settings as { quality?: number; status?: string; outOfScope?: string; tag?: string; noReport?: boolean; checks?: boolean; bigPlan?: boolean; skipFiles?: boolean; writeOutside?: string };
     const kind = (p.match(/^\[\[(\w+)\]\]/)?.[1] ?? (p.includes("# Your task:") ? "TASK" : "CHAT")).toUpperCase();
-    MockAdapter.calls.push({ agentId: req.agent.id, model: req.model, effort: req.effort, kind, prompt: p, cwd: req.cwd, context: readContext(req.cwd) });
+    MockAdapter.calls.push({ agentId: req.agent.id, model: req.model, effort: req.effort, kind, prompt: p, cwd: req.cwd, context: readContext(req.cwd), ...(req.readOnly ? { readOnly: true } : {}) });
     const quality = Number(st.quality ?? 0.8);
     const ids = [...new Set([...p.matchAll(/^(AC\d+):/gm)].map((m) => m[1]))];
     let text: string;

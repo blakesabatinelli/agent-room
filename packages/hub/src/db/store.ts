@@ -144,9 +144,10 @@ export class Store extends EventEmitter {
   }
   deleteTask(taskId: string) { this.stmt("DELETE FROM tasks WHERE id=?").run(taskId); }
   getTask(taskId: string) { return this.one<Task>("SELECT data FROM tasks WHERE id=?", taskId); }
-  listTasks(filter: { roomId?: string; goalId?: string }) {
-    if (filter.goalId) return this.all<Task>("SELECT data FROM tasks WHERE goal_id=?", filter.goalId);
-    return this.all<Task>("SELECT data FROM tasks WHERE room_id=?", filter.roomId);
+  /** 3.3: subagents (helpers) are tasks too, but the plan, ledger, budget and judging only ever see planned tasks, so they are left out unless `subagents` is set. */
+  listTasks(filter: { roomId?: string; goalId?: string; subagents?: boolean }) {
+    const rows = filter.goalId ? this.all<Task>("SELECT data FROM tasks WHERE goal_id=?", filter.goalId) : this.all<Task>("SELECT data FROM tasks WHERE room_id=?", filter.roomId);
+    return filter.subagents ? rows : rows.filter((t) => t.kind !== "subagent");
   }
 
   // ---- memory. Shared rows are written only by the Orchestrator (the keeper).

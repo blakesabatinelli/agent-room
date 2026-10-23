@@ -404,7 +404,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   app.post("/rooms/:id/pause", async (req) => { const { id } = req.params as { id: string }; orch.setPaused(id, z.object({ paused: z.boolean() }).parse(req.body).paused); return { ok: true }; });
   app.post("/rooms/:id/stop", async (req) => { orch.stopRoom((req.params as { id: string }).id); return { ok: true }; });
   app.get("/rooms/:id/goals", async (req) => store.listGoals((req.params as { id: string }).id));
-  app.get("/rooms/:id/tasks", async (req) => store.listTasks({ roomId: (req.params as { id: string }).id }));
+  app.get("/rooms/:id/tasks", async (req) => store.listTasks({ roomId: (req.params as { id: string }).id, subagents: true })); // 3.3: helpers too, so the apps can show the tree
   // Plan approval: { decision: "approve" | "revise" | "cancel", text? }
   app.post("/goals/:id/plan", async (req, reply) => {
     const b = z.object({ decision: z.enum(["approve", "revise", "cancel"]), text: z.string().max(4000).optional() }).parse(req.body);
@@ -681,6 +681,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
       memoryTtlDays: z.object({ fact: z.number().int().min(1).max(3650), preference: z.number().int().min(1).max(3650), status: z.number().int().min(1).max(3650) }).optional(), // 2.5
       memoryExportBytes: z.number().int().min(512).max(65536).optional(), // 2.5
       probationRuns: z.number().int().min(1).max(50).optional(), // 2.3
+      subagents: z.object({ maxDepth: z.number().int().min(0).max(4).optional(), budgetPerGoal: z.number().int().min(0).max(50).optional(), maxParallel: z.number().int().min(1).max(10).optional() }).optional(), // 3.3 (D8)
       attention: z.object({ // 2.7
         dailyInterruptCap: z.number().int().min(0).max(100).optional(),
         digestAt: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/).optional(),
