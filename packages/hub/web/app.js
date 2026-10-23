@@ -8,7 +8,7 @@
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
     view: "rooms",          // rooms | room | approvals | diff | permissions | folders | control | subscriptions | remote | personas | persona | resumes | scorecard | appearance | pair
-    tools: [], control: null, quota: [], remote: null, firstPass: null, memExport: [], resumes: null, probationCount: 0,
+    tools: [], control: null, policy: null, quota: [], remote: null, firstPass: null, memExport: [], resumes: null, probationCount: 0,
     scorecard: null, scWeek: "this", ledger: null, attention: null, // 2.7
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, tasks: {}, goalOpen: {}, working: {}, approvals: [],
     // 3.1: the jump sheet (the Mac's Command-K): the query, the highlighted row and the rows on show
@@ -180,7 +180,7 @@
         break;
       case "agent": st.agents[e.agent.id] = e.agent; if (st.view === "permissions") renderPermissions(); else if (st.view === "personas") renderPersonas(); break;
       case "read": if (st.unread.delete(e.roomId) && st.view === "rooms") renderRooms(); break;
-      case "control": loadControl().catch(() => {}); break;
+      case "control": loadControl().catch(() => {}); loadPolicy().catch(() => {}); break;
     }
   }
 
@@ -198,7 +198,7 @@
     try {
       const [rooms, agents, approvals] = await Promise.all([api("/rooms"), api("/agents"), api("/approvals?status=pending")]);
       st.rooms = rooms; st.agents = Object.fromEntries(agents.map((a) => [a.id, a])); st.approvals = approvals;
-      connectWs(); render(); loadControl().catch(() => {});
+      connectWs(); render(); loadControl().catch(() => {}); loadPolicy().catch(() => {});
       openFromHash(); // 3.4: the office page links back here with #room=<id>
       // 1.5: what the hub found about its computer, one line under Settings
       api("/capacity").then((c) => { st.capacity = c; if (st.view === "rooms") renderRooms(); }).catch(() => {});
@@ -253,7 +253,7 @@
     $("#composer").hidden = st.view !== "room";
     const room = st.rooms.find((r) => r.id === st.roomId);
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : room.name)
-      : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : st.view === "scorecard" ? "Scorecard" : st.view === "personas" ? "Personas" : st.view === "persona" ? (st.agents[st.personas.id]?.name || "Persona") : "Agent Room";
+      : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "policy" ? "Approval rules" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : st.view === "scorecard" ? "Scorecard" : st.view === "personas" ? "Personas" : st.view === "persona" ? (st.agents[st.personas.id]?.name || "Persona") : "Agent Room";
     renderDot(); renderBadge();
     $("#tasksBtn").hidden = st.view !== "room"; // 3.3
     if (st.view === "tasks") $("#title").textContent = "Tasks"; // 3.3
@@ -271,6 +271,7 @@
     if (st.view === "folders") return renderFolders();
     if (st.view === "permissions") return renderPermissions();
     if (st.view === "control") return renderControl();
+    if (st.view === "policy") return renderPolicy(); // 4.2
     if (st.view === "subscriptions") return renderSubscriptions();
     if (st.view === "remote") return renderRemote();
     if (st.view === "resumes") return renderResumes(); // 2.3
@@ -357,6 +358,7 @@
       <button class="row" data-nav="personas"><span class="hash">☺</span><span class="name">Personas</span></button>
       <button class="row" data-nav="scorecard"><span class="hash">▥</span><span class="name">Scorecard</span></button>
       <button class="row" data-nav="appearance"><span class="hash">☾</span><span class="name">Appearance</span></button>
+      <button class="row" data-nav="policy"><span class="hash">✓</span><span class="name">Approval rules</span>${st.policy?.pending ? `<span class="sub">${st.policy.pending} to review</span>` : ""}</button>
       <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>${st.capacity ? `<div class="capline">${esc(st.capacity.summary)}</div>` : ""}`;
     paintColors();
   }
@@ -507,6 +509,10 @@
           <button class="btn small" data-approval="${esc(a.id)}" data-decision="approved">Approve</button>
           <button class="btn small plain" data-approval="${esc(a.id)}" data-decision="rejected">Reject</button>
         </div>
+        <div class="actions">
+          <button class="btn small ghost" data-lease-card="${esc(a.id)}" data-minutes="30">Allow for 30 minutes</button>
+          <button class="btn small ghost" data-lease-card="${esc(a.id)}" data-goal="1">Allow for this goal</button>
+        </div>
       </div>`).join("") : `<div class="empty">Nothing waiting for you.</div>`;
   }
 
@@ -519,6 +525,65 @@
         <div class="actions">${a.question.choices.map((c) => `<button class="btn small${c.id === first ? "" : " plain"}" data-answer="${esc(a.id)}" data-choice="${esc(c.id)}">${esc(c.label)}</button>`).join("")}</div>
       </div>`;
   }
+
+
+  // ---------- 4.2 approval rules: what the hub learned from your approvals, the rules you wrote, and permissions that end by themselves
+  const leftWords = (ms) => {
+    const s = Math.max(0, Math.ceil(ms / 1000));
+    if (s < 60) return `${s}s left`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s left`;
+    const hr = Math.floor(m / 60);
+    return hr < 24 ? `${hr}h ${m % 60}m left` : `${Math.floor(hr / 24)}d ${hr % 24}h left`;
+  };
+
+  async function loadPolicy() {
+    try {
+      st.policy = await api("/policy");
+      if (st.view === "policy") renderPolicy(); else if (st.view === "rooms") renderRooms();
+    } catch (e) { if (e.message === "unpaired") throw e; /* older hub without approval rules */ }
+  }
+
+  function renderPolicy() {
+    const p = st.policy;
+    if (!p) { $("#view").replaceChildren(h("div", { class: "empty", text: "Loading…" })); return; }
+    const kids = [];
+    if (!p.ok) kids.push(h("div", { class: "card" }, h("div", { class: "what", text: "Rules aren't available" }), h("div", { class: "detail warn", text: p.problem || "POLICY.md can't be read. Fix it on your Mac." })));
+    const proposals = p.rules.filter((r) => r.kind === "learned" && !r.accepted);
+    if (proposals.length) {
+      kids.push(h("div", { class: "section", text: `To review (${proposals.length})` }));
+      for (const r of proposals) kids.push(h("div", { class: "card" },
+        h("div", { class: "what", text: r.text }),
+        h("div", { class: "actions" },
+          h("button", { class: "btn small", "data-rule-accept": r.id, text: "Accept" }),
+          h("button", { class: "btn small plain", "data-rule-delete": r.id, text: "Delete" }))));
+    }
+    if (p.leases.length) {
+      kids.push(h("div", { class: "section", text: "Active leases" }));
+      for (const l of p.leases) kids.push(h("div", { class: "card" },
+        h("div", { class: "what", text: l.text }),
+        h("div", { class: "detail", "data-expires": String(l.expiresAt), text: leftWords(l.expiresAt - Date.now()) }),
+        h("div", { class: "actions" }, h("button", { class: "btn small plain", "data-lease-revoke": l.id, text: "Revoke" }))));
+    }
+    const groups = [["Your rules", (r) => r.kind === "owner"], ["Accepted from your approvals", (r) => r.kind === "learned" && r.accepted]];
+    for (const [title, keep] of groups) {
+      const rows = p.rules.filter(keep);
+      if (!rows.length) continue;
+      kids.push(h("div", { class: "section", text: title }));
+      for (const r of rows) kids.push(h("div", { class: "card" },
+        h("div", { class: "what", text: r.text }),
+        r.kind === "learned" ? h("div", { class: "actions" }, h("button", { class: "btn small plain", "data-rule-delete": r.id, text: "Delete" })) : null));
+    }
+    if (!proposals.length && !p.leases.length && !p.rules.length && p.ok) kids.push(h("div", { class: "empty", text: "No rules yet. When you approve the same kind of thing a few times, the hub offers a rule here." }));
+    kids.push(h("div", { class: "card" }, h("div", { class: "detail", text: "To change a rule's wording or scope, edit POLICY.md on your Mac." })));
+    $("#view").replaceChildren(...kids);
+  }
+
+  // The countdown on screen: one timer, only while the rules screen is open.
+  setInterval(() => {
+    if (st.view !== "policy") return;
+    for (const el of document.querySelectorAll("[data-expires]")) el.textContent = leftWords(Number(el.dataset.expires) - Date.now());
+  }, 1000);
 
   // ---------- 1.1 file writes: the full diff, read to the end before Approve
   const proposalFor = (a) => st.full[a.id];
@@ -1115,7 +1180,7 @@
   }
 
   // ---------- 3.1 the jump sheet: rooms, agents, room commands and screens in one list (the Mac's Command-K)
-  const PHONE_SCREENS = ["approvals", "folders", "permissions", "appearance", "scorecard", "resumes", "agents"];
+  const PHONE_SCREENS = ["approvals", "folders", "permissions", "appearance", "scorecard", "resumes", "agents", "policy"];
   function jumpItems() {
     return ARView.paletteItems({
       rooms: st.rooms, agents: Object.values(st.agents), currentRoomId: st.view === "room" ? st.roomId : undefined,
@@ -1153,7 +1218,7 @@
       if (a.kind === "room") go("room", a.roomId);
       else if (a.kind === "dm") { const r = await api(`/rooms/dm/${encodeURIComponent(a.agentId)}`, { method: "POST", body: {} }); if (!st.rooms.some((x) => x.id === r.id)) st.rooms.push(r); go("room", r.id); }
       else if (a.kind === "page") {
-        const sc = { approvals: "approvals", folders: "folders", permissions: "permissions", appearance: "appearance", scorecard: "scorecard", resumes: "resumes", agents: "personas" }[a.screen];
+        const sc = { approvals: "approvals", folders: "folders", permissions: "permissions", appearance: "appearance", scorecard: "scorecard", resumes: "resumes", agents: "personas", policy: "policy" }[a.screen];
         if (sc === "approvals") go("approvals"); else if (sc) navigate(sc);
       }
       else if (a.kind === "command") { if (st.roomId) await api(`/rooms/${st.roomId}/messages`, { method: "POST", body: { text: a.text } }); }
@@ -1191,6 +1256,25 @@
       if (t.dataset.gformForce) { void addGrant(true); return; }
       if (t.dataset.gformCancel) { st.gform.override = null; st.gform.err = ""; renderFolders(); return; }
       if (t.dataset.nav === "control") { go("control"); loadControl().catch(() => {}); return; }
+      if (t.dataset.nav === "policy") { go("policy"); await loadPolicy(); return; } // 4.2
+      if (t.dataset.ruleAccept || t.dataset.ruleDelete || t.dataset.leaseRevoke) { // 4.2: accept or delete a proposed rule, revoke a lease
+        t.disabled = true;
+        try {
+          if (t.dataset.ruleAccept) await api(`/policy/rules/${encodeURIComponent(t.dataset.ruleAccept)}/accept`, { method: "POST", body: {} });
+          else if (t.dataset.ruleDelete) await api(`/policy/rules/${encodeURIComponent(t.dataset.ruleDelete)}`, { method: "DELETE" });
+          else await api(`/leases/${encodeURIComponent(t.dataset.leaseRevoke)}`, { method: "DELETE" });
+          await loadPolicy();
+        } finally { t.disabled = false; }
+        return;
+      }
+      if (t.dataset.leaseCard) { // 4.2: "Allow for 30 minutes" / "Allow for this goal" on an approval card
+        for (const b of document.querySelectorAll(`button[data-lease-card="${CSS.escape(t.dataset.leaseCard)}"], button[data-approval="${CSS.escape(t.dataset.leaseCard)}"]`)) b.disabled = true;
+        const r = await api(`/approvals/${t.dataset.leaseCard}/lease`, { method: "POST", body: t.dataset.goal ? { forGoal: true } : { minutes: Number(t.dataset.minutes) } });
+        st.approvals = st.approvals.filter((a) => a.id !== t.dataset.leaseCard);
+        renderBadge(); renderApprovals(); loadPolicy().catch(() => {});
+        toast(r?.notes?.length ? r.notes.join(" ") : "Allowed");
+        return;
+      }
       if (t.dataset.control === "lint") {
         t.disabled = true;
         try {

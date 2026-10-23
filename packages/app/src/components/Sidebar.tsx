@@ -141,6 +141,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         <Row label="Résumés" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>☰</Text>} active={isPage("resumes")} onPress={() => page("resumes")} />
         <Row label="Agents & connections" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚇</Text>} active={isPage("agents")} onPress={() => page("agents")} />
         <Row label="Permissions" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚿</Text>} active={isPage("permissions")} onPress={() => page("permissions")} />
+        <Row label="Approval rules" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>✓</Text>} active={isPage("policy")} onPress={() => page("policy")} />
         <Row label="Folders" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>▤</Text>} active={isPage("folders")} onPress={() => page("folders")} />
         <Row label="Settings" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚙</Text>} active={isPage("settings")} onPress={() => page("settings")} />
       </View>

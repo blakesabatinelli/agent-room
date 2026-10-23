@@ -1643,3 +1643,56 @@ export interface A2aStatus {
   /** Where the endpoint is reachable from: this Mac only, the tailnet, or the public internet (Funnel). */
   reach: "local" | "tailnet" | "funnel";
 }
+// ---- 4.2 Learned approval policy and permission leases
+/** One rule of POLICY.md as the apps show it. `kind`: a rule the owner wrote, one the hub learned from approvals, or a permission lease (a rule that ends by itself). */
+export interface PolicyRuleView {
+  id: string;
+  kind: "owner" | "learned" | "lease";
+  effect: "allow" | "ask" | "deny";
+  tool: string;
+  /** `*`, or words like `action:read path:/Board`. */
+  match: string;
+  /** `*`, or `agent:<id>` / `room:<slug>` / `goal:<id>` words. */
+  scope: string;
+  /** A date, or a UTC moment for a lease. */
+  expires?: string;
+  accepted: boolean;
+  /** One plain-English line: "Allow Claude's Drive reads in /Board: you approved 7 of 7 since Oct 12." */
+  text: string;
+  agentId?: string;
+}
+/** An active permission lease (GET /leases). `remainingMs` is as of the moment of the request; the apps count down from it. */
+export interface LeaseView {
+  id: string;
+  agentId: string;
+  agentName: string;
+  tool: string;
+  /** The verb it covers ("send"), or `*` for everything the tool does. */
+  action: string;
+  roomId?: string;
+  goalId?: string;
+  createdAt: number;
+  expiresAt: number;
+  /** Ends when the goal ends, or at `expiresAt`, whichever is first. */
+  goalOnly: boolean;
+  /** The lease also switched the tool on for this agent; the tool goes back off when the lease ends. */
+  switchedOn?: boolean;
+  remainingMs: number;
+  text: string;
+}
+/** GET /policy. */
+export interface PolicyState {
+  at: number;
+  /** False when POLICY.md can't be read (no control folder, or the file has a problem). */
+  ok: boolean;
+  problem?: string;
+  path?: string;
+  rules: PolicyRuleView[];
+  leases: LeaseView[];
+  /** Learned rules waiting for the owner. */
+  pending: number;
+}
+/** POST /leases. At least one of minutes and goalId. */
+export interface LeaseRequest { agentId: string; tool: string; minutes?: number; goalId?: string; roomId?: string; action?: string }
+/** PATCH /policy/rules/:id. */
+export interface PolicyRulePatch { effect?: "allow" | "ask" | "deny"; match?: string; scope?: string; expires?: string | null; accepted?: boolean }

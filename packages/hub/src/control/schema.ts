@@ -26,6 +26,18 @@ export function isRealDate(s: string): boolean {
 export const todayString = (d = new Date()) => d.toISOString().slice(0, 10);
 
 const date = z.string().refine(isRealDate, "must be a real YYYY-MM-DD date");
+
+// 4.2: a rule's `expires` is a date (good through that day, UTC) or, for a permission lease, a UTC moment like 2026-10-23T14:30:00Z.
+const INSTANT = /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?Z$/;
+export function isRealInstant(s: string): boolean {
+  const m = INSTANT.exec(s);
+  return !!m && isRealDate(m[1]) && !Number.isNaN(Date.parse(s));
+}
+/** When a rule's `expires` passes, in epoch ms: the end of that day for a date, the moment itself for a lease. */
+export function expiryMs(expires: string): number {
+  return isRealInstant(expires) ? Date.parse(expires) : Date.parse(`${expires}T00:00:00Z`) + 86_400_000;
+}
+const expiry = z.string().refine((s) => isRealDate(s) || isRealInstant(s), "must be a real YYYY-MM-DD date, or a UTC time like 2026-10-23T14:30:00Z");
 // YAML 1.1 habits: `shell: true` / `shell: false` read as on / off.
 const level = z.preprocess((v) => (v === true ? "on" : v === false ? "off" : v), z.enum(["on", "ask", "off"]));
 const str = z.string().min(1);
@@ -55,7 +67,7 @@ const rule = z.object({
   tool: str,
   match: str,
   scope: str,
-  expires: date.optional(),
+  expires: expiry.optional(),
   source: z.enum(["owner", "learned"]),
   accepted: z.boolean(),
 });

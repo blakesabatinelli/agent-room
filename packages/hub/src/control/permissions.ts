@@ -22,13 +22,14 @@ export const levelEffect = (l: Level): PolicyRule["effect"] => (l === "on" ? "al
 /** The level a tool has when nothing in POLICY.md says otherwise. */
 export const catalogDefault = (tool: string): Level => (SENSITIVE.has(tool) ? "ask" : "on");
 
-/** Scopes: `*`, or space-separated `agent:<id>` / `room:<slug>` tokens that must all match. */
-export function scopeApplies(scope: string, agentId?: string, roomSlug?: string): boolean {
+/** Scopes: `*`, or space-separated `agent:<id>` / `room:<slug>` / `goal:<id>` (4.2) tokens that must all match. */
+export function scopeApplies(scope: string, agentId?: string, roomSlug?: string, goalId?: string): boolean {
   const s = scope.trim();
   if (s === "*" || s === "") return true;
   return s.split(/\s+/).every((tok) => {
     if (tok.startsWith("agent:")) return agentId !== undefined && tok.slice(6) === agentId;
     if (tok.startsWith("room:")) return roomSlug !== undefined && tok.slice(5) === roomSlug;
+    if (tok.startsWith("goal:")) return goalId !== undefined && tok.slice(5) === goalId; // 4.2: a lease for one goal; tool levels never know the goal, so such a rule never changes them
     return false;
   });
 }

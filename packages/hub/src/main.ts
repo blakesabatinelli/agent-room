@@ -62,6 +62,7 @@ orch.resumes.sweep(); // 2.3: close practice runs the last stop cut short, gradu
 joinOpenRosters(store, () => orch.control, (m) => console.warn(`[rooms] ${m}`));
 orch.standing.tick();
 orch.standing.start();
+orch.policy.start(); // 4.2: expired leases are removed every 30 seconds; steady approvals become proposed rules once a day
 if (resumed.length) console.log(`Resumed ${resumed.length} goal${resumed.length > 1 ? "s" : ""} after restart.`);
 const tsStatus = await tailscale.status(true, port);
 const ts = remoteHost(tsStatus);

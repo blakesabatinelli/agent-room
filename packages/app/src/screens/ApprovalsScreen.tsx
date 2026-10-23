@@ -48,6 +48,12 @@ export function ApprovalsScreen() {
     catch (e) { setError((e as Error).message); }
   };
 
+  // 4.2: approve this one and allow the same kind of thing for a while, or for the rest of the goal
+  const lease = async (a: Approval, how: { minutes: number } | { forGoal: true }) => {
+    try { await hub?.leaseApproval(a.id, how); }
+    catch (e) { setError((e as Error).message); }
+  };
+
   const answer = async (a: Approval, choice: string) => {
     try { await hub?.answer(a.id, choice); }
     catch (e) { setError((e as Error).message); }
@@ -136,6 +142,10 @@ export function ApprovalsScreen() {
                     <View style={{ flexDirection: "row", gap: space(2) }}>
                       <Button label="Approve" onPress={() => hub?.decide(a.id, "approved")} />
                       <Button kind="plain" label="Reject" onPress={() => hub?.decide(a.id, "rejected")} />
+                    </View>
+                    <View style={{ flexDirection: "row", gap: space(2) }}>
+                      <Button small kind="ghost" label="Allow for 30 minutes" onPress={() => void lease(a, { minutes: 30 })} />
+                      <Button small kind="ghost" label="Allow for this goal" onPress={() => void lease(a, { forGoal: true })} />
                     </View>
                   </>
                 )}
