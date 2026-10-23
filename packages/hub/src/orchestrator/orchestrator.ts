@@ -106,7 +106,7 @@ export class Orchestrator {
     // 1.1: the control folder's version history can never be granted to agents (it is read lazily: the control folder may be attached after this).
     this.files = new FileBroker(store, approvals, { extraProtected: () => (this.control ? [{ path: join(this.control.root, ".git"), because: "the Agent Room control folder's version history can't be shared with agents" }] : []) });
     this.goalSources = new GoalSources(this.files, store); // 1.1
-    this.workspaces = new TaskWorkspaces({ dataDir: opts.dataDir, git: opts.gitBin });
+    this.workspaces = new TaskWorkspaces({ dataDir: opts.dataDir, git: opts.gitBin, onSecurity: (action, detail) => store.audit("hub", action, detail) }); // 1.1: git config restored, hard links left out
     this.control = opts.control; // 1.9
     // 1.9 x 1.4: each task's worktree gets its agent's context file, built from the control folder's layers,
     // and it is taken back out before the work is merged so it never lands in the goal folder or the owner's repo.
@@ -1126,6 +1126,7 @@ export class Orchestrator {
   }
 
   private async runTask(goal: Goal, task: Task, agent: AgentConfig, goalSignal: AbortSignal) {
+    if (this.goalSources.lost(this.store.getGoal(goal.id) ?? goal)) { this.stopForLostFolder(goal.id); return; } // 1.1: the folder's grant no longer covers this goal
     // Each task gets its own controller so the owner can interrupt it without stopping the goal.
     const ctrl = new AbortController();
     const onGoal = () => ctrl.abort();
@@ -1188,6 +1189,26 @@ export class Orchestrator {
     this.store.saveGoal(g);
     this.store.audit("owner", "goal.source.set", `${g.id} ${grantId ?? "none"}`);
     return { ok: true, goal: g };
+  }
+
+  /**
+   * 1.1: the grant behind a goal's folder was removed, narrowed to other agents or rooms, or made unreadable. The goal stops, nothing more is
+   * written to the folder, and the owner is told once.
+   */
+  private stopForLostFolder(goalId: string) {
+    const g = this.store.getGoal(goalId);
+    if (!g || ["done", "failed", "superseded"].includes(g.status)) return;
+    g.status = "failed"; g.summary = "Stopped: the folder this goal works on is no longer open to it."; this.store.saveGoal(g);
+    for (const t of this.store.listTasks({ goalId })) {
+      this.taskRuns.get(t.id)?.ctrl.abort();
+      if (OPEN(t)) { t.status = "cancelled"; this.store.saveTask(t); }
+    }
+    this.running.get(goalId)?.abort();
+    if (this.goalSources.firstLoss(goalId)) {
+      this.store.audit("hub", "goal.source.revoked", `${goalId} ${g.sourceGrantId}: the folder grant no longer covers this goal; work stopped`);
+      this.post(g.roomId, SYS, "The folder this goal works on is no longer shared with it (the grant was removed or changed), so work on it has stopped and nothing more will be written to the folder.", "system");
+    }
+    void this.dropWorktrees(goalId);
   }
 
   /** Hub start: remove worktrees of tasks that are no longer open. Call before recover(). */
@@ -1379,7 +1400,7 @@ export class Orchestrator {
     if (judgment.verdict === "accept") {
       // 1.4: accepted work merges into the goal folder. A conflict with another task's accepted work is a send-back, never "done".
       await this.workspaceHook("beforeMerge", ws, agent.id); // 1.9 HOOK: restore the agent's context file in `work` before it is committed
-      const merge = await this.workspaces.accept(ref, task);
+      const merge = await this.workspaces.accept(this.goalSources.ref(this.store.getGoal(goal.id) ?? fresh, folder), task); // 1.1: the grant is checked again at the moment of merging
       if (!merge.ok) { route("revise", judged); return this.sendBackConflict(goal, task, agent, judgment, merge.conflict, !!merge.markers, goalSignal); }
       await this.discardWorktree(goal, task);
       if (merge.source) this.goalSources.afterAccept(fresh, task, agent, merge.source, (t) => this.post(goal.roomId, SYS, t, "system", task.id)); // 1.1

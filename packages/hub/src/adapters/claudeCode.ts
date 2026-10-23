@@ -53,7 +53,7 @@ export class ClaudeCodeAdapter implements Adapter {
   }
 
   buildArgs(req: RunRequest): string[] {
-    const s = req.agent.settings as { model?: string; toolMap?: Record<string, string[]>; bashSandbox?: boolean };
+    const s = req.agent.settings as { model?: string; toolMap?: Record<string, string[]>; bashSandbox?: boolean; sandboxReadAllow?: string[] };
     const args = ["-p", req.prompt, "--output-format", "stream-json", "--verbose"];
     const model = req.model ?? s.model;
     if (model) args.push("--model", model);
@@ -73,7 +73,7 @@ export class ClaudeCodeAdapter implements Adapter {
     // 1.1: file tools reach the task folder only (cwd), never a bare `Read`/`Write` that would allow any path. See files/confine.ts.
     args.push("--allowedTools", ...scopeAllowedTools(allowed, req.cwd));
     if (disallowed.length) args.push("--disallowedTools", disallowed.join(","));
-    args.push(...claudeConfinementArgs({ cwd: req.cwd, dataDir: req.dataDir, bashSandbox: s.bashSandbox !== false }));
+    args.push(...claudeConfinementArgs({ cwd: req.cwd, dataDir: req.dataDir, bashSandbox: s.bashSandbox !== false, readAllow: Array.isArray(s.sandboxReadAllow) ? s.sandboxReadAllow.filter((x) => typeof x === "string") : undefined }));
     return args;
   }
 

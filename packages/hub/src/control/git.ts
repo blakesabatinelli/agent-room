@@ -2,6 +2,10 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ControlCommit } from "@agent-room/shared";
+import { hardenedGitArgs, hardenedGitEnv } from "../files/gitSafe.js";
+
+/** execFile wants no undefined values. */
+const cleanEnv = (e: NodeJS.ProcessEnv): NodeJS.ProcessEnv => Object.fromEntries(Object.entries(e).filter(([, v]) => v !== undefined));
 
 /** Who made a change. Agents appear by id. */
 export type Writer = "owner" | "orchestrator" | "hub" | (string & {});
@@ -23,8 +27,9 @@ export class ControlGit {
   private run(args: string[], writer?: Writer, timeoutMs = 30_000): Promise<string> {
     const id = writer ? ["-c", `user.name=${writer}`, "-c", `user.email=${writer}@agent-room.local`] : [];
     return new Promise((resolve, reject) => {
-      execFile(this.bin, [...id, "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", "-c", "core.quotepath=false", ...args],
-        { cwd: this.root, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1" } },
+      // 1.1: the same hardening as every hub git call (no config option can make this run a command). The owner's own git config is still read.
+      execFile(this.bin, [...hardenedGitArgs(), ...id, "-c", "core.autocrlf=false", "-c", "core.quotepath=false", ...args],
+        { cwd: this.root, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, env: cleanEnv({ ...process.env, ...hardenedGitEnv(), GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL }) },
         (err, stdout, stderr) => {
           if (err) return reject(new GitError((stderr || err.message).trim().split("\n")[0] || "git failed", (err as { code?: number | string }).code));
           resolve(stdout);

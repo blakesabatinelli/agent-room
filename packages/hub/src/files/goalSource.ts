@@ -18,6 +18,8 @@ export const branchFor = (goalId: string) => `agent-room/${goalId}`;
  * This class holds the glue the orchestrator calls: resolving the grant, the note for prompts, and what to do once a task is accepted.
  */
 export class GoalSources {
+  /** Goals whose owner has already been told the folder is gone, so the message comes once. */
+  private told = new Set<string>();
   constructor(private files: FileBroker, private store: Store) {}
 
   /** Can this grant be the folder of a goal started in this room? */
@@ -31,15 +33,24 @@ export class GoalSources {
     return { ok: true };
   }
 
-  /** The GoalRef the workspaces use: the hub's goal folder, plus the granted folder when the goal has one. */
+  /**
+   * The GoalRef the workspaces use: the hub's goal folder, plus the granted folder when the goal has one.
+   * The authority is checked again every time (usable(): the grant exists, is readable, is open to every agent and to this goal's room).
+   * A grant that fails is REVOKED for this goal: nothing is written to the folder or merged into it, and the orchestrator stops the goal.
+   */
   ref(goal: Goal, folder: string): GoalRef {
     if (!goal.sourceGrantId) return { id: goal.id, folder };
     const g = this.files.grant(goal.sourceGrantId);
     const branch = goal.sourceBranch ?? branchFor(goal.id);
-    // A removed grant leaves the goal with the base it already has (if any) and writes nothing anywhere.
-    if (!g) return { id: goal.id, folder, source: { grantId: goal.sourceGrantId, path: "", write: false, branch, revoked: true } };
+    if (!g || !this.usable(goal.sourceGrantId, goal.roomId).ok) return { id: goal.id, folder, source: { grantId: goal.sourceGrantId, path: "", write: false, branch, revoked: true } };
     return { id: goal.id, folder, source: { grantId: g.id, path: g.path, write: g.write, label: g.label ?? basename(g.path), branch } };
   }
+
+  /** True when this goal works on a folder grant that no longer covers it (removed, narrowed to other agents or rooms, or no longer readable). */
+  lost(goal: Goal): boolean { return !!goal.sourceGrantId && !!this.ref(goal, "").source?.revoked; }
+
+  /** First call for a goal returns true (the caller tells the owner and audits); later calls return false. */
+  firstLoss(goalId: string): boolean { if (this.told.has(goalId)) return false; this.told.add(goalId); return true; }
 
   /** What the planner and the agents are told about the folder. Only its label, never its location on the disk. */
   note(goal: Goal): string {
@@ -67,8 +78,14 @@ export class GoalSources {
       return;
     }
     if (out.mode === "granted-git") {
+      const left = out.skipped?.length ? ` ${out.skipped.length} file${out.skipped.length === 1 ? " was" : "s were"} left out because ${out.skipped.length === 1 ? "it is a hard link" : "they are hard links"}.` : "";
+      if (out.pushed === false) {
+        this.store.audit(agent.id, "goal.source.push_failed", `${task.id} -> branch ${out.branch} in ${goal.sourceGrantId}: ${out.pushError ?? "push failed"}`.slice(0, 400));
+        say(`"${task.title}" is accepted and committed in the hub's own copy of ${name}, but the branch ${out.branch} could not be updated in your repository (${out.pushError ?? "push failed"}). Your branch and files are untouched. It will be tried again after the next task.${left}`);
+        return;
+      }
       this.store.audit(agent.id, "goal.source.merged", `${task.id} -> branch ${out.branch} in ${goal.sourceGrantId}`);
-      say(`"${task.title}" is committed to the branch ${out.branch} in ${name}. Your own branch and files are untouched; merge ${out.branch} when you're ready.`);
+      say(`"${task.title}" is committed to the branch ${out.branch} in ${name}. Your own branch and files are untouched; merge ${out.branch} when you're ready.${left}`);
       return;
     }
     if (!g || !out.changes) return; // read-only grant: the work stayed in the private copy

@@ -18,6 +18,8 @@ const GRANTS_KEY = "folder_grants";
 const PROPOSALS_KEY = "write_proposals";
 const MAX_PROPOSALS = 500;
 const MAX_PENDING = 50;
+/** One agent cannot fill the owner's approval queue: it gets this many waiting writes, the whole hub gets MAX_PENDING. */
+const MAX_PENDING_PER_AGENT = 20;
 export const MAX_WRITE_BYTES = 2 * 1024 * 1024;
 const MAX_EXISTING_BYTES = 10 * 1024 * 1024;
 const MAX_LIST_ENTRIES = 1000;
@@ -138,6 +140,11 @@ export class FileBroker {
     this.store.setKV(GRANTS_KEY, all.map((g) => (g.id === grantId ? next : g)));
     this.store.audit(actor, "grant.changed", `${grantId} ${q(next.path)} ${changes.join("; ") || "no change"}`);
     if (cur.write && !next.write) this.cancelPending(grantId, "the folder grant no longer allows writing");
+    // Narrowing to another agent or room: a write that waits for an agent or room the grant no longer covers is settled now.
+    else for (const p of this.pending().filter((x) => x.grantId === grantId && !this.covers(next, x.agentId, x.roomId))) {
+      this.settle(p.id, "rejected", "the folder grant no longer covers this agent here", "system");
+      if (p.approvalId) this.approvals.decide(p.approvalId, "expired", "system");
+    }
     return next;
   }
 
@@ -160,9 +167,14 @@ export class FileBroker {
     }
   }
 
+  /** Does this grant cover this agent in this room? (the same test grantsFor applies) */
+  private covers(g: FolderGrant, agentId: string, roomId?: string): boolean {
+    return (g.agentId === "*" || g.agentId === agentId) && (g.roomId === undefined || g.roomId === roomId);
+  }
+
   /** Grants this agent may see from this room. Room grants narrow: no room, no room-scoped grant. */
   grantsFor(agentId: string, roomId?: string): FolderGrant[] {
-    return this.listGrants().filter((g) => (g.agentId === "*" || g.agentId === agentId) && (g.roomId === undefined || g.roomId === roomId));
+    return this.listGrants().filter((g) => this.covers(g, agentId, roomId));
   }
 
   // ---------- agent operations
@@ -194,7 +206,7 @@ export class FileBroker {
       const file = resolveInGrant(auth.grant.path, relPath);
       if (touchesGit(relPath) || touchesGit(relative(realpathSync.native(auth.grant.path), file))) return this.deny(agentId, "read", relPath, "version-control internals (.git) are not available to agents");
       const got = this.readFile(file, maxBytes);
-      if (got.kind !== "file") return this.deny(agentId, "read", relPath, got.kind === "missing" ? "no such file" : "not a regular file");
+      if (got.kind !== "file") return this.deny(agentId, "read", relPath, got.kind === "missing" ? "no such file" : got.why === "hard link" ? "file has more than one hard link; not available to agents" : "not a regular file");
       // A read that stopped at the byte limit may end inside a character: judge the part we are returning, not the cut.
       const truncated = got.size > got.buf.length;
       const view = truncated ? withoutPartialTail(got.buf) : got.buf;
@@ -227,7 +239,9 @@ export class FileBroker {
       assertPlainPath(relPath);
       if (content.includes("\0")) return this.deny(agentId, "write", relPath, `${NOT_TEXT} content (NUL byte) cannot be written`);
       if (!isWellFormedText(content)) return this.deny(agentId, "write", relPath, `content is ${NOT_TEXT} (unpaired surrogate)`);
-      if (this.pending().length >= MAX_PENDING) return this.deny(agentId, "write", relPath, "too many writes are already waiting for the owner");
+      const queued = this.pending();
+      if (queued.length >= MAX_PENDING) return this.deny(agentId, "write", relPath, "too many writes are already waiting for the owner");
+      if (queued.filter((x) => x.agentId === agentId).length >= MAX_PENDING_PER_AGENT) return this.deny(agentId, "write", relPath, `this agent already has ${MAX_PENDING_PER_AGENT} writes waiting for the owner; wait for a decision before proposing more`);
       let unappliable: string | undefined;
       let target: string, stateBlocked = false;
       try { target = resolveInGrant(grant.path, relPath); }
@@ -309,7 +323,9 @@ export class FileBroker {
     const grant = this.grant(input.grantId);
     if (!grant) return this.deny(input.agentId, "writeback", where, "the folder grant was removed");
     if (!grant.write) return this.deny(input.agentId, "writeback", where, `grant ${grant.id} does not allow writing`);
-    if (this.pending().length >= MAX_PENDING) return this.deny(input.agentId, "writeback", where, "too many writes are already waiting for the owner");
+    const queued = this.pending();
+    if (queued.length >= MAX_PENDING) return this.deny(input.agentId, "writeback", where, "too many writes are already waiting for the owner");
+    if (queued.filter((x) => x.agentId === input.agentId).length >= MAX_PENDING_PER_AGENT) return this.deny(input.agentId, "writeback", where, `this agent already has ${MAX_PENDING_PER_AGENT} writes waiting for the owner`);
     const skipped: { relPath: string; reason: string }[] = [...(input.skipped ?? [])];
     const items: PendingItem[] = [], files: WriteProposalFile[] = [], diffs: string[] = [];
     const changes = [...input.changes].sort((a, b) => a.relPath.localeCompare(b.relPath));
@@ -465,6 +481,8 @@ export class FileBroker {
       this.settle(pid, "rejected", why, "system");
     };
     if (!grant || !grant.write) return fail("the folder grant was removed or is no longer writable");
+    // Narrowing a grant to another agent or room must stop what the old audience proposed (grantsFor is what the agent could use right now).
+    if (!this.grantsFor(p.agentId, p.roomId).some((g) => g.id === grant.id)) return fail("the folder grant no longer covers this agent here");
     // A write an agent proposed needs the agent's filesystem switch on; a task's write-back rests on the grant the owner picked for the goal.
     if (p.kind !== "task" && (!agent || agent.tools.filesystem !== true)) return fail("the filesystem tool was switched off");
     try {
@@ -527,7 +545,7 @@ export class FileBroker {
 
   /** Read a regular file without following a final symlink. `whole` reads everything up to maxBytes, else a prefix. */
   private readFile(path: string, maxBytes: number, whole = false):
-    | { kind: "missing" } | { kind: "notfile" }
+    | { kind: "missing" } | { kind: "notfile"; why?: "hard link" }
     | { kind: "file"; buf: Buffer; size: number; mode: number } {
     let fd: number;
     try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
@@ -540,6 +558,8 @@ export class FileBroker {
     try {
       const st = fstatSync(fd);
       if (!st.isFile()) return { kind: "notfile" };
+      // A file with more than one name may be a second name for something outside the folder (a hard link to ~/.ssh/id_rsa): never read or diffed.
+      if (st.nlink > 1) return { kind: "notfile", why: "hard link" };
       const want = whole ? Math.min(st.size, maxBytes + 1) : Math.min(st.size, maxBytes);
       const buf = Buffer.alloc(want);
       let got = 0;

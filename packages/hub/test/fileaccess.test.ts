@@ -238,7 +238,13 @@ test("AC2: Claude Code argv confines the run to its worktree: cwd, one --add-dir
   assert.ok(settings.permissions.deny.includes(`Read(//${data.replace(/^\//, "")}/*.db)`), "the hub database");
   assert.ok(settings.permissions.deny.includes(`Read(//${data.replace(/^\//, "")}/goals/**)`) && settings.permissions.deny.includes(`Read(//${data.replace(/^\//, "")}/workspaces/**)`));
   assert.equal(settings.sandbox.enabled, true); assert.equal(settings.sandbox.failIfUnavailable, true); assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
-  assert.ok(settings.sandbox.filesystem.denyRead.length >= 6);
+  // Bash reads are an allow-list (docs: sandbox.filesystem.denyRead + narrower allowRead): the hub's whole data folder and the owner's home are
+  // denied, and only this task's worktree (plus toolchains) is re-opened. So every sibling goal and task is denied, including ones made later.
+  const fsr = settings.sandbox.filesystem as unknown as { denyRead: string[]; allowRead: string[] };
+  assert.ok(fsr.denyRead.includes(data) && fsr.denyRead.includes(home), "the data folder and the home folder are denied as a whole");
+  assert.ok(fsr.allowRead.includes(wt), "the task's own worktree is the one thing re-opened inside them");
+  assert.ok(!fsr.allowRead.some((a) => a === data || a === home), "nothing wide is re-opened");
+  assert.ok(fsr.denyRead.includes(`${home}/.ssh`) && fsr.denyRead.includes(`${home}/.npmrc`));
 
   // allow rules name the worktree; a bare Read/Write/Edit/Glob/Grep would allow every path
   const i = at("--allowedTools")[0];
@@ -264,7 +270,7 @@ test("AC2: Codex runs with -C <worktree>, workspace-write and no extra writable 
   const args = codexBaseArgs({ agent, cwd: wt }, "/tmp/out.txt");
   assert.equal(args[args.indexOf("-C") + 1], wt);
   assert.equal(args[args.indexOf("--sandbox") + 1], "workspace-write");
-  assert.ok(args.includes("sandbox_workspace_write.writable_roots=[]") && args.includes("sandbox_workspace_write.exclude_slash_tmp=true"));
+  assert.ok(args.includes("sandbox_workspace_write.writable_roots=[]") && args.includes("sandbox_workspace_write.exclude_slash_tmp=true") && args.includes("sandbox_workspace_write.exclude_tmpdir_env_var=true"));
   assert.ok(!args.includes("--add-dir") && !args.includes("--dangerously-bypass-approvals-and-sandbox") && !args.includes("danger-full-access"));
   assert.ok(!args.some((a) => a.includes(wt) && a !== wt), "the worktree is named once, as the working root");
   const ro = codexBaseArgs({ agent, cwd: wt, jsonOnly: true }, "/tmp/out.txt");

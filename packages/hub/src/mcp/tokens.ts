@@ -48,6 +48,8 @@ export class McpTokens {
     this.save(rows);
     try { this.store.db.pragma("secure_delete = ON"); } catch { /* best effort */ }
     this.store.setKV(LEGACY_KEY, {});
+    // The plaintext may still sit in free pages and in the write-ahead log: rebuild the file once, then empty the log.
+    try { this.store.db.exec("VACUUM"); } catch { /* best effort */ }
     try { this.store.db.pragma("wal_checkpoint(TRUNCATE)"); } catch { /* best effort */ }
     this.store.audit("hub", "mcp.token.migrated", `${entries.length} key(s) now stored as hashes`);
   }

@@ -1,6 +1,6 @@
-import { realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { PathDenied, isInside, resolveInGrant } from "./paths.js";
 
 /**
@@ -17,13 +17,25 @@ import { PathDenied, isInside, resolveInGrant } from "./paths.js";
  *  - `--allowedTools` names Read and Edit for the worktree only (`Read(//<abs path>/**)`, `Edit(//<abs path>/**)`: `//` is an absolute
  *    path in permission rules, and Edit rules cover the Write tool). A bare `Read`, `Write`, `Glob` or `Grep` would allow any path.
  *  - Anything else that would ask goes to the hub's approval_prompt tool, which refuses file tools aimed outside the worktree (checkFileToolRequest).
- * Codex: `-C <worktree>`, `--sandbox workspace-write`, no extra writable roots, /tmp not writable.
+ *  - The Bash sandbox confines WRITES to the working directory but, by default, lets commands READ the whole machine
+ *    (https://code.claude.com/docs/en/sandboxing, "Default read behavior"). So reads are an allow-list, which that page documents:
+ *    `sandbox.filesystem.denyRead` blocks a region and `sandbox.filesystem.allowRead` re-opens narrower paths inside it ("the rule with
+ *    the narrower path applies"). We deny the owner's whole home folder and the hub's whole data folder, then re-open this task's own
+ *    worktree, its repository's git dir, and the usual toolchain folders. Every other goal's and task's folder in the data folder
+ *    (worktrees, _shadow, _integration, _repo, goals, the database) stays unreadable, including ones created after the run started.
+ * Codex: `-C <worktree>`, `--sandbox workspace-write`, no extra writable roots, /tmp and $TMPDIR not writable
+ *   (https://learn.chatgpt.com/docs/config-file/config-reference: sandbox_workspace_write.exclude_slash_tmp and exclude_tmpdir_env_var).
  * Command adapters: cwd only.
  */
 
 /** Per-user folders that hold credentials, settings and app data. Denied for Read and Edit (a Read deny also blocks Write and Edit). */
 export const SECRET_HOME_DIRS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config", ".claude", ".codex", ".gemini", "Library"];
-export const SECRET_HOME_FILES = [".npmrc", ".netrc", ".git-credentials", ".claude.json", ".zsh_history", ".bash_history"];
+export const SECRET_HOME_FILES = [".npmrc", ".netrc", ".git-credentials", ".claude.json", ".zsh_history", ".bash_history", ".pypirc", ".yarnrc", ".cargo/credentials", ".cargo/credentials.toml", ".m2/settings.xml", ".gradle/gradle.properties"];
+/**
+ * Folders under home that toolchains read (version managers, package caches, global git settings). Re-opened inside the denied home folder
+ * when they exist. The owner can add more with `agent.settings.sandboxReadAllow` (absolute or ~/ paths).
+ */
+export const TOOLCHAIN_HOME_DIRS = [".nvm", ".volta", ".fnm", ".bun", ".deno", ".cargo", ".rustup", ".pyenv", ".rbenv", ".asdf", ".sdkman", ".local", ".npm", ".pnpm-store", ".cache", ".gradle", ".m2", "go", ".gitconfig", ".config/git"];
 
 export interface ConfineOptions {
   /** The worktree (the agent's cwd). */
@@ -33,6 +45,8 @@ export interface ConfineOptions {
   home?: string;
   /** Turn the Bash sandbox on (default true). Off only if the owner's Claude Code cannot sandbox. */
   bashSandbox?: boolean;
+  /** Extra folders Bash may read (toolchains the owner keeps somewhere unusual). Absolute, or starting with ~/. */
+  readAllow?: string[];
 }
 
 const real = (p: string) => { try { return realpathSync.native(p); } catch { return resolve(p); } };
@@ -52,6 +66,38 @@ export function protectedPaths(o: ConfineOptions): { dirs: string[]; globs: stri
   return { dirs: dirs.filter((d) => !isInside(real(d), wt)), globs };
 }
 
+/** The git dir shared by this task's worktree, from the hub's own record of it (not from the `.git` file the agent can edit). Only inside the data folder. */
+export function taskCommonGitDir(cwd: string, dataDir: string | undefined): string | undefined {
+  if (!dataDir) return undefined;
+  try {
+    const meta = JSON.parse(readFileSync(`${cwd}.json`, "utf8")) as { base?: string };
+    if (!meta.base) return undefined;
+    const dotGit = real(join(meta.base, ".git"));
+    return existsSync(dotGit) && isInside(real(dataDir), dotGit) ? dotGit : undefined;
+  } catch { return undefined; }
+}
+
+/**
+ * What a sandboxed Bash command may read: everything except the home folder and the hub's data folder, plus (re-opened, narrower) this
+ * task's worktree, its repository's git dir, and toolchain folders. Pure data: tests apply the "narrower path wins" rule to it.
+ */
+export function sandboxReadPolicy(o: ConfineOptions): { denyRead: string[]; allowRead: string[] } {
+  const home = o.home ?? homedir();
+  const wt = real(o.cwd);
+  const secrets = [...SECRET_HOME_DIRS.map((d) => `${home}/${d}`), ...SECRET_HOME_FILES.map((f) => `${home}/${f}`)];
+  const denyRead = [home, ...secrets];
+  const allowRead = [wt];
+  if (o.dataDir) {
+    denyRead.push(real(o.dataDir), `${o.dataDir}/*.db`, `${o.dataDir}/*.db-wal`, `${o.dataDir}/*.db-shm`);
+    const common = taskCommonGitDir(o.cwd, o.dataDir);
+    if (common) allowRead.push(common);
+  }
+  const tilde = (p: string) => (p.startsWith("~/") ? `${home}/${p.slice(2)}` : p);
+  for (const d of TOOLCHAIN_HOME_DIRS) { const p = `${home}/${d}`; if (existsSync(p)) allowRead.push(p); }
+  for (const p of (o.readAllow ?? []).map(tilde)) if (isAbsolute(p)) allowRead.push(p);
+  return { denyRead: [...new Set(denyRead)], allowRead: [...new Set(allowRead)] };
+}
+
 export function claudeConfinementSettings(o: ConfineOptions) {
   const { dirs, globs } = protectedPaths(o);
   const deny = [...dirs.map((d) => `Read(${abs(d)}/**)`), ...globs.map((g) => `Read(${abs(g)})`)];
@@ -68,7 +114,7 @@ export function claudeConfinementSettings(o: ConfineOptions) {
         allowUnsandboxedCommands: false,
         // The owner's rule that shell commands ask first must keep working: the sandbox limits what a command can reach, it does not approve it.
         autoAllowBashIfSandboxed: false,
-        filesystem: { denyRead: [...dirs, ...globs] },
+        filesystem: sandboxReadPolicy(o),
       },
     }),
   };
@@ -97,7 +143,7 @@ export function claudeConfinementArgs(o: ConfineOptions): string[] {
 
 /** Codex: no extra writable roots (nothing but the -C folder), and /tmp is not one either. */
 export function codexConfinementArgs(): string[] {
-  return ["-c", "sandbox_workspace_write.writable_roots=[]", "-c", "sandbox_workspace_write.exclude_slash_tmp=true"];
+  return ["-c", "sandbox_workspace_write.writable_roots=[]", "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true"];
 }
 
 // ---------- the hub's own check, for what Claude Code sends to approval_prompt

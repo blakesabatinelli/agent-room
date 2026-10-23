@@ -446,7 +446,7 @@ test("a write-only grant never shows the agent the existing file through the dif
 });
 
 test("proposals are capped and a restart expires the ones still waiting", async () => {
-  const { files, store, approvals, root } = ctx();
+  const { files, store, approvals, root } = ctx({ agentId: "*" });
   const r = files.proposeWrite("claude", undefined, "a.txt", "x\n");
   assert.ok(r.ok); if (!r.ok) return;
   const restarted = new FileBroker(store, approvals); // what the hub does on boot
@@ -454,7 +454,8 @@ test("proposals are capped and a restart expires the ones still waiting", async 
   assert.equal(store.listApprovals("pending").length, 0);
   await sleep(20);
   assert.equal(existsSync(join(root, "a.txt")), false);
-  for (let i = 0; i < 50; i++) assert.ok(files.proposeWrite("claude", undefined, `f${i}.txt`, "x\n").ok);
+  // 50 waiting writes in all (spread over three agents: one agent alone is capped lower, see the per-agent test in fileaccess)
+  for (let i = 0; i < 50; i++) assert.ok(files.proposeWrite(["claude", "codex", "hermes"][i % 3], undefined, `f${i}.txt`, "x\n").ok);
   assert.equal(files.proposeWrite("claude", undefined, "one-too-many.txt", "x\n").ok, false);
   for (const a of store.listApprovals("pending")) approvals.decide(a.id, "rejected");
 });
