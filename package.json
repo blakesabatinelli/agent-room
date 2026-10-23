@@ -5,8 +5,12 @@
   "scripts": {
     "hub": "pnpm --filter @agent-room/hub dev",
     "hub:start": "pnpm --filter @agent-room/hub start",
+    "icon:render": "node design/icon/render.mjs",
     "test": "pnpm -r --if-present test",
     "typecheck": "pnpm -r typecheck"
   },
-  "packageManager": "pnpm@9.15.9"
+  "packageManager": "pnpm@9.15.9",
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2"
+  }
 }

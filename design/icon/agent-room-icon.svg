@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Agent Room app icon: the table</title>
+  <!-- Concept A, "The table". macOS Big Sur+ grid: 1024 canvas, 824 body centred, 185 corner radius.
+       Edit shapes here and run `pnpm icon:render`. render.mjs swaps the body block for a full-bleed
+       square to build the iOS and web variants, so keep the body and art markers below. -->
+  <defs>
+    <linearGradient id="bodyFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E4E8E7"/>
+    </linearGradient>
+    <linearGradient id="tableFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#128079"/>
+      <stop offset="1" stop-color="#0B6E69"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <!-- body:start -->
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#bodyFill)" filter="url(#shadow)"/>
+  <rect x="101" y="101" width="822" height="822" rx="184" ry="184" fill="none" stroke="#0B1F1E" stroke-opacity="0.14" stroke-width="2"/>
+  <!-- body:end -->
+
+  <!-- art:start -->
+  <!-- Table: a teal disc. The mask cuts a clear gap around each seat, so the seats read as chairs pulled up to it. -->
+  <mask id="seatGaps" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+    <rect width="1024" height="1024" fill="#FFFFFF"/>
+    <circle cx="297" cy="297" r="126" fill="#000000"/>
+    <circle cx="727" cy="297" r="126" fill="#000000"/>
+    <circle cx="297" cy="727" r="126" fill="#000000"/>
+    <circle cx="727" cy="727" r="126" fill="#000000"/>
+  </mask>
+  <circle cx="512" cy="512" r="232" fill="url(#tableFill)" mask="url(#seatGaps)"/>
+  <circle cx="512" cy="512" r="84" fill="#FFFFFF" fill-opacity="0.24"/>
+  <!-- Seats: one per agent (Claude, Codex, Hermes, Muse). -->
+  <circle cx="297" cy="297" r="110" fill="#D97757"/>
+  <circle cx="727" cy="297" r="110" fill="#2BAC76"/>
+  <circle cx="297" cy="727" r="110" fill="#E8912D"/>
+  <circle cx="727" cy="727" r="110" fill="#E01E5A"/>
+  <!-- art:end -->
+</svg>
