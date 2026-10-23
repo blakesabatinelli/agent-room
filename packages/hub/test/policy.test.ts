@@ -440,6 +440,7 @@ test("layers only tighten: a POLICY allow can't override ROOM.md off or ask, a s
 
 test("AC2: a 30-minute lease allows the action, then expires on its own and the previous state comes back", async (t) => {
   const c = await mk(t);
+  c.store.setSettings({ ...c.store.getSettings(), attention: { ...(c.store.getSettings().attention ?? {}), timezone: "America/Chicago" } }); // the line below names a Central time, whatever this machine's zone
   const before = c.control.snapshot().policy!.fm.rules.map((r) => r.id).sort();
   const drivePost = (n = "to #general") => ask(c, {}, "drive", "write", n);
 
