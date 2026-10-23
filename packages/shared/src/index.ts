@@ -287,7 +287,8 @@ export interface MemoryProposal {
   text: string;
   sourceAgentId: string;
   confidence: number;
-  status: "pending" | "accepted" | "rejected" | "merged";
+  /** `asked` (2.5): it contradicts a stored fact and the owner has one question open about it. */
+  status: "pending" | "accepted" | "rejected" | "merged" | "asked";
   decidedBy?: "orchestrator" | "owner";
   createdAt: number;
 }
@@ -358,6 +359,7 @@ export const SETTING_DEFAULTS = {
   maxAgentHops: 4, claimTimeoutMinutes: 3, driftStrikes: 2,
   planApproval: "big" as "always" | "big" | "never", autoRunChecks: false, autoResume: true,
   stallLimit: 4, maxGoalReplans: 2, maxVerifyRounds: 2, maxTaskRuns: 40,
+  memoryTtlDays: { fact: 90, preference: 365, status: 14 }, memoryExportBytes: 4096, // 2.5
 };
 
 /** Suggested profiles per provider, following the delegation policy's routing table. */
@@ -1200,4 +1202,72 @@ export interface FirstPassMetrics {
   byTaskType: Record<string, FirstPassWeek[]>;
   /** Everything from the phase start on. */
   sincePhase: { tasks: number; accepted: number; rate: number | null; revisionsPerTask: number | null };
+}
+
+// ---- 2.5 memory with sources and expiry; export
+export type MemorySourceKind = "goal" | "owner" | "agent";
+/** Where a fact came from. `id` is the goal id for a goal, or the agent's own note about where it learned it. */
+export interface MemorySource { kind: MemorySourceKind; id?: string; agentId?: string; at: number }
+/** How long a kind of memory stays true: facts, preferences ("prefers short answers"), status ("currently on the Q4 deck"). */
+export type MemoryKind = "fact" | "preference" | "status";
+export interface MemoryTtlDays { fact: number; preference: number; status: number }
+export const MEMORY_TTL_DEFAULTS: MemoryTtlDays = { fact: 90, preference: 365, status: 14 };
+export const MEMORY_EXPORT_BYTES_DEFAULT = 4096;
+
+export interface MemoryEntry {
+  /** Every fact has one (2.5). Rows from before 2.5 are migrated to `{ kind: "agent" }`. */
+  source: MemorySource;
+  /** Epoch ms, the end of a UTC day. Past it the fact is expired: kept in the database for 30 days, never shown to agents. */
+  expiresAt: number;
+  /** The fact this one replaced (the owner answered a contradiction question with "take the new one"). */
+  supersedes?: string;
+  /** What the keeper classified it as; decides the default expiry. */
+  memKind?: MemoryKind;
+}
+
+export interface MemoryProposal {
+  source?: MemorySource;
+  /** An expiry the proposing agent suggested. The keeper decides. */
+  expiresInDays?: number;
+  memKind?: MemoryKind;
+  /** The approval card holding the owner's question while `status` is `asked`. */
+  questionId?: string;
+}
+
+/** A question for the owner that needs one of several answers, not a yes or no. Today only memory contradictions. */
+export interface MemoryQuestion {
+  kind: "memory";
+  /** The stored fact that is contradicted. */
+  oldId: string;
+  /** The proposal holding the new wording. */
+  proposalId: string;
+  choices: { id: "keep_old" | "take_new" | "drop_both"; label: string }[];
+}
+export interface Approval {
+  /** Set on a question card (both apps show it in Approvals). Answer with POST /approvals/:id { choice }. */
+  question?: MemoryQuestion;
+  /** The answer the owner gave (one of question.choices). */
+  choice?: string;
+}
+
+export interface OrchestratorSettings {
+  /** Days a memory stays valid by kind. Default fact 90, preference 365, status 14. */
+  memoryTtlDays?: MemoryTtlDays;
+  /** Cap, in bytes, of the memory block written into an agent's own context file. Default 4096. */
+  memoryExportBytes?: number;
+}
+
+/** GET /memory/export: what the export switch for each agent does (the apps show it next to the switch). */
+export interface MemoryExportInfo {
+  agentId: string;
+  /** False for agents with no context file we know how to write (they get no switch). */
+  supported: boolean;
+  /** The one file that is written, with ~ for the home folder. */
+  file?: string;
+  /** Bytes the block may take in that file. */
+  capBytes?: number;
+  enabled: boolean;
+  /** Why it can't write right now (folder missing, markers damaged), or a caution. */
+  note?: string;
+  lastWrittenAt?: number;
 }

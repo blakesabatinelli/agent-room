@@ -37,6 +37,7 @@ import { setupTimer } from "../install/timer.js";
 import { firstPassMetrics, retroDb } from "../retro/index.js"; // 2.1
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isLive } from "../memory/model.js"; // 2.5
 
 export interface ServerDeps {
   store: Store; orch: Orchestrator; approvals: Approvals; ownerName: string; restrictInterfaces?: boolean;
@@ -666,6 +667,8 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
       autoRunChecks: z.boolean().optional(),
       autoResume: z.boolean().optional(),
       jury: z.object({ enabled: z.boolean().optional(), size: z.number().int().min(2).max(5).optional(), requireLocal: z.boolean().optional(), minFamilies: z.number().int().min(2).max(5).optional() }).optional(), // 2.2
+      memoryTtlDays: z.object({ fact: z.number().int().min(1).max(3650), preference: z.number().int().min(1).max(3650), status: z.number().int().min(1).max(3650) }).optional(), // 2.5
+      memoryExportBytes: z.number().int().min(512).max(65536).optional(), // 2.5
       capacity: z.object({
         maxConcurrentTasks: z.number().int().min(1).max(32).optional(),
         localModels: z.enum(["auto", "on", "off"]).optional(),
@@ -697,17 +700,23 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
 
   // ---------- memory
   app.get("/memory", async (req) => {
-    const q = req.query as { roomId?: string; agentId?: string };
+    const q = req.query as { roomId?: string; agentId?: string; expired?: string };
+    // 2.5: expired facts are kept for 30 days; `?expired=1` shows them (the apps' "Expired" list), otherwise only what agents see.
+    if (q.expired === "1") return store.allMemory().filter((e) => (q.agentId ? e.ownerAgentId === q.agentId : e.scope === "shared" && (!e.roomId || e.roomId === q.roomId)) && !isLive(e, Date.now()));
     return q.agentId ? store.listPrivate(q.agentId) : store.listShared(q.roomId);
   });
   app.put("/memory/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const row = store.db.prepare("SELECT data FROM memory WHERE id=?").get(id) as { data: string } | undefined;
-    if (!row) return reply.code(404).send({ error: "Memory not found." });
-    const e = { ...JSON.parse(row.data), text: z.object({ text: z.string().min(1) }).parse(req.body).text };
-    store.saveMemory(e); store.audit("owner", "memory.edit", e.text.slice(0, 200)); return e;
+    const e = orch.memory.ownerEdit(id, z.object({ text: z.string().min(1) }).parse(req.body).text); // 2.5: the owner becomes the source
+    return e ?? reply.code(404).send({ error: "Memory not found." });
+  });
+  app.post("/memory/:id/renew", async (req, reply) => { // 2.5: "still true"
+    const e = orch.memory.ownerRenew((req.params as { id: string }).id);
+    return e ?? reply.code(404).send({ error: "Memory not found." });
   });
   app.delete("/memory/:id", async (req) => { store.deleteMemory((req.params as { id: string }).id); store.audit("owner", "memory.delete", (req.params as { id: string }).id); return { ok: true }; });
+  // 2.5: which file each agent's memory export writes and its cap (shown beside the switch in both apps)
+  app.get("/memory/export", async () => orch.memory.exportInfo());
   app.get("/memory/proposals", async (req) => store.listProposals((req.query as { status?: string }).status));
   app.post("/memory/proposals/:id", async (req) => {
     const b = z.object({ accept: z.boolean(), text: z.string().optional() }).parse(req.body);
@@ -717,8 +726,17 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   // ---------- approvals & audit
   app.get("/approvals", async (req) => store.listApprovals((req.query as { status?: string }).status));
   app.post("/approvals/:id", async (req, reply) => {
-    const { decision } = z.object({ decision: z.enum(["approved", "rejected"]) }).parse(req.body);
-    const a = approvals.decide((req.params as { id: string }).id, decision);
+    const { decision, choice } = z.object({ decision: z.enum(["approved", "rejected"]).optional(), choice: z.string().max(40).optional() }).parse(req.body);
+    const aid = (req.params as { id: string }).id;
+    const cur = store.getApproval(aid);
+    // 2.5: a question card (a memory contradiction) is answered with one of its own choices; a plain Reject means "keep what we had".
+    if (cur?.question && cur.status === "pending") {
+      const pick = choice ?? (decision === "rejected" ? "keep_old" : undefined);
+      if (!pick || !cur.question.choices.some((c) => c.id === pick)) return reply.code(400).send({ error: "Pick one of the answers on the question." });
+      return approvals.decide(aid, "approved", "owner", pick);
+    }
+    if (!decision) return reply.code(400).send({ error: "decision must be approved or rejected." });
+    const a = approvals.decide(aid, decision);
     return a ?? reply.code(404).send({ error: "Approval not found." });
   });
   app.get("/audit", async () => store.listAudit());

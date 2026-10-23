@@ -32,6 +32,9 @@ const approvals = new Approvals(store);
 let control: ControlFolder | undefined = new ControlFolder(process.env.AGENT_ROOM_HOME || (demo ? join(dataDir, "Agent Room (demo)") : defaultControlRoot()), store, { ownerName });
 try { await control.init(); control.start(); } catch (e) { console.error(`Control folder unavailable (${(e as Error).message}); running without it.`); control = undefined; }
 const orch = new Orchestrator(store, approvals, { dataDir, mcpUrl: () => `http://127.0.0.1:${port}/mcp`, control });
+// 2.5: put the MEMORY.md files and the opted-in agents' context files in step with shared memory, then check for expired facts every hour.
+await orch.memory.init().catch((e) => console.error(`Memory files not synced: ${(e as Error).message}`));
+orch.memory.startTimer();
 const tailscale = defaultTailscale();
 // 1.3: finds the agents, tools and local model servers on this Mac and joins Hermes to the hub.
 const discovery = new DiscoveryService(store, { control: () => orch.control, mcpUrl: () => `http://127.0.0.1:${port}/mcp` });

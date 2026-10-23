@@ -31,6 +31,7 @@ import { juryLine, jurySummary, recordOwnerRating, review as juryReview, type Ju
 import { loadCommandIndex, plannerCommands } from "../commands/index.js"; // 2.6
 import { buildInvocation, parseCommand, unknownReply, type Invocation } from "../commands/invoke.js"; // 2.6
 import { learnedBlock, runRetro } from "../retro/index.js"; // 2.1
+import { MemoryKeeper, type KeeperOptions, type ProposeOptions } from "../memory/keeper.js"; // 2.5
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -61,6 +62,8 @@ export interface OrchestratorOptions {
   control?: ControlFolder;
   /** 1.5: how much local work this machine takes at once. Defaults to what the hardware allows. */
   governor?: CapacityGovernor;
+  /** 2.5: memory keeper options (tests inject a fake home folder for the context-file export). */
+  memory?: KeeperOptions;
 }
 
 type PlanTask = RawPlanTask;
@@ -101,6 +104,8 @@ export class Orchestrator {
   control?: ControlFolder;
   /** 1.5: limits for local work, from the hardware and the owner's overrides. */
   governor: CapacityGovernor;
+  /** 2.5: shared memory with sources, expiry, contradiction questions, MEMORY.md files and the export to agents' own context files. */
+  memory: MemoryKeeper;
 
   /** 1.2: the hub's data folder (the API server keeps local-pair.secret there). */
   get dataDir(): string { return this.opts.dataDir; }
@@ -126,6 +131,7 @@ export class Orchestrator {
       beforeMerge: (c) => { if (this.control) restoreTaskContext(c.path); },
     };
     this.governor = opts.governor ?? new CapacityGovernor(store, detectHardware());
+    this.memory = new MemoryKeeper({ store, approvals, control: () => this.control, dataDir: opts.dataDir, ask: (prompt) => this.callJson(prompt, undefined, undefined, "quick") }, opts.memory); // 2.5
   }
 
   private cfg(): Required<OrchestratorSettings> {
@@ -894,7 +900,7 @@ export class Orchestrator {
     if (res.ok) {
       task.result = res.text; task.status = "done";
       const m = this.post(goal.roomId, this.agentAuthor(agent), res.text, "agent", task.id);
-      this.harvestMemory(agent.id, goal.roomId, res.text);
+      this.harvestMemory(agent.id, goal.roomId, res.text, goal.id);
       this.routeTags(m, 0);
     } else {
       task.status = "failed";
@@ -1358,10 +1364,11 @@ export class Orchestrator {
       g.state = st; this.store.saveGoal(g);
     }
     const m = this.post(goal.roomId, this.agentAuthor(agent), body, "agent", task.id);
-    this.harvestMemory(agent.id, goal.roomId, body);
+    this.harvestMemory(agent.id, goal.roomId, body, goal.id);
     this.routeTags(m, 0);
     this.store.saveMemory({ id: id("mem"), scope: "private", ownerAgentId: agent.id, roomId: goal.roomId,
-      text: `Did "${task.title}" for goal "${goal.text.slice(0, 80)}".`, sourceAgentId: agent.id, confidence: 1, createdAt: now() });
+      text: `Did "${task.title}" for goal "${goal.text.slice(0, 80)}".`, sourceAgentId: agent.id, confidence: 1, createdAt: now(),
+      source: { kind: "goal", id: goal.id, agentId: agent.id, at: now() }, memKind: "status" /* 2.5 */ });
 
     // The agent itself says it can't finish: don't judge, act on it.
     if (report.status === "needs_input") {
@@ -1606,35 +1613,17 @@ export class Orchestrator {
   }
 
   // ---------- memory (orchestrator is the only writer of shared memory)
-  harvestMemory(agentId: string, roomId: string | undefined, text: string) {
-    for (const m of text.matchAll(/^\s*MEMORY:\s*(.+)$/gim)) void this.proposeMemory(agentId, roomId, m[1].trim(), 0.6);
+  // 2.5: the keeping itself (sources, expiry, contradictions, files, export) lives in memory/keeper.ts.
+  harvestMemory(agentId: string, roomId: string | undefined, text: string, goalId?: string) {
+    for (const m of text.matchAll(/^\s*MEMORY:\s*(.+)$/gim)) void this.proposeMemory(agentId, roomId, m[1].trim(), 0.6, { goalId });
   }
 
-  async proposeMemory(agentId: string, roomId: string | undefined, text: string, confidence = 0.6) {
-    const p = { id: id("prop"), roomId, text, sourceAgentId: agentId, confidence, status: "pending" as const, createdAt: now() };
-    this.store.saveProposal(p);
-    const existing = this.store.listShared(roomId);
-    const d = await this.callJson<{ decision: "accept" | "reject" | "merge"; text?: string; mergeWith?: string }>(memoryPrompt(text, existing), undefined, undefined, "quick");
-    if (!d) return p; // stays pending for the owner to decide in the Memory screen
-    if (d.decision === "reject") { this.store.saveProposal({ ...p, status: "rejected", decidedBy: "orchestrator" }); return p; }
-    const finalText = d.text?.trim() || text;
-    const target = d.decision === "merge" ? existing.find((e) => e.id === d.mergeWith) : undefined;
-    const entry: MemoryEntry = target
-      ? { ...target, text: finalText, confidence: Math.max(target.confidence, confidence) }
-      : { id: id("mem"), scope: "shared", roomId, text: finalText, sourceAgentId: agentId, confidence, createdAt: now() };
-    this.store.saveMemory(entry);
-    this.store.saveProposal({ ...p, status: target ? "merged" : "accepted", decidedBy: "orchestrator" });
-    this.store.audit("orchestrator", "memory.write", finalText.slice(0, 200));
-    return p;
+  proposeMemory(agentId: string, roomId: string | undefined, text: string, confidence = 0.6, o: ProposeOptions = {}) {
+    return this.memory.propose(agentId, roomId, text, confidence, o);
   }
 
   /** Owner override on a pending proposal. */
-  decideProposal(proposalId: string, accept: boolean, text?: string) {
-    const p = this.store.getProposal(proposalId); if (!p) return;
-    if (accept) this.store.saveMemory({ id: id("mem"), scope: "shared", roomId: p.roomId, text: text ?? p.text, sourceAgentId: p.sourceAgentId, confidence: 1, createdAt: now() });
-    this.store.saveProposal({ ...p, status: accept ? "accepted" : "rejected", decidedBy: "owner" });
-    this.store.audit("owner", accept ? "memory.accept" : "memory.reject", p.text.slice(0, 200));
-  }
+  decideProposal(proposalId: string, accept: boolean, text?: string) { this.memory.decide(proposalId, accept, text); }
 
   rateJudgment(taskId: string, ownerScore: number) {
     const t = this.store.getTask(taskId);

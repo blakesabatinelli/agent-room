@@ -238,18 +238,25 @@ Checks:
 ${gateText(gate)}
 ${tasks.map((t) => `## ${t.title} (${t.status}, by ${t.assignee})\n${(t.result ?? "").slice(0, 3000)}`).join("\n\n")}`;
 
-export const memoryPrompt = (proposal: string, existing: MemoryEntry[]) => `[[MEMORY]]
+export const memoryPrompt = (proposal: string, existing: MemoryEntry[], hint: { source?: string; expiresInDays?: number; today?: string } = {}) => `[[MEMORY]]
 You keep the room's shared memory. Decide what to do with an agent's proposed entry.
-Keep memory short, factual, durable and non-duplicated.
+Keep memory short, factual, durable and non-duplicated. Every entry expires, so stale facts drop out on their own.
+Today is ${hint.today ?? new Date().toISOString().slice(0, 10)}.
 
 Existing shared memory:
-${existing.map((m) => `- [${m.id}] ${m.text}`).join("\n") || "- (none)"}
+${existing.map((m) => `- [${m.id}] ${m.text} (from ${m.source?.kind ?? "agent"}${m.source?.kind === "goal" ? ` ${m.source.id}` : ""}; expires ${m.expiresAt ? new Date(m.expiresAt).toISOString().slice(0, 10) : "unknown"})`).join("\n") || "- (none)"}
 
 PROPOSAL:
 ${proposal}
+${hint.source ? `\nThe proposer got this from: ${hint.source}.` : ""}${hint.expiresInDays ? `\nThe proposer thinks it stays true for about ${hint.expiresInDays} days.` : ""}
+
+Classify the entry: "fact" (about the world or the work; default 90 days), "preference" (how the owner likes things done; default 365 days) or
+"status" (what is happening right now, "currently ...", "this week ..."; default 14 days). Set expiresInDays only when you know better than the default
+(a meeting on a given date is true until then). If the proposal says the opposite of, or a different value for, an existing entry, set "contradicts" to that entry's id.
+Do not merge a contradiction into the old entry; the owner will be asked.
 
 Reply with JSON only:
-{"decision":"accept"|"reject"|"merge","text":"final wording","mergeWith":"existing id if merge"}`;
+{"decision":"accept"|"reject"|"merge","text":"final wording","mergeWith":"existing id if merge","kind":"fact"|"preference"|"status","expiresInDays":number or null,"contradicts":"existing id or null"}`;
 
 /** Whole-goal check after every task passed: does the finished work actually meet the requirements? */
 export const verifyPrompt = (goal: string, contract: Contract | undefined, tasks: Task[], files: string, agents: AgentConfig[], round: number) => `[[VERIFY]]

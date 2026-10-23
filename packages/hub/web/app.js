@@ -8,7 +8,7 @@
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
     view: "rooms",          // rooms | room | approvals | diff | permissions | folders | control | subscriptions | remote | pair
-    tools: [], control: null, quota: [], remote: null, firstPass: null,
+    tools: [], control: null, quota: [], remote: null, firstPass: null, memExport: [],
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, working: {}, approvals: [],
     unread: new Set(), readAt: 0, readSent: {}, positioned: "",
     online: false, ws: null, wsDelay: 1000,
@@ -300,7 +300,7 @@
   function renderApprovals() {
     // 1.1: a file write is never approved from the preview text. It opens the full diff (renderReview) instead.
     wantProposals();
-    $("#view").innerHTML = st.approvals.length ? st.approvals.map((a) => ARDiff.isFileWriteApproval(a) ? fileApprovalCard(a) : `
+    $("#view").innerHTML = st.approvals.length ? st.approvals.map((a) => a.question ? questionCard(a) : ARDiff.isFileWriteApproval(a) ? fileApprovalCard(a) : `
       <div class="card">
         <div class="what">${esc(st.agents[a.agentId]?.name || a.agentId)} wants to ${esc(a.action)}</div>
         <div class="detail">Using ${esc(a.tool)}${a.detail ? `\n\n${esc(a.detail)}` : ""}</div>
@@ -309,6 +309,16 @@
           <button class="btn small plain" data-approval="${esc(a.id)}" data-decision="rejected">Reject</button>
         </div>
       </div>`).join("") : `<div class="empty">Nothing waiting for you.</div>`;
+  }
+
+  // 2.5: a memory question (two facts disagree) has its own answers, not Approve and Reject
+  function questionCard(a) {
+    const first = a.question.choices[0]?.id;
+    return `<div class="card">
+        <div class="what">The room remembers two different things</div>
+        <div class="detail">${esc(a.action)}\n\n${esc(a.detail || "")}</div>
+        <div class="actions">${a.question.choices.map((c) => `<button class="btn small${c.id === first ? "" : " plain"}" data-answer="${esc(a.id)}" data-choice="${esc(c.id)}">${esc(c.label)}</button>`).join("")}</div>
+      </div>`;
   }
 
   // ---------- 1.1 file writes: the full diff, read to the end before Approve
@@ -565,6 +575,15 @@
     } finally { f.busy = false; const b = $("#gfAdd"); if (b) { b.disabled = false; b.textContent = "Add folder"; } }
   }
 
+  // 2.5: the switch that writes the room's memory into the agent's own context file. Says which file and how big, and is off until turned on.
+  const capLabel = (n) => (n >= 1024 ? `${Number((n / 1024).toFixed(1))} KB` : `${n} bytes`);
+  function memoryExportRow(a, row) {
+    const info = (st.memExport || []).find((x) => x.agentId === a.id);
+    if (!info || !info.supported || !info.file) return "";
+    return row(a, "memexport", "memory", a.settings?.memoryExport === true, `Share room memory with ${a.name} outside the room`,
+      `Off by default. When on, it writes what the room knows into ${info.file}, in one block between two marker lines, up to ${capLabel(info.capBytes || 4096)}. The rest of that file is never touched, and your original is saved once first.${info.note ? ` ${info.note}` : ""}`);
+  }
+
   // Per-agent tool switches. A sub-setting is nested under its parent (indented, with a left rule); labels never carry spaces.
   function renderPermissions() {
     const agents = Object.values(st.agents).sort((a, b) => a.name.localeCompare(b.name));
@@ -584,7 +603,7 @@
           a.adapter === "codex" ? "Codex already runs commands inside its sandbox without asking. This covers anything it asks the room about."
             : "Commands run right away. Each one is still logged in Activity and the audit log.")}</div>` : "";
         return main + sub;
-      }).join("")}`).join("");
+      }).join("")}${memoryExportRow(a, row)}`).join("");
     paintColors();
   }
 
@@ -787,6 +806,7 @@
       if (t.dataset.nav === "permissions") {
         go("permissions");
         if (!st.tools.length) { st.tools = await api("/tools"); if (st.view === "permissions") renderPermissions(); }
+        st.memExport = await api("/memory/export").catch(() => st.memExport || []); if (st.view === "permissions") renderPermissions();   // 2.5
         return;
       }
       if (t.dataset.nav === "folders") { st.grants = null; go("folders"); void loadGrants(); return; }
@@ -830,6 +850,13 @@
         await api(`/goals/${t.dataset.plan}/plan`, { method: "POST", body: { decision: d, text } });
         return;
       }
+      if (t.dataset.answer) {
+        for (const b of document.querySelectorAll(`button[data-answer="${CSS.escape(t.dataset.answer)}"]`)) b.disabled = true;
+        await api(`/approvals/${t.dataset.answer}`, { method: "POST", body: { choice: t.dataset.choice } });
+        st.approvals = st.approvals.filter((a) => a.id !== t.dataset.answer);
+        renderBadge(); renderApprovals();
+        return;
+      }
       if (t.dataset.approval) {
         // 1.1: a file write is approved only from the full diff, after it has been read to the end.
         const target = st.approvals.find((a) => a.id === t.dataset.approval);
@@ -855,6 +882,13 @@
     const { agent, kind, tool } = el.dataset;
     el.disabled = true;
     try {
+      if (kind === "memexport") {   // 2.5: a plain agent setting, off until switched on
+        const cur = st.agents[agent];
+        const saved = await api(`/agents/${agent}`, { method: "PUT", body: { settings: { ...(cur?.settings || {}), memoryExport: el.checked } } });
+        if (saved?.id) st.agents[saved.id] = saved;
+        renderPermissions();
+        return;
+      }
       const updated = await api(`/agents/${agent}/${kind === "auto" ? "auto-approve" : "tools"}`, { method: "PUT", body: { [tool]: el.checked } });
       if (updated?.id) st.agents[updated.id] = updated;
       renderPermissions();

@@ -6,6 +6,7 @@ import type {
 } from "@agent-room/shared";
 import { SETTING_DEFAULTS } from "@agent-room/shared";
 import { id, now } from "../util.js";
+import { ensureProvenance, isLive, ttlSetting, type Bare } from "../memory/model.js"; // 2.5
 
 /**
  * Single SQLite store. Each row keeps its full object as JSON in `data`, with a few
@@ -149,16 +150,28 @@ export class Store extends EventEmitter {
   }
 
   // ---- memory. Shared rows are written only by the Orchestrator (the keeper).
-  saveMemory(e: MemoryEntry) {
-    this.put("memory", { id: e.id, scope: e.scope, owner: e.ownerAgentId ?? null, room_id: e.roomId ?? null, data: JSON.stringify(e) });
+  // 2.5: every row has a source and an expiry (filled in here when a caller leaves them out). Expired rows stay until
+  // the keeper prunes them but never reach prompts, tools or context. A "memory" event tells the keeper to update the files.
+  saveMemory(e: Bare): MemoryEntry {
+    const row = ensureProvenance(e, { at: now(), ttl: ttlSetting(this.getSettings()) });
+    this.put("memory", { id: row.id, scope: row.scope, owner: row.ownerAgentId ?? null, room_id: row.roomId ?? null, data: JSON.stringify(row) });
+    this.emit("memory", { entry: row });
+    return row;
   }
-  deleteMemory(memId: string) { this.stmt("DELETE FROM memory WHERE id=?").run(memId); }
-  listShared(roomId?: string) {
+  deleteMemory(memId: string) {
+    const prev = this.getMemory(memId);
+    this.stmt("DELETE FROM memory WHERE id=?").run(memId);
+    if (prev) this.emit("memory", { entry: prev, deleted: true });
+  }
+  getMemory(memId: string) { return this.one<MemoryEntry>("SELECT data FROM memory WHERE id=?", memId); }
+  /** Every memory row, expired ones included (for the keeper, the files and the owner's "expired" view). */
+  allMemory() { return this.all<MemoryEntry>("SELECT data FROM memory"); }
+  listShared(roomId?: string, at = now()) {
     return this.all<MemoryEntry>(
       "SELECT data FROM memory WHERE scope='shared' AND (room_id IS NULL OR room_id=?)", roomId ?? null,
-    );
+    ).filter((e) => isLive(e, at));
   }
-  listPrivate(agentId: string) { return this.all<MemoryEntry>("SELECT data FROM memory WHERE scope='private' AND owner=?", agentId); }
+  listPrivate(agentId: string, at = now()) { return this.all<MemoryEntry>("SELECT data FROM memory WHERE scope='private' AND owner=?", agentId).filter((e) => isLive(e, at)); }
 
   saveProposal(p: MemoryProposal) {
     this.put("proposals", { id: p.id, status: p.status, data: JSON.stringify(p) });
