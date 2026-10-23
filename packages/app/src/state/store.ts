@@ -31,6 +31,8 @@ interface State {
   approvals: Approval[];
   proposals: MemoryProposal[];
   calibration: Task[];
+  /** Bumped when a control file changes on disk or in the app, so Settings can reload its notices. */
+  controlStamp: number;
   error?: string;
   onboarded: boolean;
   startupError?: string;
@@ -50,7 +52,7 @@ let stopLive: (() => void) | undefined;
 
 export const useRoom = create<State>((set, get) => ({
   ownerName: "Owner", online: false, rooms: [], messages: [], tasks: {}, goals: {}, agents: [], statuses: {},
-  working: {}, unread: {}, approvals: [], proposals: [], calibration: [], onboarded: true, view: { kind: "room" },
+  working: {}, unread: {}, approvals: [], proposals: [], calibration: [], controlStamp: 0, onboarded: true, view: { kind: "room" },
 
   async restore() {
     set({ startupError: undefined });
@@ -170,6 +172,7 @@ export const useRoom = create<State>((set, get) => ({
       case "approval": set({ approvals: e.approval.status === "pending" ? [...s.approvals.filter((a) => a.id !== e.approval.id), e.approval] : s.approvals.filter((a) => a.id !== e.approval.id) }); break;
       case "proposal": set({ proposals: e.proposal.status === "pending" ? [...s.proposals.filter((p) => p.id !== e.proposal.id), e.proposal] : s.proposals.filter((p) => p.id !== e.proposal.id) }); break;
       case "calibration": set({ calibration: [...s.calibration, e.task] }); break;
+      case "control": set({ controlStamp: e.at }); break;
     }
   },
 

@@ -8,6 +8,7 @@ import { buildServer } from "./api/server.js";
 import { seed } from "./seed.js";
 import { tailscaleIp } from "./net.js";
 import { connectTunnel } from "./relay/tunnel.js";
+import { ControlFolder, defaultControlRoot } from "./control/folder.js";
 
 // Apps launched from Finder get a thin PATH; make sure the agent CLIs are findable.
 const home = homedir();
@@ -23,7 +24,10 @@ mkdirSync(dataDir, { recursive: true });
 const store = new Store(join(dataDir, demo ? "demo.db" : "agent-room.db"));
 seed(store, demo);
 const approvals = new Approvals(store);
-const orch = new Orchestrator(store, approvals, { dataDir, mcpUrl: () => `http://127.0.0.1:${port}/mcp` });
+// 1.9: the control folder (~/Agent Room, or $AGENT_ROOM_HOME). Demo mode keeps its own so mock agents never write to the real one.
+let control: ControlFolder | undefined = new ControlFolder(process.env.AGENT_ROOM_HOME || (demo ? join(dataDir, "Agent Room (demo)") : defaultControlRoot()), store, { ownerName });
+try { await control.init(); control.start(); } catch (e) { console.error(`Control folder unavailable (${(e as Error).message}); running without it.`); control = undefined; }
+const orch = new Orchestrator(store, approvals, { dataDir, mcpUrl: () => `http://127.0.0.1:${port}/mcp`, control });
 const app = await buildServer({ store, orch, approvals, ownerName });
 
 await app.listen({ host: "0.0.0.0", port });
@@ -38,6 +42,7 @@ Agent Room hub ${demo ? "(demo mode, mock agents)" : ""}
   Tailscale:  ${ts ? `http://${ts}:${port}` : "not detected (install Tailscale or set AGENT_ROOM_TAILSCALE_IP)"}
   Pair code:  ${code}   (valid 10 minutes, one use; restart for a new one)
   Data:       ${dataDir}
+  Control:    ${control?.root ?? "not available"}
 Only localhost and Tailscale addresses are served.`);
 
 // Optional outbound relay: cloud agents reach /mcp through it; nothing on this Mac listens for the relay.

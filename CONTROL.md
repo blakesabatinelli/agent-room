@@ -146,3 +146,18 @@ It **flags** (loads the file, tells the owner) when:
 ---
 
 **For owner approval.** Open points: (1) the 24 KB context cap; (2) learned `POLICY.md` rules applying only after an explicit accept (proposed: yes); (3) moving agent runtime settings out of the database into `TOOLS.md` (proposed: yes, in 1.9, with a one-time migration).
+
+---
+
+## 8. Implementation notes (item 1.9)
+
+Choices the spec left open, as built in `packages/hub/src/control/`:
+
+- **Missing means no.** A tool not listed in `TOOLS.md` `room_allows` is off. A `platform.connectors` list that is empty (discovery hasn't run) restricts nothing; once it has entries, gmail, slack, drive and salesforce need to be in it.
+- **Policy rules.** `scope` is `*` or space-separated `agent:<id>` and `room:<slug>` tokens that must all match. A rule with `match: "*"` sets a tool's level for that scope and beats the default; several rules resolve to the strictest. Rules with a narrower `match` are for the approval path (4.2). Unaccepted learned rules and expired rules never apply.
+- **Run without asking.** The app's per-agent switch is written as `room_allows: on` plus a rule `app-<agent>-<tool>` (effect allow, scope `agent:<id>`), because a layer can't widen policy. The app owns rules that start with `app-`; edit any others freely.
+- **Rooms.** The topic is the first line of the `ROOM.md` body. The folder name is the room's identity (same slug as the Library); `name` in the front matter is for display. Direct-message rooms have no `ROOM.md`. Renaming a room in the app moves its folder.
+- **Who comes into being.** A new `agents/<id>/` (valid `SOUL.md` and `TOOLS.md`) or `rooms/<slug>/ROOM.md` written in an editor creates the agent or room. An agent or room deleted in the app keeps its files and isn't brought back at the next load.
+- **What the files own.** Name and colour (`SOUL.md`); adapter, provider, enabled, binary, model, profiles and permissions (`TOOLS.md`). Other agent settings (for example `quality`, `command`) stay in the database.
+- **Context file.** Wrapped in `<!-- agent-room:begin -->` and `<!-- agent-room:end -->`. The persona sits between `<!-- agent-room:persona:begin -->` and `<!-- agent-room:persona:end -->` so 3.2 can strip it. The saved original lives in `.agent-room/context-backup.json` in the worktree until the file is restored. If the protected parts alone pass the cap, the context is returned over the cap with the protected parts intact and says so.
+- **Room memory contradictions** are a plain-text check: the same sentence with and without a negation, or the same `key: value` with two values. It can miss subtler conflicts.

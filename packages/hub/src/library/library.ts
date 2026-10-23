@@ -7,7 +7,7 @@ import { id, now, token } from "../util.js";
 import { DOC_STATUSES, emitFrontMatter, readDocument, splitFrontMatter, validateFrontMatter } from "./frontmatter.js";
 
 /** Where documents live unless the owner points the Library at another folder (e.g. one synced by Drive). */
-export const defaultLibraryRoot = () => process.env.AGENT_ROOM_LIBRARY ?? join(homedir(), "Agent Room", "Library");
+export const defaultLibraryRoot = () => process.env.AGENT_ROOM_LIBRARY ?? join(process.env.AGENT_ROOM_HOME || join(homedir(), "Agent Room"), "Library");
 
 const MAX_SLUG = 60;
 const GOAL_DIR = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;

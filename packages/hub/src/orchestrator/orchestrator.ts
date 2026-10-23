@@ -16,6 +16,7 @@ import { addUsage, closeRecord, decide, fixedDecision, openRecord, type RouteDec
 import { addFailure, classifyFailure, parseFailureCategory, type FailureEvidence } from "./failures.js";
 import { Library, defaultLibraryRoot } from "../library/library.js";
 import { FileBroker } from "../files/broker.js";
+import type { ControlFolder } from "../control/folder.js"; // 1.9
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -40,6 +41,8 @@ export interface OrchestratorOptions {
   retryDelayMs?: number;
   /** Root of the document Library; defaults to ~/Agent Room/Library (or $AGENT_ROOM_LIBRARY). */
   libraryDir?: string;
+  /** 1.9: the control folder (rules, personas, permissions, scope as Markdown files). */
+  control?: ControlFolder;
 }
 
 type PlanTask = RawPlanTask;
@@ -68,10 +71,13 @@ export class Orchestrator {
   library: Library;
   /** 0.3 spike: folder grants, file reads, and diff-proposed writes. */
   files: FileBroker;
+  /** 1.9: the control folder; undefined when the hub runs without one (most tests). */
+  control?: ControlFolder;
 
   constructor(private store: Store, private approvals: Approvals, private opts: OrchestratorOptions) {
     this.library = new Library(store, opts.libraryDir ?? defaultLibraryRoot());
     this.files = new FileBroker(store, approvals);
+    this.control = opts.control; // 1.9
   }
 
   private cfg(): Required<OrchestratorSettings> {

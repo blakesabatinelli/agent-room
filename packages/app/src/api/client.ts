@@ -1,5 +1,5 @@
 import type {
-  AgentConfig, AgentScore, AgentStatus, McpConnection, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
+  AgentConfig, AgentScore, AgentStatus, ControlCommit, ControlNotice, ControlStatus, McpConnection, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
   Message, OrchestratorSettings, Room, ServerEvent, Task,
 } from "@agent-room/shared";
 
@@ -78,6 +78,11 @@ export class Hub {
   approvals = () => this.req<Approval[]>("/approvals?status=pending");
   decide = (id: string, decision: "approved" | "rejected") => this.send("POST", `/approvals/${id}`, { decision });
   audit = () => this.req<AuditEntry[]>("/audit");
+  // 1.9 control files
+  controlStatus = () => this.req<ControlStatus>("/control/status");
+  controlHistory = (path?: string) => this.req<ControlCommit[]>(`/control/history${path ? `?path=${encodeURIComponent(path)}` : ""}`);
+  controlRevert = (commit: string) => this.send<{ ok: boolean; commit: string; files: string[] }>("POST", `/control/revert/${commit}`);
+  controlLint = () => this.send<{ blocks: ControlNotice[]; flags: ControlNotice[] }>("POST", "/control/lint");
   mcpToken = (agentId: string, name: string) => this.send<{ token: string; url: string }>("POST", "/mcp-tokens", { agentId, name });
 
   /** Live events with automatic reconnect. Returns a stop function. */
