@@ -72,7 +72,7 @@ export const schemas = {
   }),
   tools: base("tools").extend({
     runtime: z.object({
-      adapter: z.enum(["claude-code", "codex", "mcp", "command", "openai-api", "mock"]),
+      adapter: z.enum(["claude-code", "codex", "mcp", "command", "openai-api", "mock", "acp"]),
       provider: str, enabled: z.boolean(),
       binary: z.string().optional(), model: z.string().optional(), profiles: z.array(profile).max(8).optional(),
     }),

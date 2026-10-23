@@ -6,6 +6,7 @@ import { CommandAdapter } from "./command.js";
 import { OpenAIApiAdapter } from "./openaiApi.js";
 import { MockAdapter } from "./mock.js";
 import { ExternalMcpAdapter } from "./mcp.js";
+import { AcpAdapter } from "./acp.js"; // 4.6
 
 export * from "./types.js";
 export { inbox, type Assignment } from "./mcp.js";
@@ -17,4 +18,5 @@ export const adapters: Record<AdapterKind, Adapter> = {
   command: new CommandAdapter(),
   "openai-api": new OpenAIApiAdapter(),
   mock: new MockAdapter(),
+  acp: new AcpAdapter(), // 4.6
 };

@@ -41,6 +41,8 @@ import { firstPassMetrics, retroDb } from "../retro/index.js"; // 2.1
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isLive } from "../memory/model.js"; // 2.5
+import { A2A_FUNNEL_PATHS, a2aRemoteOpen, isA2aOpenPath } from "../interop/paths.js"; // 4.6
+import { a2aFunnelOn, registerInteropRoutes } from "../interop/routes.js"; // 4.6
 
 export interface ServerDeps {
   store: Store; orch: Orchestrator; approvals: Approvals; ownerName: string; restrictInterfaces?: boolean;
@@ -97,10 +99,13 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     const path = req.url.split("?")[0];
     // 1.2: a request that came through Tailscale Funnel (or any proxy) reaches POST /mcp and its 405 GET, and nothing else.
     if (isRemoteRequest(req)) {
+      // 4.6: with "A2A through Funnel" on, GET of the agent card and POST /a2a open too (exact paths; /a2a authenticates every call itself)
+      if (a2aRemoteOpen(req.method, path, a2aFunnelOn(store))) return;
       if (path !== "/mcp" || (req.method !== "POST" && req.method !== "GET")) return reply.code(404).send({ error: "Not found." });
       return; // /mcp authenticates every call itself
     }
     if (path === "/health" || path === "/pair" || path === "/pair/local" || path === "/mcp") return;
+    if (isA2aOpenPath(path)) return; // 4.6: the agent card is public discovery; POST /a2a checks its own a2a key
     if (path === "/" || path.startsWith("/web/")) return; // the phone web app itself; everything it calls still needs a token
     const t = bearer(req.headers.authorization) ?? (path === "/ws" ? new URL(req.url, "http://x").searchParams.get("token") ?? undefined : undefined);
     if (!t || !store.hasDevice(t)) return reply.code(401).send({ error: "Pair this device first." });
@@ -221,6 +226,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
 
   // ---------- 1.2 remote access over Tailscale (paired devices only; a proxied/Funnel request never gets here)
   const funnelIntent = () => store.getKV<boolean>("remote_funnel", false);
+  tailscale.allowedExtraPaths = () => (a2aFunnelOn(store) ? A2A_FUNNEL_PATHS : []); // 4.6: the A2A paths are expected on the funneled port only while the owner switched them on
   // Every status read runs the checks below (drift, extra paths, a /mcp handler aimed elsewhere, raw TCP forwards to the hub). Each problem is
   // audited once per change, so a later read of the same problem is silent and a new or returning one is recorded.
   let lastDrift = "";
@@ -254,6 +260,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
       return reply.code(409).send({ error: r.error, approvalUrl: r.approvalUrl });
     }
     if (b.data.on) store.setKV("remote_funnel", true);
+    if (b.data.on && a2aFunnelOn(store)) await tailscale.setFunnelPaths(port(), A2A_FUNNEL_PATHS, true).catch(() => undefined); // 4.6: "A2A through Funnel" was on before Funnel was
     store.audit("owner", b.data.on ? "remote.funnel.on" : "remote.funnel.off", r.status.funnel.url ?? "/mcp");
     return remoteNow(true);
   });
@@ -331,6 +338,9 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     if (!mcpTokens.revoke((req.params as { id: string }).id)) return reply.code(404).send({ error: "Key not found." });
     return { ok: true };
   });
+
+  // 4.6: the A2A agent card, POST /a2a, and the owner's keys and Funnel switch for them (interop/routes.ts)
+  registerInteropRoutes(app, { store, orch, tokens: mcpTokens, tailscale, limiter: authLimiter, port: () => port() });
 
   // ---------- rooms & chat
   app.get("/rooms", async () => store.listRooms());
@@ -439,7 +449,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   // ---------- agents & permissions
   const agentSchema = z.object({
     id: z.string().regex(/^[a-z0-9-]+$/), name: z.string(), provider: z.string(),
-    adapter: z.enum(["claude-code", "codex", "mcp", "command", "openai-api", "mock"]), enabled: z.boolean(),
+    adapter: z.enum(["claude-code", "codex", "mcp", "command", "openai-api", "mock", "acp"]), enabled: z.boolean(),
     color: z.string(), settings: z.record(z.unknown()), tools: z.record(z.boolean()), canBeOrchestrator: z.boolean().optional(), avatar: z.string().max(40).optional(),
     profiles: z.array(z.object({
       id: z.string().regex(/^[a-z0-9-]+$/).max(40), label: z.string().min(1).max(60),

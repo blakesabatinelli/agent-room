@@ -13,7 +13,7 @@ import { SignInPanel } from "../components/SignIn";
 import { radius, space, type as t, usePalette } from "../theme";
 
 const isMac = Platform.OS === ("macos" as string);
-const PROVIDER: Record<string, string> = { "claude-code": "Claude Code · your Claude plan", codex: "Codex · your ChatGPT plan", mcp: "Joins over MCP", command: "Command on this Mac", "openai-api": "API", mock: "Practice agent" };
+const PROVIDER: Record<string, string> = { "claude-code": "Claude Code · your Claude plan", codex: "Codex · your ChatGPT plan", mcp: "Joins over MCP", command: "Command on this Mac", "openai-api": "API", acp: "Speaks ACP", mock: "Practice agent" };
 // Strong enough to carry white initials on a light background.
 const COLORS = ["#D9822B", "#D6336C", "#1C7ED6", "#2F9E44", "#B08800", "#7048E8", "#5C6B7A"];
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
