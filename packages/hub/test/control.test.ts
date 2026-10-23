@@ -517,3 +517,19 @@ test("1.9 works without git: files still sync, there is just no history", async 
   await until(() => c.store.getAgent("claude")!.tools.web === false, "the edit");
   assert.deepEqual(await control.history(), []);
 });
+
+test("1.9 x 1.4: each task's worktree gets its agent's context file, and it never reaches the goal folder", async (t) => {
+  const { MockAdapter } = await import("../src/adapters/mock.js");
+  const c = await mk(t, { watch: false });
+  MockAdapter.calls.length = 0;
+  const goal = await c.orch.runGoal(c.room.id, "Summarize the venue TV market");
+  assert.equal(goal.status, "done");
+  const runs = MockAdapter.calls.filter((x) => x.kind === "TASK");
+  assert.ok(runs.length >= 2);
+  for (const r of runs) {
+    assert.ok(r.context, `task in ${r.cwd} had a context file`);
+    assert.match(r.context!, /agent-room:begin|# /, "built from the control layers");
+  }
+  const base = c.store.getGoal(goal.id)!.folder!;
+  for (const f of ["CLAUDE.md", "AGENTS.md", ".agent-room/CONTEXT.md"]) assert.ok(!existsSync(join(base, f)), `${f} stays out of the goal folder`);
+});

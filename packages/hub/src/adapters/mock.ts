@@ -2,6 +2,12 @@ import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Adapter, RunRequest, RunResult } from "./types.js";
 
+/** The context file the hub wrote into this cwd (1.9), if any, so tests can see what the agent was given. */
+function readContext(cwd: string): string | undefined {
+  for (const f of ["CLAUDE.md", "AGENTS.md", ".agent-room/CONTEXT.md"]) { try { const p = join(cwd, f); if (existsSync(p)) return readFileSync(p, "utf8"); } catch { /* ignore */ } }
+  return undefined;
+}
+
 /**
  * Deterministic stand-in used by tests and by practice mode, so the whole loop runs
  * without any CLI installed. It recognises the orchestrator's prompt kinds.
@@ -23,7 +29,7 @@ import type { Adapter, RunRequest, RunResult } from "./types.js";
  */
 export class MockAdapter implements Adapter {
   /** Every run, for tests: which profile reached the agent. */
-  static calls: { agentId: string; model?: string; effort?: string; kind: string; prompt: string; cwd: string }[] = [];
+  static calls: { agentId: string; model?: string; effort?: string; kind: string; prompt: string; cwd: string; context?: string }[] = [];
   static transientSeen = new Map<string, number>();
   async status() { return { ready: true, state: "ready" as const, detail: "Practice agent" }; }
 
@@ -32,7 +38,7 @@ export class MockAdapter implements Adapter {
     const p = req.prompt;
     const st = req.agent.settings as { quality?: number; status?: string; outOfScope?: string; tag?: string; noReport?: boolean; checks?: boolean; bigPlan?: boolean; skipFiles?: boolean; writeOutside?: string };
     const kind = (p.match(/^\[\[(\w+)\]\]/)?.[1] ?? (p.includes("# Your task:") ? "TASK" : "CHAT")).toUpperCase();
-    MockAdapter.calls.push({ agentId: req.agent.id, model: req.model, effort: req.effort, kind, prompt: p, cwd: req.cwd });
+    MockAdapter.calls.push({ agentId: req.agent.id, model: req.model, effort: req.effort, kind, prompt: p, cwd: req.cwd, context: readContext(req.cwd) });
     const quality = Number(st.quality ?? 0.8);
     const ids = [...new Set([...p.matchAll(/^(AC\d+):/gm)].map((m) => m[1]))];
     let text: string;

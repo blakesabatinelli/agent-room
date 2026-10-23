@@ -21,6 +21,7 @@ import { Library, defaultLibraryRoot } from "../library/library.js";
 import { FileBroker } from "../files/broker.js";
 import { TaskWorkspaces, type TaskWorkspace, type WorkspaceHookContext, type WorkspaceHooks } from "./worktree.js";
 import type { ControlFolder } from "../control/folder.js"; // 1.9
+import { restoreTaskContext, writeTaskContext } from "../control/context.js"; // 1.9 x 1.4
 import { CapacityGovernor } from "../capacity/governor.js";
 import { detectHardware } from "../capacity/hardware.js";
 
@@ -97,6 +98,19 @@ export class Orchestrator {
     this.files = new FileBroker(store, approvals);
     this.workspaces = new TaskWorkspaces({ dataDir: opts.dataDir, git: opts.gitBin });
     this.control = opts.control; // 1.9
+    // 1.9 x 1.4: each task's worktree gets its agent's context file, built from the control folder's layers,
+    // and it is taken back out before the work is merged so it never lands in the goal folder or the owner's repo.
+    // (Read at call time, so a control folder attached after construction is used too.)
+    this.workspaceHooks = {
+      beforeRun: (c) => {
+        const control = this.control; if (!control) return;
+        const task = this.store.getTask(c.taskId), goal = this.store.getGoal(c.goalId), agent = this.store.getAgent(c.agentId);
+        if (!task || !goal || !agent) return;
+        const text = control.contextFor({ agentId: agent.id, roomSlug: control.slugFor(task.roomId), taskType: task.taskType, goal, task });
+        writeTaskContext(c.path, agent.adapter, text);
+      },
+      beforeMerge: (c) => { if (this.control) restoreTaskContext(c.path); },
+    };
     this.governor = opts.governor ?? new CapacityGovernor(store, detectHardware());
   }
 
