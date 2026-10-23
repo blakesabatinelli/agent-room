@@ -7,8 +7,8 @@
   const st = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
-    view: "rooms",          // rooms | room | approvals | permissions | control | pair
-    tools: [], control: null,
+    view: "rooms",          // rooms | room | approvals | permissions | control | subscriptions | pair
+    tools: [], control: null, quota: [],
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, working: {}, approvals: [],
     unread: new Set(), readAt: 0, readSent: {}, positioned: "",
     online: false, ws: null, wsDelay: 1000,
@@ -218,13 +218,14 @@
     $("#composer").hidden = st.view !== "room";
     const room = st.rooms.find((r) => r.id === st.roomId);
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : `# ${room.name}`)
-      : st.view === "approvals" ? "Approvals" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : "Agent Room";
+      : st.view === "approvals" ? "Approvals" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : "Agent Room";
     renderDot(); renderBadge();
     if (st.view === "pair") return renderPair();
     if (st.view === "rooms") return renderRooms();
     if (st.view === "approvals") return renderApprovals();
     if (st.view === "permissions") return renderPermissions();
     if (st.view === "control") return renderControl();
+    if (st.view === "subscriptions") return renderSubscriptions();
     renderMessages(); renderComposerState();
   }
 
@@ -249,8 +250,8 @@
       : `<div class="empty">No rooms yet. Make one on the Mac.</div>`;
     const nCtl = st.control ? st.control.notices.length : 0;
     $("#view").innerHTML += `<div class="section">Settings</div><button class="row" data-nav="permissions"><span class="hash">⚙︎</span><span class="name">Permissions</span></button>
+      <button class="row" data-nav="subscriptions"><span class="hash">◔</span><span class="name">Subscriptions</span></button>
       <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>${st.capacity ? `<div class="capline">${esc(st.capacity.summary)}</div>` : ""}`;
-
     paintColors();
   }
 
@@ -313,6 +314,28 @@
         return main + sub;
       }).join("")}`).join("");
     paintColors();
+  }
+
+  // 1.6 Subscriptions: what each plan has used in its 5-hour and weekly windows. Read-only here; limits are edited on the Mac.
+  function renderSubscriptions() {
+    const k = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+    const at = (ms) => new Date(ms).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+    const win = (w, label, free) => {
+      if (free) return "";
+      const lim = [w.limitRuns ? `${w.usedRuns} of ${w.limitRuns} runs` : "", w.limitTokens ? `${k(w.usedTokens)} of ${k(w.limitTokens)} tokens` : ""].filter(Boolean).join(", ");
+      const pct = w.headroom === undefined ? 0 : Math.round((1 - w.headroom) * 100);
+      const note = w.headroom === undefined ? `learning, ${w.usedRuns} runs so far` : `${lim}${w.limitSource === "learned" ? " (learned)" : ""}`;
+      return `<div class="qrow"><span class="qlbl">${label}</span><span class="qbar${pct >= 90 ? " hot" : ""}"><i data-pct="${pct}"></i></span></div>
+        <div class="qnote">${esc(note)}${w.usedRuns ? `, resets ${esc(at(w.resetsAt))}` : ""}</div>`;
+    };
+    $("#view").innerHTML = st.quota.length ? st.quota.map((q) => `
+      <div class="qsub">
+        <div class="qhead"><span class="qname">${esc(q.subscription.label)}</span>${q.free ? '<span class="qtag">free</span>' : q.limited ? '<span class="qtag warn">at its limit</span>' : ""}</div>
+        ${q.subscription.plan ? `<div class="qnote flat">${esc(q.subscription.plan)}</div>` : ""}
+        ${q.free ? '<div class="qnote flat">Runs on this Mac. No limit.</div>' : win(q.windows.fiveHour, "5-hour", false) + win(q.windows.weekly, "Weekly", false)}
+        ${q.limited && q.limitedUntil ? `<div class="qnote flat">No work goes here until ${esc(at(q.limitedUntil))}.</div>` : ""}
+      </div>`).join("") : `<div class="empty">Loading…</div>`;
+    for (const el of document.querySelectorAll("[data-pct]")) el.style.width = `${el.dataset.pct}%`;
   }
 
   // First render of a room jumps to the first unread message (or the latest); later renders
@@ -397,6 +420,11 @@
           toast(r.blocks.length + r.flags.length ? `${r.blocks.length} blocked, ${r.flags.length} flagged` : "No problems found");
           await loadControl();
         } finally { t.disabled = false; }
+        return;
+      }
+      if (t.dataset.nav === "subscriptions") {
+        go("subscriptions");
+        st.quota = await api("/quota/subscriptions"); if (st.view === "subscriptions") renderSubscriptions();
         return;
       }
       if (t.dataset.plan) {

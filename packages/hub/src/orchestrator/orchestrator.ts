@@ -13,6 +13,9 @@ import { directPrompt, judgePrompt, memoryPrompt, planCard, planPrompt, recoverP
 import { MAX_TASKS, coverLeftovers, isTransient, ledgerMarkdown, newProgress, normaliseRequirements, readDeliverables, repairDeps, sameFeedback, validatePlan, writeLedger, type RawPlanTask } from "./ledger.js";
 import { applyOwnerRating, recordOutcome } from "./scoring.js";
 import { addUsage, closeRecord, decide, fixedDecision, openRecord, type RouteDecision } from "./routing.js";
+import { quotaFor } from "../quota/index.js";
+import { isRateLimit } from "../quota/limits.js";
+import { quotaDecide, quotaLimited } from "../quota/router.js";
 import { addFailure, classifyFailure, parseFailureCategory, type FailureEvidence } from "./failures.js";
 import { Library, defaultLibraryRoot } from "../library/library.js";
 import { FileBroker } from "../files/broker.js";
@@ -248,6 +251,7 @@ export class Orchestrator {
     if (!res.ok) this.forgetStatus(agent.id); // re-check sign-in before routing to it again
     if (grant) this.grants.delete(grant.token);
     this.store.audit(agent.id, o.jsonOnly ? "orchestrator.call" : "agent.run", `${res.ok ? "ok" : "failed"} in ${res.durationMs}ms${o.profile ? ` (${o.profile.label})` : ""}`);
+    if (!this.store.getKV("practice_mode", false)) quotaFor(this.store).recordRun(agent, res, { prompt, jsonOnly: o.jsonOnly, taskId: o.taskId, model: o.profile?.model }); // 1.6: usage ledger, rate-limit learning
     return res;
   }
 
@@ -643,7 +647,7 @@ export class Orchestrator {
     if (agents.length === 1 && !notes.length) { await this.answerDirect(goal, fixedDecision(this.store, agents[0], [], "other", "only_candidate", eps), signal); return; }
     const orch = agents.find((a) => a.id === this.store.getSettings().orchestratorAgentId) ?? agents[0];
     if (isConversational(text) && !notes.length) {
-      const pick = decide(this.store, agents, "other", eps, [], this.opts.rand) ?? fixedDecision(this.store, orch, agents, "other", "only_candidate", eps);
+      const pick = quotaDecide(this.store, agents, "other", eps, [], this.opts.rand) ?? fixedDecision(this.store, orch, agents, "other", "only_candidate", eps); // 1.6: quota-aware pool
       await this.answerDirect(goal, pick, signal); return;
     }
     this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", label: "planning", active: true });
@@ -653,9 +657,9 @@ export class Orchestrator {
     this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", active: false });
     if (signal.aborted) return;
     if (!notes.length && (plan?.mode === "direct" || (plan && !plan.tasks?.length))) {
-      const named = agents.find((a) => a.id === plan?.agent);
+      const named = agents.find((a) => a.id === plan?.agent && !quotaLimited(this.store, a.id)); // 1.6: not an agent that is out of quota
       const pick = named ? fixedDecision(this.store, named, agents, "other", "planner_choice", 0)
-        : decide(this.store, agents, "other", 0, [], this.opts.rand) ?? fixedDecision(this.store, agents[0], agents, "other", "only_candidate", 0);
+        : quotaDecide(this.store, agents, "other", 0, [], this.opts.rand) ?? fixedDecision(this.store, agents[0], agents, "other", "only_candidate", 0);
       await this.answerDirect(goal, pick, signal); return;
     }
 
@@ -1056,16 +1060,18 @@ export class Orchestrator {
     if (t.status === "revising" && t.assignee) {
       // a revision stays with the same agent; if it went offline, the task goes back in the pool
       const same = enabled.find((a) => a.id === t.assignee);
-      if (same && live.has(same.id)) { if (!free(same) || !this.governor.admit(same)) return undefined; agent = same; route = fixedDecision(this.store, same, idle, t.taskType, "revision", s.explorationRate); }
+      if (same && live.has(same.id) && !quotaLimited(this.store, same.id)) { if (!free(same) || !this.governor.admit(same)) return undefined; agent = same; route = fixedDecision(this.store, same, idle, t.taskType, "revision", s.explorationRate); }
       else { t.triedBy = [...tried, t.assignee]; t.assignee = undefined; t.status = "pending"; this.store.saveTask(t); }
     }
-    if (!agent && t.owner && !tried.includes(t.owner) && live.has(t.owner)) {
+    if (!agent && t.owner && !tried.includes(t.owner) && live.has(t.owner) && !quotaLimited(this.store, t.owner)) { // 1.6: a planned owner out of quota is skipped
       const owner = enabled.find((a) => a.id === t.owner)!;
       if (free(owner) && this.governor.admit(owner)) { agent = owner; route = fixedDecision(this.store, owner, idle, t.taskType, "planned_owner", s.explorationRate); }
       else if (!free(owner) && now() - t.updatedAt < 10 * 60_000) return undefined; // wait for the planned owner (an owner the machine can't take right now is overflowed instead)
     }
-    route ??= decide(this.store, idle, t.taskType, s.explorationRate, tried, this.opts.rand)
-           ?? decide(this.store, idle, t.taskType, s.explorationRate, [], this.opts.rand);
+    // 1.6: routing sees only agents with capacity, free (local) agents first within a margin, expiring capacity nudged up.
+    const waiting = enabled.filter((a) => live.has(a.id) && !free(a) && !tried.includes(a.id)); // busy, but with quota: worth waiting for if every idle agent is limited
+    route ??= quotaDecide(this.store, idle, t.taskType, s.explorationRate, tried, this.opts.rand, waiting)
+           ?? quotaDecide(this.store, idle, t.taskType, s.explorationRate, [], this.opts.rand, waiting);
     if (!route) return undefined;
     agent = route.agent;
     // 0.2: every pick is logged with each candidate's probability, before the work starts.
@@ -1187,7 +1193,7 @@ export class Orchestrator {
     let res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: work });
     let usage: RunUsage | undefined = res.usage, ms = res.durationMs, ranModel = res.model;
     // A rate limit or timeout says nothing about the agent's work: wait and retry, without spending an attempt.
-    for (let retry = 1; !res.ok && retry <= 2 && isTransient(res.error) && !stopped(); retry++) {
+    for (let retry = 1; !res.ok && retry <= 2 && isTransient(res.error) && !isRateLimit(res.error) && !stopped(); retry++) { // 1.6: rate limits move to another agent, below
       this.log(goal.roomId, `${agent.name} hit a temporary error on "${task.title}" (${firstLine(res.error)}); retrying in a moment.`, task.id, "task_update");
       await sleep((this.opts.retryDelayMs ?? 5000) * retry * retry);
       if (stopped()) break;
@@ -1202,6 +1208,8 @@ export class Orchestrator {
     if (stopped() && interrupted()) { route("interrupted"); return; }
 
     if (!res.ok) {
+      // 1.6: a rate limit isn't the agent's work: hand the task to another agent now rather than waiting on this one.
+      if (isRateLimit(res.error) && quotaFor(this.store).mayReroute(task.id, this.enabledAgents().length)) return this.rerouteRateLimited(goal, task, agent, res.error, route);
       route("run_failed", this.tagFailure(task, agent.id, { kind: "run_error" }, firstLine(res.error)));
       recordOutcome(this.store, agent.id, task.taskType, { seconds: res.durationMs / 1000, failed: true, revision: isRevision });
       this.addHistory(task, agent.id, "fail", firstLine(res.error));
@@ -1345,6 +1353,17 @@ export class Orchestrator {
     this.store.saveTask(task);
   }
 
+  /** 1.6: the run hit a rate limit (the quota ledger already marked the subscription). No attempt is spent and the agent's score is untouched. */
+  private rerouteRateLimited(goal: Goal, task: Task, agent: AgentConfig, error: string | undefined, route: (o: RoutingOutcome, x?: Partial<RoutingRecord>) => void) {
+    route("run_failed", this.tagFailure(task, agent.id, { kind: "run_error" }, `rate limit: ${firstLine(error)}`));
+    task.attempts = Math.max(0, task.attempts - 1);
+    task.triedBy = [...(task.triedBy ?? []), agent.id]; task.assignee = undefined;
+    if (task.status !== "revising") task.status = "pending";
+    this.floor.take(agent.id, goal.roomId);
+    this.store.saveTask(task);
+    this.log(goal.roomId, `${agent.name} hit a usage limit on "${task.title}" (${firstLine(error)}); moving it to another agent.`, task.id, "task_update");
+  }
+
   private async replan(goal: Goal, task: Task, signal: AbortSignal): Promise<boolean> {
     const agents = await this.readyAgents();
     const contract = this.store.getGoal(goal.id)?.contract;
@@ -1389,7 +1408,7 @@ export class Orchestrator {
   private async judge(task: Task, worker: AgentConfig, contract: Contract | undefined, notes: string[], signal: AbortSignal, changed: string[] = [], files = "", previousFeedback?: string, notJudge?: string): Promise<Judgment> {
     const s = this.store.getSettings();
     const ready = new Set((await this.readyAgents()).map((a) => a.id));
-    const pool = s.judgeRotation.map((j) => this.store.getAgent(j)).filter((a): a is AgentConfig => !!a && a.enabled && ready.has(a.id));
+    const pool = s.judgeRotation.map((j) => this.store.getAgent(j)).filter((a): a is AgentConfig => !!a && a.enabled && ready.has(a.id) && !quotaLimited(this.store, a.id)); // 1.6: not a judge that is out of quota
     // rotate judges; avoid letting an agent grade its own work when possible
     let judge: AgentConfig | undefined;
     for (let i = 0; i < pool.length; i++) {

@@ -1,4 +1,4 @@
-import type { AgentConfig, RoutingCandidate, RoutingReason, RoutingRecord, RunUsage, Task } from "@agent-room/shared";
+import type { AgentConfig, QuotaNote, RoutingCandidate, RoutingReason, RoutingRecord, RunUsage, Task } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import { id, now } from "../util.js";
 import { expected } from "./scoring.js";
@@ -16,6 +16,8 @@ export interface RouteDecision {
   candidates: RoutingCandidate[];
   pChosen: number;
   excluded: string[];
+  /** 1.6: agents the quota tracker left out of the pool, and why some were nudged up. */
+  quota?: QuotaNote;
 }
 
 /** Each candidate's expected score, in pool order. */
@@ -31,12 +33,14 @@ function scored(store: Store, pool: AgentConfig[], taskType: string) {
 export function decide(
   store: Store, candidates: AgentConfig[], taskType: string, epsilon: number,
   exclude: string[] = [], rand = Math.random,
+  /** 1.6: additive nudge on an agent's expected score (quota: free tier, capacity about to expire). Shown in the record's `quota`. */
+  bonus: Record<string, number> = {},
 ): RouteDecision | undefined {
   const pool = candidates.filter((a) => !exclude.includes(a.id));
   if (!pool.length) return undefined;
   const s = scored(store, pool, taskType);
   let best = 0;
-  for (let i = 1; i < s.length; i++) if (s[i].expected > s[best].expected) best = i;
+  for (let i = 1; i < s.length; i++) if (s[i].expected + (bonus[s[i].a.id] ?? 0) > s[best].expected + (bonus[s[best].a.id] ?? 0)) best = i;
   const n = pool.length;
   const eps = Math.min(1, Math.max(0, epsilon));
   const cands: RoutingCandidate[] = s.map((x, i) => ({ agentId: x.a.id, expected: round(x.expected), runs: x.runs, p: round(eps / n + (i === best ? 1 - eps : 0)) }));
@@ -64,6 +68,7 @@ export function openRecord(store: Store, d: RouteDecision, t: Task, goalText: st
     attempt: kind === "direct" ? 1 : t.attempts + 1, revision: kind === "task" && t.status === "revising",
     reason: d.reason, epsilon: d.epsilon, candidates: d.candidates, chosen: d.agent.id, pChosen: d.pChosen,
     ...(d.excluded.length ? { excluded: d.excluded } : {}),
+    ...(d.quota ? { quota: d.quota } : {}),
     modelRequested: (d.agent.settings?.model as string | undefined) || undefined,
     outcome: "pending",
   };

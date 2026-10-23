@@ -14,6 +14,7 @@ import { openSignIn, signInLog } from "../setup.js";
 import { pairingCode, token } from "../util.js";
 import { listFiles } from "../orchestrator/workspace.js";
 import { routingJsonl } from "../orchestrator/routing.js";
+import { quotaFor } from "../quota/index.js";
 import { runProc } from "../adapters/proc.js";
 import { PathDenied } from "../files/paths.js";
 
@@ -425,6 +426,22 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     }).parse({ ...store.getSettings(), ...(req.body as object) });
     store.setSettings(s); store.audit("owner", "settings.updated", JSON.stringify(s)); return s;
   });
+
+  // ---------- 1.6 quota awareness
+  const quota = quotaFor(store);
+  const limit = z.object({ limitTokens: z.number().int().min(1).optional(), limitRuns: z.number().int().min(1).optional() });
+  const subSchema = z.object({
+    id: z.string().min(1).max(64), provider: z.string().max(64), label: z.string().min(1).max(120), plan: z.string().max(80).optional(),
+    agentIds: z.array(z.string()), kind: z.enum(["subscription", "api", "local"]), modelMatch: z.string().max(120).optional(),
+    windows: z.object({ fiveHour: limit.optional(), weekly: limit.optional() }),
+    resetAnchor: z.object({ fiveHourStart: z.number().optional(), weekStart: z.number().optional() }).optional(),
+  });
+  app.get("/quota/subscriptions", async () => quota.statuses());
+  app.put("/quota/subscriptions", async (req) => { quota.saveSubscriptions(z.array(subSchema).parse(req.body) as never); return quota.statuses(); });
+  app.post("/quota/subscriptions/:id/forget", async (req) => { quota.forgetLearned((req.params as { id: string }).id); return quota.statuses(); });
+  app.get("/quota/settings", async () => quota.settings());
+  app.put("/quota/settings", async (req) => quota.saveSettings(z.object({ freeMargin: z.number(), expiryBonus: z.number(), nearLimit: z.number() }).partial().parse(req.body)));
+  app.get("/quota/report", async (req) => quota.report(z.object({ days: z.coerce.number().min(1).max(365).default(7) }).parse(req.query ?? {}).days));
 
   // ---------- memory
   app.get("/memory", async (req) => {
