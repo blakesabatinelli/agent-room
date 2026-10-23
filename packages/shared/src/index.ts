@@ -928,3 +928,34 @@ export interface McpInvite {
   /** The same standing instructions as the MCP connection screen. */
   instructions: string;
 }
+
+// ---- 1.7 Installable app
+/** Where an in-app CLI sign-in is (POST/GET /setup/signin/:agent). */
+export type SignInState = "idle" | "installing" | "starting" | "waiting" | "done" | "failed" | "cancelled";
+export interface SignInView {
+  agent: string;
+  state: SignInState;
+  /** browser: the CLI's own OAuth page; device: a one-time code typed into a web page. */
+  method?: "browser" | "device";
+  /** The sign-in page to open. Only ever an https address on the provider's own domain. */
+  url?: string;
+  /** One-time device code, when the CLI asked for one. */
+  code?: string;
+  /** The CLI is asking for a code pasted back (Claude Code does this when its browser can't reach the local callback). */
+  needsPaste?: boolean;
+  /** Set when the sign-in was handed to Terminal instead (the fallback button). */
+  terminal?: boolean;
+  /** One plain sentence for the UI. */
+  message: string;
+  updatedAt: number;
+}
+/** The setup timer (KV `setup.started`, `setup.first_goal_done`), in GET /setup. */
+export interface SetupTimer {
+  startedAt?: number;
+  firstGoalDoneAt?: number;
+  /** Seconds from first launch to the first finished goal; while the goal is still to come, seconds so far. */
+  elapsedSeconds?: number;
+  done: boolean;
+  /** The first finished goal ran on practice agents, so it says nothing about a real first goal. */
+  firstGoalPractice?: boolean;
+}

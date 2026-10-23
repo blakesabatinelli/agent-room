@@ -1,0 +1,3 @@
+Logging in...
+See https://evil.example.com/claude.ai/login and http://claude.ai/insecure and https://claude.ai.evil.example.com/x
+real: https://claude.com/cai/oauth/authorize?state=1

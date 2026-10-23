@@ -186,6 +186,11 @@ export function SettingsScreen() {
         <Section title="Setup">
           <View style={{ padding: space(4), gap: space(2) }}>
             <Text style={[t.small, { color: p.muted }]}>Go back through the welcome steps: sign agents in, pair your phone, start at login. Agents can also be connected any time from Agents & connections.</Text>
+            {setup?.timer?.done && setup.elapsedSeconds != null ? (
+              <Text style={[t.small, { color: p.muted }]}>
+                First goal finished {Math.floor(setup.elapsedSeconds / 60)}:{String(setup.elapsedSeconds % 60).padStart(2, "0")} after you first opened Agent Room{setup.timer.firstGoalPractice ? " (practice agents)" : ""}.
+              </Text>
+            ) : null}
             <View style={{ flexDirection: "row", gap: space(2) }}>
               <Button kind="plain" label="Run setup again" onPress={async () => { await hub?.saveSetup({ onboarded: false }); useRoom.setState({ onboarded: false }); }} />
               <Button kind="plain" label="Agents & connections" onPress={() => useRoom.getState().openPage("agents")} />

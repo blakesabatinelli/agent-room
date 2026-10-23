@@ -7,7 +7,10 @@ import { useRoom } from "../state/store";
 import { Avatar, Button, CodeBlock, Section, Toggle } from "../components/ui";
 import { RemoteAccess } from "../components/RemoteAccess";
 import { Discovery } from "../components/Discovery";
+import { SignInPanel } from "../components/SignIn";
 import { space, type as t, usePalette } from "../theme";
+
+const clock = (secs: number) => `${Math.floor(Math.max(0, secs) / 60)}:${String(Math.floor(Math.max(0, secs) % 60)).padStart(2, "0")}`;
 
 export function OnboardingScreen() {
   const p = usePalette();
@@ -20,23 +23,15 @@ export function OnboardingScreen() {
 
   const refresh = useCallback(async () => { if (hub) setInfo(await hub.setup()); }, [hub]);
   useEffect(() => { void refresh(); launcher?.startAtLoginEnabled().then(setAtLogin).catch(() => {}); }, [refresh]);
-  // After a sign-in starts, keep checking so nobody has to press "Check again".
-  const [watching, setWatching] = useState(0);
-  useEffect(() => {
-    if (!watching) return;
-    const i = setInterval(() => { void refresh(); }, 3000);
-    const stop = setTimeout(() => setWatching(0), 180_000);
-    return () => { clearInterval(i); clearTimeout(stop); };
-  }, [watching, refresh]);
+  // 1.7: the setup clock keeps counting here, and the status refreshes now and then, so the sign-in rows update on their own.
+  const [, tick] = useState(0);
+  useEffect(() => { const i = setInterval(() => { tick((n) => n + 1); void refresh(); }, 4000); return () => clearInterval(i); }, [refresh]);
 
   if (!info || !hub) return <View style={{ flex: 1, backgroundColor: p.canvas }} />;
   const showLog = async (id: string) => { try { setLog((await hub.signInLog(id)).log ?? "No setup log yet."); } catch (e) { setLog((e as Error).message); } };
   const cli = info.agents.filter((a) => a.adapter === "claude-code" || a.adapter === "codex");
   const anyReady = cli.some((a) => a.ready);
 
-  const signIn = async (id: string) => {
-    try { const r = await hub.signIn(id); setNote(r.message); if (r.ok) setWatching(Date.now()); } catch (e) { setNote((e as Error).message); }
-  };
   const practice = async (v: boolean) => { try { await hub.saveSetup({ practiceMode: v }); await refresh(); } catch (e) { setNote((e as Error).message); } };
   const loginItem = async (v: boolean) => {
     setBusy(true);
@@ -54,21 +49,23 @@ export function OnboardingScreen() {
       <Section title="1. Sign in your agents">
         <View style={{ padding: space(4) }}><Discovery invite={false} /></View>
         {cli.map((a) => (
-          <View key={a.id} style={{ flexDirection: "row", gap: space(3), padding: space(4), borderBottomWidth: 1, borderColor: p.line, alignItems: "center" }}>
-            <Avatar name={a.name} color={a.color} size={36} presence={a.ready ? "ready" : "off"} />
-            <View style={{ flex: 1 }}>
-              <Text style={[t.body, { color: p.inkStrong, fontWeight: "700" }]}>{a.adapter === "codex" ? `${a.name} (ChatGPT)` : a.name}</Text>
-              <Text style={[t.small, { color: a.ready ? p.ok : p.muted }]}>
-                {a.ready ? a.detail || "Signed in." : a.adapter === "claude-code" ? "Uses your Claude plan through Claude Code." : "Uses your ChatGPT plan through OpenAI's Codex CLI."}
-              </Text>
+          <View key={a.id} style={{ padding: space(4), borderBottomWidth: 1, borderColor: p.line, gap: space(3) }}>
+            <View style={{ flexDirection: "row", gap: space(3), alignItems: "center" }}>
+              <Avatar name={a.name} color={a.color} size={36} presence={a.ready ? "ready" : "off"} />
+              <View style={{ flex: 1 }}>
+                <Text style={[t.body, { color: p.inkStrong, fontWeight: "700" }]}>{a.adapter === "codex" ? `${a.name} (ChatGPT)` : a.name}</Text>
+                <Text style={[t.small, { color: a.ready ? p.ok : p.muted }]}>
+                  {a.ready ? a.detail || "Signed in." : a.adapter === "claude-code" ? "Uses your Claude plan through Claude Code." : "Uses your ChatGPT plan through OpenAI's Codex CLI."}
+                </Text>
+              </View>
+              {!a.ready ? <Button kind="ghost" small label="Log" onPress={() => showLog(a.id)} /> : null}
             </View>
-            {!a.ready ? <Button kind="ghost" small label="Log" onPress={() => showLog(a.id)} /> : null}
-            <Button kind={a.ready ? "plain" : "primary"} label={a.ready ? "Sign in again" : "Install and sign in"} onPress={() => signIn(a.id)} />
+            <SignInPanel agentId={a.id} adapter={a.adapter} ready={a.ready} notInstalled={/isn't installed/i.test(a.detail)} onChanged={refresh} />
           </View>
         ))}
         <View style={{ padding: space(4), flexDirection: "row", gap: space(2), alignItems: "center" }}>
           <Button kind="plain" label="Check again" onPress={refresh} />
-          {note ? <Text style={[t.small, { color: p.muted, flex: 1 }]}>{watching ? `${note}` : note}</Text> : null}
+          {note ? <Text style={[t.small, { color: p.muted, flex: 1 }]}>{note}</Text> : null}
         </View>
         {log !== undefined ? <View style={{ paddingHorizontal: space(4), paddingBottom: space(4) }}><CodeBlock label="Setup log" text={log} /></View> : null}
         <View style={{ paddingHorizontal: space(4), paddingBottom: space(4) }}>
@@ -107,6 +104,13 @@ export function OnboardingScreen() {
         </Section>
       ) : null}
 
+      {info.timer?.startedAt ? (
+        <Text style={[t.small, { color: p.muted, marginBottom: space(3) }]}>
+          {info.timer.done
+            ? `First goal finished ${clock((info.timer.firstGoalDoneAt! - info.timer.startedAt) / 1000)} after you first opened Agent Room${info.timer.firstGoalPractice ? " (with practice agents)" : ""}.`
+            : `Setup time so far: ${clock((Date.now() - info.timer.startedAt) / 1000)}. It stops when your first goal finishes.`}
+        </Text>
+      ) : null}
       <Button label="Open the room" onPress={finish} />
       {!anyReady && !info.practiceMode ? (
         <Text style={[t.small, { color: p.muted, marginTop: space(2) }]}>No agents are signed in yet. You can open the room anyway and connect them from the sidebar.</Text>

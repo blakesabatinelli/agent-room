@@ -11,17 +11,16 @@ A local-first room where agents from different providers work together. You give
 | `packages/shared` | Types shared by both |
 | `packages/relay` | Shelved (decision D9): an outbound-only relay built in spike 0.3. Tailscale is required instead |
 
-## Get started
+## Install from the DMG
 
-1. Install Xcode from the App Store and open it once.
-2. In Finder, double-click **Setup.command** in this folder (the first time, right-click it and choose Open). It installs anything missing and opens the project in Xcode.
-3. In Xcode, make sure the scheme at the top says **AgentRoom-macOS**, then press **⌘R**.
+1. Open `AgentRoom-<version>.dmg` and drag **AgentRoom** onto **Applications**.
+2. Open it from Applications. The app is signed locally for now (a Developer ID signature and notarization come with item 4.7), so macOS warns the first time. On macOS 15 and later, click **Done**, open System Settings > Privacy & Security, and choose **Open Anyway**. On macOS 14 and earlier, right-click the app and choose **Open**. No Terminal needed.
+3. Follow the welcome screen: **Sign in** for Claude and Codex (the app installs each CLI if it's missing, opens its sign-in page, and notices when you're done), connect Tailscale (the app shows how if it isn't installed), and open the room.
 
-The app starts the hub on your Mac by itself and connects to it with no codes. A short welcome screen then lets you sign in Claude and Codex with your subscriptions (it opens their own sign-in in Terminal), switch on practice agents if you'd rather try it first, show the code for your phone, and keep the hub running when the app is closed.
+The DMG carries its own Node and the hub, so there is nothing else to install: no Xcode, no Homebrew, no Terminal. The app starts the hub on your Mac by itself and connects to it with no codes. A short welcome screen signs in Claude and Codex with your subscriptions, switches on practice agents if you'd rather try it first, shows the code for your phone, and keeps the hub running when the app is closed. If something goes wrong, the hub's log is at `~/.agent-room/hub.log`. The timed clean-account install test is `docs/install-test.md`.
 
 **Phone:** Tailscale is required on the Mac and the phone. With Tailscale on both, open the Tailscale address from the Mac (Settings > Pair your phone) in Safari, tap Share > Add to Home Screen, open Agent Room from the home screen, and enter the pairing code. Pair from the home-screen icon, not Safari: iOS keeps their logins separate. The native iPhone app in `packages/app/ios` still works if you'd rather build it in Xcode.
 
-**Without the app:** `pnpm install && pnpm hub` runs the hub on its own and prints a pairing code; `AGENT_ROOM_DEMO=1 pnpm hub` uses mock agents. If something goes wrong, the hub's log is at `~/.agent-room/hub.log`.
 
 ## How it works
 
@@ -71,10 +70,18 @@ The app starts the hub on your Mac by itself and connects to it with no codes. A
 
 `PLAN.md` is the build plan; `PRODUCT.md` the brief. Each item has a work contract in `tasks/`; decisions go in `DECISIONS.md`; each Friday's release goes in `CHANGELOG.md` and `VERSION`.
 
-## Getting started on a Mac (fresh copy)
+## Develop
 
-1. Unzip, then in Terminal: `xattr -dr com.apple.quarantine ~/Downloads/agent-room`
-2. Double-click `Setup.command`. It stops any older Agent Room, installs packages, and runs
-   `pod install`, which **creates `packages/app/macos/AgentRoom.xcworkspace`**. The workspace
-   isn't in the zip; it only exists after Setup.command has run.
-3. Xcode opens the workspace. Product > Clean Build Folder, scheme `AgentRoom-macOS`, ⌘R.
+For working on the code, not for installing it.
+
+**Run from Xcode (Mac app).**
+1. Install Xcode from the App Store and open it once.
+2. Unzip a fresh copy, then in Terminal: `xattr -dr com.apple.quarantine ~/Downloads/agent-room`
+3. In Finder, double-click **Setup.command** (the first time, right-click it and choose Open). It stops any older Agent Room, installs anything missing, installs packages, and runs `pod install`, which **creates `packages/app/macos/AgentRoom.xcworkspace`** (the workspace isn't in a zip; it only exists after Setup.command has run). Xcode opens the workspace.
+4. In Xcode, Product > Clean Build Folder, make sure the scheme says **AgentRoom-macOS**, then press **⌘R**.
+
+A run from Xcode has no bundled runtime, so the app starts the hub from this folder with `packages/hub/run.sh` (the `AgentRoomHubDir` entry in the app's Info.plist). The installed app prefers the bundled Node and `Hub/hub.mjs` when they are there.
+
+**Run the hub alone.** `pnpm install && pnpm hub` runs the hub on its own and prints a pairing code; `AGENT_ROOM_DEMO=1 pnpm hub` uses mock agents.
+
+**Build the DMG.** On an Apple silicon Mac with Xcode, pnpm and CocoaPods (Setup.command installs them): `bash scripts/package-mac.sh`. It builds the hub bundle, downloads the official Node 22 build and checks it against nodejs.org's SHA-256 list, installs better-sqlite3 for that Node, builds the Release app, puts the runtime inside it, signs it ad-hoc, makes `build/mac/AgentRoom-<version>.dmg`, and ends by running `scripts/verify-dmg.sh` (mounts the DMG, checks the structure, signature, bundled Node, better-sqlite3 and a hub start). It prints the DMG path, size and SHA-256. `scripts/stage-hub.sh` does the runtime staging step alone and also runs on Linux, for testing it.

@@ -1,6 +1,6 @@
 import type {
   AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
-  Message, OrchestratorSettings, RemoteStatus, Room, ServerEvent, Subscription, SubscriptionStatus, Task, WriteProposal,
+  Message, OrchestratorSettings, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -8,6 +8,9 @@ export interface SetupInfo {
   practiceMode: boolean;
   onboarded: boolean;
   phone: { url: string | null; code: string };
+  /** 1.7: the setup timer, first launch to first finished goal. */
+  timer?: SetupTimer;
+  elapsedSeconds?: number | null;
 }
 
 /** What POST /discovery/hermes/connect says. `snippet` is what to paste by hand when it couldn't write the file itself. */
@@ -32,7 +35,11 @@ export class Hub {
   pairLocal = () => this.send<{ token: string; ownerName: string }>("POST", "/pair/local", { deviceName: "This Mac" });
   setup = () => this.req<SetupInfo>("/setup");
   saveSetup = (s: { practiceMode?: boolean; onboarded?: boolean }) => this.send("PUT", "/setup", s);
-  signIn = (agentId: string) => this.send<{ ok: boolean; message: string }>("POST", `/setup/signin/${agentId}`);
+  // 1.7: in-app sign-in. mode "terminal" is the old Terminal flow, kept as a fallback.
+  signIn = (agentId: string, o: { mode?: "browser" | "device" | "terminal"; force?: boolean } = {}) => this.send<SignInView & { ok: boolean }>("POST", `/setup/signin/${agentId}`, o);
+  signInState = (agentId: string) => this.req<SignInView>(`/setup/signin/${agentId}`);
+  signInCode = (agentId: string, code: string) => this.send<SignInView>("POST", `/setup/signin/${agentId}/code`, { code });
+  signInCancel = (agentId: string) => this.send<SignInView>("POST", `/setup/signin/${agentId}/cancel`);
 
   signInLog = (agentId: string) => this.req<{ log: string | null }>(`/setup/signin/${agentId}/log`);
 

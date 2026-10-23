@@ -1,4 +1,6 @@
 // Starts the Agent Room hub when the Mac app opens, and manages start-at-login.
+// Installed app (1.7): runs the bundled Node on the bundled hub, Contents/Resources/node + Resources/Hub/hub.mjs, directly,
+// with no shell. Xcode dev runs have no bundle, so they fall back to ./run.sh in the repo's hub folder (Info.plist AgentRoomHubDir).
 // Copied into the macOS Xcode target by Setup.command.
 #import <Foundation/Foundation.h>
 #import <React/RCTBridgeModule.h>
@@ -21,6 +23,36 @@ static NSString *ARLogPath(void) {
 }
 static NSString *ARAgentPlist(void) {
   return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/LaunchAgents/com.agentroom.hub.plist"];
+}
+
+// ---- what to launch: the bundled runtime when it's there, the repo's run.sh otherwise
+static NSString *ARBundledNode(void) {
+  NSString *p = [[NSBundle mainBundle].resourcePath stringByAppendingPathComponent:@"node"];
+  return [[NSFileManager defaultManager] isExecutableFileAtPath:p] ? p : nil;
+}
+static NSString *ARBundledHubDir(void) {
+  NSString *d = [[NSBundle mainBundle].resourcePath stringByAppendingPathComponent:@"Hub"];
+  return [[NSFileManager defaultManager] fileExistsAtPath:[d stringByAppendingPathComponent:@"hub.mjs"]] ? d : nil;
+}
+// @{ @"program": @[ executable, args... ], @"cwd": folder }, or nil when there is no hub to run.
+static NSDictionary *ARLaunchSpec(void) {
+  NSString *node = ARBundledNode(), *hubDir = ARBundledHubDir();
+  if (node && hubDir) {
+    return @{ @"program": @[ node, @"--enable-source-maps", [hubDir stringByAppendingPathComponent:@"hub.mjs"] ], @"cwd": hubDir };
+  }
+  NSString *dev = ARHubDir();
+  if (dev.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:dev]) {
+    // Login shell so the hub sees the same PATH as Terminal (node, claude, codex, tailscale).
+    return @{ @"program": @[ @"/bin/zsh", @"-lc", @"exec /bin/sh ./run.sh" ], @"cwd": dev };
+  }
+  return nil;
+}
+// The usual places the agent CLIs live (the hub's main.ts adds the same ones), then the given PATH.
+static NSDictionary *AREnvironment(NSString *basePath) {
+  NSString *home = NSHomeDirectory();
+  NSArray *extra = @[ [home stringByAppendingPathComponent:@".local/bin"], [home stringByAppendingPathComponent:@".npm-global/bin"],
+                      [home stringByAppendingPathComponent:@".bun/bin"], @"/opt/homebrew/bin", @"/usr/local/bin" ];
+  return @{ @"PATH": [[extra arrayByAddingObject:basePath] componentsJoinedByString:@":"], @"AGENT_ROOM_DATA": ARDataDir() };
 }
 
 static BOOL ARHealthy(void) {
@@ -65,9 +97,9 @@ RCT_EXPORT_METHOD(ensureRunning:(RCTPromiseResolveBlock)resolve rejecter:(RCTPro
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     if (ARHealthy()) { resolve(@{ @"started": @NO, @"log": ARLogPath() }); return; }
 
-    NSString *dir = ARHubDir();
-    if (dir.length == 0 || ![[NSFileManager defaultManager] fileExistsAtPath:dir]) {
-      reject(@"no_hub", @"Can't find the hub folder. Double-click Setup.command in the agent-room folder again.", nil);
+    NSDictionary *spec = ARLaunchSpec();
+    if (!spec) {
+      reject(@"no_hub", @"Can't find the hub. Reinstall Agent Room from the DMG. If you're developing, double-click Setup.command again.", nil);
       return;
     }
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -76,11 +108,14 @@ RCT_EXPORT_METHOD(ensureRunning:(RCTPromiseResolveBlock)resolve rejecter:(RCTPro
     NSFileHandle *log = [NSFileHandle fileHandleForWritingAtPath:ARLogPath()];
     [log seekToEndOfFile];
 
+    NSArray *program = spec[@"program"];
     NSTask *t = [NSTask new];
-    t.executableURL = [NSURL fileURLWithPath:@"/bin/zsh"];
-    // Login shell so the hub sees the same PATH as Terminal (node, claude, codex, tailscale).
-    t.arguments = @[ @"-lc", @"exec /bin/sh ./run.sh" ];
-    t.currentDirectoryURL = [NSURL fileURLWithPath:dir];
+    t.executableURL = [NSURL fileURLWithPath:program[0]];
+    t.arguments = [program subarrayWithRange:NSMakeRange(1, program.count - 1)];
+    t.currentDirectoryURL = [NSURL fileURLWithPath:spec[@"cwd"]];
+    NSMutableDictionary *env = [NSProcessInfo.processInfo.environment mutableCopy];
+    [env addEntriesFromDictionary:AREnvironment(env[@"PATH"] ?: @"/usr/bin:/bin:/usr/sbin:/sbin")];
+    t.environment = env;
     t.standardOutput = log;
     t.standardError = log;
     NSError *err = nil;
@@ -101,19 +136,22 @@ RCT_EXPORT_METHOD(startAtLoginEnabled:(RCTPromiseResolveBlock)resolve rejecter:(
 RCT_EXPORT_METHOD(setStartAtLogin:(BOOL)enabled resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     NSString *plistPath = ARAgentPlist();
-    NSString *dir = ARHubDir();
     ARRun([NSString stringWithFormat:@"launchctl unload '%@' 2>/dev/null; true", plistPath]);
     if (!enabled) {
       [[NSFileManager defaultManager] removeItemAtPath:plistPath error:nil];
       resolve(@NO);
       return;
     }
+    NSDictionary *spec = ARLaunchSpec();
+    if (!spec) { reject(@"no_hub", @"Can't find the hub to start at login.", nil); return; }
     [[NSFileManager defaultManager] createDirectoryAtPath:[plistPath stringByDeletingLastPathComponent]
                               withIntermediateDirectories:YES attributes:nil error:nil];
+    // From the DMG this points at the bundled node and hub.mjs; in a dev run it keeps using run.sh.
     NSDictionary *plist = @{
       @"Label": kAgentLabel,
-      @"ProgramArguments": @[ @"/bin/zsh", @"-lc", @"exec /bin/sh ./run.sh" ],
-      @"WorkingDirectory": dir ?: @"",
+      @"ProgramArguments": spec[@"program"],
+      @"WorkingDirectory": spec[@"cwd"],
+      @"EnvironmentVariables": AREnvironment(@"/usr/bin:/bin:/usr/sbin:/sbin"),
       @"RunAtLoad": @YES,
       @"KeepAlive": @YES,
       @"ThrottleInterval": @10,

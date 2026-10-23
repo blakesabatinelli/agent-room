@@ -1,5 +1,5 @@
 import { useShallow } from "zustand/react/shallow";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, Text, View } from "react-native";
 import type { AgentConfig, AgentScore, McpConnection } from "@agent-room/shared";
 import type { SetupInfo } from "../api/client";
@@ -7,6 +7,7 @@ import { presence, useRoom } from "../state/store";
 import { Avatar, Button, CodeBlock, Field, Pill, Screen, Toggle } from "../components/ui";
 import { Profiles } from "../components/Profiles";
 import { Discovery } from "../components/Discovery";
+import { SignInPanel } from "../components/SignIn";
 import { radius, space, type as t, usePalette } from "../theme";
 
 const isMac = Platform.OS === ("macos" as string);
@@ -61,23 +62,13 @@ function AgentCard({ a, scores }: { a: AgentConfig; scores: AgentScore[] }) {
   const [note, setNote] = useState<string>();
   const [log, setLog] = useState<string | null>();
   const [advanced, setAdvanced] = useState(false);
-  const poll = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
-  useEffect(() => () => clearInterval(poll.current), []);
-  useEffect(() => { if (st?.ready) { clearInterval(poll.current); setNote(undefined); } }, [st?.ready]);
+  useEffect(() => { if (st?.ready) setNote(undefined); }, [st?.ready]);
 
   const label = !a.enabled ? "Off" : st?.ready ? (pres === "busy" ? "Working" : "Connected")
     : st?.state === "not_installed" ? "Not installed" : st?.state === "signed_out" ? "Not signed in"
     : st?.state === "error" ? "Problem" : a.adapter === "mcp" ? "Waiting to connect" : "Checking…";
   const tone = !a.enabled ? p.faint : st?.ready ? p.ok : st?.state === "error" ? p.danger : p.warn;
 
-  const watch = () => {
-    clearInterval(poll.current);
-    let n = 0;
-    poll.current = setInterval(() => { n++; void s.refreshStatus(true); if (n > 60) clearInterval(poll.current); }, 3000);
-  };
-  const signIn = async () => {
-    try { const r = await hub!.signIn(a.id); setNote(r.message); if (r.ok) watch(); } catch (e) { setNote((e as Error).message); }
-  };
   const showLog = async () => { try { setLog((await hub!.signInLog(a.id)).log ?? "No setup log yet."); } catch (e) { setLog((e as Error).message); } };
   const remove = async () => { if (note !== "confirm-remove") return setNote("confirm-remove"); await hub?.deleteAgent(a.id); };
 
@@ -106,10 +97,12 @@ function AgentCard({ a, scores }: { a: AgentConfig; scores: AgentScore[] }) {
                   : "Claude Code runs on your Claude subscription; no API key needed."}
               </Text>
               {isMac ? (
-                <View style={{ flexDirection: "row", gap: space(2), flexWrap: "wrap" }}>
-                  <Button label={st?.state === "not_installed" ? "Install and sign in" : st?.ready ? "Sign in again" : "Sign in"} onPress={signIn} />
+                <View style={{ gap: space(3) }}>
+                  <SignInPanel agentId={a.id} adapter={a.adapter} ready={!!st?.ready} notInstalled={st?.state === "not_installed"} onChanged={() => void s.refreshStatus(true)} />
+                  <View style={{ flexDirection: "row", gap: space(2), flexWrap: "wrap" }}>
                   <Button kind="plain" label="Check again" onPress={() => void s.refreshStatus(true)} />
                   <Button kind="ghost" label="Show setup log" onPress={showLog} />
+                  </View>
                 </View>
               ) : <Text style={[t.small, { color: p.muted }]}>Sign agents in from the Mac app.</Text>}
               {note && note !== "confirm-remove" ? <Text style={[t.small, { color: p.muted }]}>{note}</Text> : null}
