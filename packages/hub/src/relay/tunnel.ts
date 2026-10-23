@@ -27,7 +27,7 @@ const BUFFER_HIGH_WATER = 1024 * 1024;
 type ReqFrame = { t: "req"; id: string; method: string; path: string; headers: Record<string, string | string[]>; body?: string };
 
 export function connectTunnel(opts: TunnelOptions): { close(): void } {
-  const allow = new Set(opts.allowPaths ?? ["/mcp", "/health"]);
+  const allow = new Set(opts.allowPaths ?? ["/mcp"]);
   const minBackoff = opts.minBackoffMs ?? 1000;
   const maxBackoff = opts.maxBackoffMs ?? 30_000;
   let ws: WebSocket | undefined;

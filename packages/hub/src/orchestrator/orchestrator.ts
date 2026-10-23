@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentConfig, AgentStatus, Approval, AttemptLog, Author, Contract, Goal, GoalProgress, GoalState, Judgment, MemoryEntry, Message, OrchestratorSettings, Profile, Role, SteerKind, Task, Verdict } from "@agent-room/shared";
+import type { AgentConfig, AgentStatus, Approval, AttemptLog, Author, Contract, Goal, GoalProgress, GoalState, Judgment, MemoryEntry, Message, OrchestratorSettings, Profile, Role, RoutingOutcome, RoutingRecord, RunUsage, SteerKind, Task, Verdict } from "@agent-room/shared";
 import { SETTING_DEFAULTS } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import { adapters, type RunResult } from "../adapters/index.js";
@@ -11,7 +11,9 @@ import { changedFiles, goalFolder, listFiles, outsideScope, runCheck, snapshot }
 import { extractJson } from "./json.js";
 import { directPrompt, judgePrompt, memoryPrompt, planCard, planPrompt, recoverPrompt, replanPrompt, steerPrompt, summaryPrompt, tagPrompt, taskPrompt, verifyPrompt } from "./prompts.js";
 import { MAX_TASKS, coverLeftovers, isTransient, ledgerMarkdown, newProgress, normaliseRequirements, readDeliverables, repairDeps, sameFeedback, validatePlan, writeLedger, type RawPlanTask } from "./ledger.js";
-import { applyOwnerRating, pickAgent, recordOutcome } from "./scoring.js";
+import { applyOwnerRating, recordOutcome } from "./scoring.js";
+import { addUsage, closeRecord, decide, fixedDecision, openRecord, type RouteDecision } from "./routing.js";
+import { addFailure, classifyFailure, parseFailureCategory, type FailureEvidence } from "./failures.js";
 import { Library, defaultLibraryRoot } from "../library/library.js";
 import { FileBroker } from "../files/broker.js";
 
@@ -611,10 +613,11 @@ export class Orchestrator {
     }
     const notes = this.ownerNotes.get(goal.id) ?? [];
     // One connected agent, or a quick ask: no planning round trip, it just answers.
-    if (agents.length === 1 && !notes.length) { await this.answerDirect(goal, agents[0], signal); return; }
+    const eps = this.store.getSettings().explorationRate;
+    if (agents.length === 1 && !notes.length) { await this.answerDirect(goal, fixedDecision(this.store, agents[0], [], "other", "only_candidate", eps), signal); return; }
     const orch = agents.find((a) => a.id === this.store.getSettings().orchestratorAgentId) ?? agents[0];
     if (isConversational(text) && !notes.length) {
-      const pick = pickAgent(this.store, agents, "other", this.store.getSettings().explorationRate, [], this.opts.rand) ?? orch;
+      const pick = decide(this.store, agents, "other", eps, [], this.opts.rand) ?? fixedDecision(this.store, orch, agents, "other", "only_candidate", eps);
       await this.answerDirect(goal, pick, signal); return;
     }
     this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", label: "planning", active: true });
@@ -624,8 +627,9 @@ export class Orchestrator {
     this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", active: false });
     if (signal.aborted) return;
     if (!notes.length && (plan?.mode === "direct" || (plan && !plan.tasks?.length))) {
-      const pick = agents.find((a) => a.id === plan?.agent)
-        ?? pickAgent(this.store, agents, "other", 0, [], this.opts.rand) ?? agents[0];
+      const named = agents.find((a) => a.id === plan?.agent);
+      const pick = named ? fixedDecision(this.store, named, agents, "other", "planner_choice", 0)
+        : decide(this.store, agents, "other", 0, [], this.opts.rand) ?? fixedDecision(this.store, agents[0], agents, "other", "only_candidate", 0);
       await this.answerDirect(goal, pick, signal); return;
     }
 
@@ -739,6 +743,8 @@ export class Orchestrator {
           t.status = t.assignee ? "revising" : "pending";
           t.judgment = { score: 0, verdict: "revise", feedback: "The hub restarted while you were on this. Pick it up again; check the shared folder for anything you already saved.", judgeAgentId: "system" };
           this.addHistory(t, "system", "redirect", "hub restarted");
+          closeRecord(this.store, t.routingId, { outcome: "interrupted", failureNote: "hub restarted" });
+          t.routingId = undefined;
           this.store.saveTask(t);
         }
         if (g.state?.waitingOnOwner) {
@@ -756,12 +762,14 @@ export class Orchestrator {
   }
 
   /** Conversational fast path: one agent replies, no plan, judge or summary. */
-  private async answerDirect(goal: Goal, agent: AgentConfig, signal: AbortSignal): Promise<Goal> {
+  private async answerDirect(goal: Goal, route: RouteDecision, signal: AbortSignal): Promise<Goal> {
+    const agent = route.agent;
     const task: Task = {
       id: id("task"), roomId: goal.roomId, goalId: goal.id, title: goal.text.slice(0, 80), description: goal.text,
       taskType: "other", acceptance: "Answers the owner.", dependsOn: [], assignee: agent.id, owner: agent.id,
       status: "running", attempts: 1, createdAt: now(), updatedAt: now(),
     };
+    task.routingId = openRecord(this.store, route, task, goal.text, "direct").id;
     this.store.saveTask(task);
     goal.status = "running"; this.store.saveGoal(goal);
     this.log(goal.roomId, `Routed to ${agent.name} directly.`, task.id);
@@ -775,8 +783,11 @@ export class Orchestrator {
       { roomId: goal.roomId, taskId: task.id, signal });
     this.working(goal.roomId, agent, false);
     this.busy.delete(agent.id);
-    if (signal.aborted) return goal;
+    const ran = { usage: res.usage, seconds: res.durationMs / 1000, modelVersion: res.model };
+    if (signal.aborted) { closeRecord(this.store, task.routingId, { ...ran, outcome: "interrupted" }); return goal; }
     recordOutcome(this.store, agent.id, task.taskType, { seconds: res.durationMs / 1000, failed: !res.ok, revision: false });
+    if (res.ok) closeRecord(this.store, task.routingId, { ...ran, outcome: "answered" });
+    else closeRecord(this.store, task.routingId, { ...ran, outcome: "run_failed", ...this.tagFailure(task, agent.id, { kind: "run_error" }, firstLine(res.error)) });
     if (res.ok) {
       task.result = res.text; task.status = "done";
       const m = this.post(goal.roomId, this.agentAuthor(agent), res.text, "agent", task.id);
@@ -852,7 +863,7 @@ export class Orchestrator {
         const live = ready.length ? new Set((await this.readyAgents()).map((a) => a.id)) : new Set<string>();
         for (const t of ready) {
           if (this.progress(goal.id).runs + inflight.size >= budget) break;
-          const agent = this.assign(t, live);
+          const agent = this.assign(t, live, g.text);
           if (!agent) continue;
           const pr = this.runTask(goal, t, agent, signal).finally(() => { inflight.delete(t.id); this.busy.delete(agent.id); });
           inflight.set(t.id, pr);
@@ -1002,28 +1013,32 @@ export class Orchestrator {
    * Exactly one agent per task, one task per agent. The plan's owner gets it when it's
    * connected; a busy owner is waited for (briefly) rather than handing the job to whoever is free.
    */
-  private assign(t: Task, live: Set<string>): AgentConfig | undefined {
+  private assign(t: Task, live: Set<string>, goalText: string): AgentConfig | undefined {
     const s = this.store.getSettings();
     const free = (a: AgentConfig) => !this.busy.has(a.id) && !this.chatting.has(a.id) && live.has(a.id);
     const enabled = this.enabledAgents();
     const idle = enabled.filter(free);
     const tried = t.triedBy ?? [];
     let agent: AgentConfig | undefined;
+    let route: RouteDecision | undefined;
 
     if (t.status === "revising" && t.assignee) {
       // a revision stays with the same agent; if it went offline, the task goes back in the pool
       const same = enabled.find((a) => a.id === t.assignee);
-      if (same && live.has(same.id)) { if (!free(same)) return undefined; agent = same; }
+      if (same && live.has(same.id)) { if (!free(same)) return undefined; agent = same; route = fixedDecision(this.store, same, idle, t.taskType, "revision", s.explorationRate); }
       else { t.triedBy = [...tried, t.assignee]; t.assignee = undefined; t.status = "pending"; this.store.saveTask(t); }
     }
     if (!agent && t.owner && !tried.includes(t.owner) && live.has(t.owner)) {
       const owner = enabled.find((a) => a.id === t.owner)!;
-      if (free(owner)) agent = owner;
+      if (free(owner)) { agent = owner; route = fixedDecision(this.store, owner, idle, t.taskType, "planned_owner", s.explorationRate); }
       else if (now() - t.updatedAt < 10 * 60_000) return undefined; // wait for the planned owner
     }
-    agent ??= pickAgent(this.store, idle, t.taskType, s.explorationRate, tried, this.opts.rand)
-           ?? pickAgent(this.store, idle, t.taskType, s.explorationRate, [], this.opts.rand);
-    if (!agent) return undefined;
+    route ??= decide(this.store, idle, t.taskType, s.explorationRate, tried, this.opts.rand)
+           ?? decide(this.store, idle, t.taskType, s.explorationRate, [], this.opts.rand);
+    if (!route) return undefined;
+    agent = route.agent;
+    // 0.2: every pick is logged with each candidate's probability, before the work starts.
+    t.routingId = openRecord(this.store, route, t, goalText).id;
     this.busy.add(agent.id);
     return agent;
   }
@@ -1070,23 +1085,31 @@ export class Orchestrator {
     const folder = fresh.folder ?? goalFolder(this.opts.dataDir, goal.id);
     const profile = pickProfile(agent, task.role ?? "worker", task.minTier ?? 1);
     task.profileId = profile.id; this.store.saveTask(task);
+    const rid = task.routingId;
+    closeRecord(this.store, rid, { profileId: profile.id, modelRequested: profile.model ?? ((agent.settings?.model as string | undefined) || undefined) });
     const deps = this.store.listTasks({ goalId: goal.id }).filter((t) => task.dependsOn.includes(t.id));
     const notes = this.ownerNotes.get(goal.id) ?? [];
     const before = snapshot(folder);
     const prompt = taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.store.listPrivate(agent.id), notes, this.enabledAgents(), agent.id, feedback, { path: folder, files: [...before.keys()] }, this.ledgerText(fresh), this.decisionsFor(fresh));
     let res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: folder });
+    let usage: RunUsage | undefined = res.usage, ms = res.durationMs, ranModel = res.model;
     // A rate limit or timeout says nothing about the agent's work: wait and retry, without spending an attempt.
     for (let retry = 1; !res.ok && retry <= 2 && isTransient(res.error) && !stopped(); retry++) {
       this.log(goal.roomId, `${agent.name} hit a temporary error on "${task.title}" (${firstLine(res.error)}); retrying in a moment.`, task.id, "task_update");
       await sleep((this.opts.retryDelayMs ?? 5000) * retry * retry);
       if (stopped()) break;
       res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: folder });
+      usage = addUsage(usage, res.usage); ms += res.durationMs; ranModel = res.model ?? ranModel;
     }
     const changed = changedFiles(before, snapshot(folder));
     this.working(goal.roomId, agent, false);
-    if (stopped() && interrupted()) return;
+    // 0.2: close the routing record on every way out of this attempt.
+    const route = (outcome: RoutingOutcome, extra: Partial<RoutingRecord> = {}) =>
+      closeRecord(this.store, rid, { outcome, usage, seconds: Math.round(ms) / 1000, ...(ranModel ? { modelVersion: ranModel } : {}), ...extra });
+    if (stopped() && interrupted()) { route("interrupted"); return; }
 
     if (!res.ok) {
+      route("run_failed", this.tagFailure(task, agent.id, { kind: "run_error" }, firstLine(res.error)));
       recordOutcome(this.store, agent.id, task.taskType, { seconds: res.durationMs / 1000, failed: true, revision: isRevision });
       this.addHistory(task, agent.id, "fail", firstLine(res.error));
       this.log(goal.roomId, `${agent.name} couldn't finish "${task.title}": ${firstLine(res.error)}`, task.id, "task_update");
@@ -1112,6 +1135,7 @@ export class Orchestrator {
 
     // The agent itself says it can't finish: don't judge, act on it.
     if (report.status === "needs_input") {
+      route("needs_input", this.tagFailure(task, agent.id, { kind: "needs_input", report }, report.reason ?? "needs input"));
       task.status = "waiting"; this.addHistory(task, agent.id, "needs_input", report.reason ?? "needs input");
       this.store.saveTask(task); this.floor.take(agent.id, goal.roomId);
       this.post(goal.roomId, SYS, `${agent.name} needs your input on "${task.title}"${report.reason ? `: ${report.reason}` : "."} Reply here and the work continues.`, "system", task.id);
@@ -1119,6 +1143,7 @@ export class Orchestrator {
       return;
     }
     if (report.status === "blocked") {
+      route("blocked", this.tagFailure(task, agent.id, { kind: "blocked", report }, report.reason ?? "blocked"));
       this.addHistory(task, agent.id, "blocked", report.reason ?? "blocked");
       this.log(goal.roomId, `${agent.name} is blocked on "${task.title}": ${report.reason ?? "no reason given"}`, task.id, "task_update");
       return this.retryOrFail(goal, task, agent, "reassign", goalSignal);
@@ -1142,7 +1167,7 @@ export class Orchestrator {
           feedback: `These checks failed: ${failedChecks.map((r) => `${r.criterionId} \`${r.command}\` exited ${r.exitCode}${r.output ? `: ${r.output.split("\n").slice(-3).join(" ").slice(0, 300)}` : ""}`).join("; ")}.`,
           criteria: {}, onTask: true }
       : await this.judge(task, agent, fresh.contract, this.ownerNotes.get(goal.id) ?? notes, signal, changed, this.deliverableText(folder, task, changed), isRevision ? feedback : undefined);
-    if (stopped() && interrupted()) return;
+    if (stopped() && interrupted()) { route("interrupted"); return; }
     // A command's verdict beats a model's.
     for (const r of task.checks) (judgment.criteria ??= {})[r.criterionId] = { verdict: r.ok ? "PASS" : "FAIL", evidence: r.ok ? `\`${r.command}\` passed` : `\`${r.command}\` exited ${r.exitCode}` };
 
@@ -1155,7 +1180,7 @@ export class Orchestrator {
     task.unsureRounds = onlyUnsure ? (task.unsureRounds ?? 0) + 1 : 0;
     if (onlyUnsure && task.unsureRounds >= 2) {
       const second = await this.judge(task, agent, fresh.contract, this.ownerNotes.get(goal.id) ?? notes, signal, changed, this.deliverableText(folder, task, changed), undefined, judgment.judgeAgentId);
-      if (stopped() && interrupted()) return;
+      if (stopped() && interrupted()) { route("interrupted"); return; }
       const still = Object.entries(second.criteria ?? {}).filter(([k, v]) => v.verdict !== "PASS" && !checked.has(k));
       if (still.every(([, v]) => v.verdict === "UNSURE") && second.onTask !== false) {
         task.flagged = still.map(([k]) => k);
@@ -1182,7 +1207,9 @@ export class Orchestrator {
     if ((this.opts.rand ?? Math.random)() < s.calibrationSampleRate) this.store.emit("event", { type: "calibration", task });
 
     this.progress(goal.id, (p) => { if (judgment.verdict === "accept") { p.stall = 0; p.lastAcceptAt = now(); } else p.stall += 1; });
+    const judged = { judgment: { score: judgment.score, verdict: judgment.verdict, judgeAgentId: judgment.judgeAgentId } };
     if (judgment.verdict === "accept") {
+      route("accepted", judged);
       this.addHistory(task, agent.id, "ok", `${Math.round(judgment.score * 100)}/100`);
       task.status = "done"; this.store.saveTask(task); this.floor.take(agent.id, goal.roomId);
       this.checkpoint(goal.id, { decision: `"${task.title}" accepted from ${agent.name}.` });
@@ -1194,6 +1221,7 @@ export class Orchestrator {
     if (strikes >= s.driftStrikes) this.log(goal.roomId, `${agent.name} drifted ${strikes} times on "${task.title}"; taking it back.`, task.id, "task_update");
     // The same problem sent back twice is a loop, not progress: change the approach now.
     const looping = isRevision && sameFeedback(previous, judgment.feedback);
+    route(mode, { ...judged, ...this.tagFailure(task, agent.id, { kind: "sent_back", report, judgment, drift, failedChecks: failedChecks.map((r) => r.criterionId) }, judgment.feedback) });
     if (looping) this.log(goal.roomId, `"${task.title}" came back with the same problem twice; changing the approach.`, task.id, "task_update");
     return this.retryOrFail(goal, task, agent, mode, goalSignal, looping);
   }
@@ -1249,6 +1277,14 @@ export class Orchestrator {
     return readDeliverables(folder, [...new Set([...changed, ...exact])], 16000);
   }
 
+  /** 0.5: tag a failure or send-back, keep it on the task, and put it in the audit log. Returns the routing-log fields. */
+  private tagFailure(task: Task, agentId: string, e: FailureEvidence, note: string) {
+    const { tag, why } = classifyFailure(e);
+    addFailure(task, agentId, tag, `${why}: ${note}`, task.routingId);
+    this.store.audit(agentId, "task.failure", `[${tag}] "${task.title}" (${why}): ${firstLine(note)}`.slice(0, 600));
+    return { failureTag: tag, failureNote: `${why}: ${firstLine(note)}`.slice(0, 300) };
+  }
+
   private async judge(task: Task, worker: AgentConfig, contract: Contract | undefined, notes: string[], signal: AbortSignal, changed: string[] = [], files = "", previousFeedback?: string, notJudge?: string): Promise<Judgment> {
     const s = this.store.getSettings();
     const ready = new Set((await this.readyAgents()).map((a) => a.id));
@@ -1260,7 +1296,7 @@ export class Orchestrator {
       if (cand.id !== worker.id && cand.id !== notJudge) { judge = cand; this.judgeTurn += i + 1; break; }
     }
     judge ??= pool[0] ?? this.orchestratorAgent();
-    const j = await this.callJson<{ score: number; verdict: Judgment["verdict"]; feedback: string; criteria?: Record<string, { verdict?: string; evidence?: string }>; on_task?: boolean; drift?: string }>(
+    const j = await this.callJson<{ score: number; verdict: Judgment["verdict"]; feedback: string; criteria?: Record<string, { verdict?: string; evidence?: string }>; on_task?: boolean; drift?: string; failure_category?: string }>(
       judgePrompt(task, contract, notes, changed, files, previousFeedback), judge, signal, "reviewer");
     if (!j) return { score: 0.5, verdict: "revise", feedback: "The check couldn't be read; please resubmit with the STATUS block.", judgeAgentId: judge?.id ?? "none" };
     const score = Math.min(1, Math.max(0, Number(j.score) || 0));
@@ -1275,7 +1311,8 @@ export class Orchestrator {
     const failing = Object.entries(criteria).filter(([k, v]) => v.verdict !== "PASS" && !verified.has(k)).map(([k]) => k);
     if (verdict === "accept" && failing.length && j.criteria) verdict = "revise"; // done means every check passes
     const feedback = String(j.feedback ?? "") + (verdict === "revise" && failing.length && j.criteria ? ` Not yet passing: ${failing.join(", ")}.` : "");
-    return { score, verdict, feedback: feedback.trim(), judgeAgentId: judge?.id ?? "none", criteria, onTask: j.on_task !== false, drift: j.drift ? String(j.drift) : undefined };
+    const failureCategory = verdict === "accept" ? undefined : parseFailureCategory(j.failure_category);
+    return { score, verdict, feedback: feedback.trim(), judgeAgentId: judge?.id ?? "none", criteria, onTask: j.on_task !== false, drift: j.drift ? String(j.drift) : undefined, ...(failureCategory ? { failureCategory } : {}) };
   }
 
   private async finish(goal: Goal) {

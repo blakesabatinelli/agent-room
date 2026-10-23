@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { EventEmitter } from "node:events";
 import type {
   AgentConfig, AgentScore, Approval, AuditEntry, Goal, LibraryDoc, MemoryEntry, MemoryProposal,
-  Message, OrchestratorSettings, Room, ServerEvent, Task,
+  Message, OrchestratorSettings, Room, RoutingRecord, ServerEvent, Task,
 } from "@agent-room/shared";
 import { SETTING_DEFAULTS } from "@agent-room/shared";
 import { id, now } from "../util.js";
@@ -35,6 +35,9 @@ export class Store extends EventEmitter {
       CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, status TEXT, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, at INTEGER, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS devices (token TEXT PRIMARY KEY, name TEXT, created_at INTEGER);
+      CREATE TABLE IF NOT EXISTS routing (id TEXT PRIMARY KEY, at INTEGER, goal_id TEXT, task_id TEXT, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS routing_at ON routing(at);
+      CREATE INDEX IF NOT EXISTS routing_goal ON routing(goal_id);
       CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY, room_id TEXT, goal_id TEXT, path TEXT, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS documents_room ON documents(room_id);
       CREATE INDEX IF NOT EXISTS documents_path ON documents(path);
@@ -199,6 +202,16 @@ export class Store extends EventEmitter {
     return this.all<LibraryDoc>("SELECT data FROM documents");
   }
   findDocumentByPath(path: string) { return this.one<LibraryDoc>("SELECT data FROM documents WHERE path=?", path); }
+
+  // ---- routing decision log (0.2). Append-only: records are completed in place, never deleted.
+  saveRouting(r: RoutingRecord) { this.put("routing", { id: r.id, at: r.at, goal_id: r.goalId, task_id: r.taskId, data: JSON.stringify(r) }); }
+  getRouting(rid: string) { return this.one<RoutingRecord>("SELECT data FROM routing WHERE id=?", rid); }
+  listRouting(filter: { goalId?: string; taskId?: string; since?: number; limit?: number } = {}) {
+    const limit = filter.limit ?? 100_000;
+    if (filter.goalId) return this.all<RoutingRecord>("SELECT data FROM routing WHERE goal_id=? ORDER BY at ASC, rowid ASC LIMIT ?", filter.goalId, limit);
+    if (filter.taskId) return this.all<RoutingRecord>("SELECT data FROM routing WHERE task_id=? ORDER BY at ASC, rowid ASC LIMIT ?", filter.taskId, limit);
+    return this.all<RoutingRecord>("SELECT data FROM routing WHERE at>=? ORDER BY at ASC, rowid ASC LIMIT ?", filter.since ?? 0, limit);
+  }
 
   // ---- audit
   audit(actor: string, action: string, detail: string) {

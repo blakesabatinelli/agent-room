@@ -176,9 +176,13 @@ Reply with JSON only:
 {"criteria":{"AC1":{"verdict":"PASS|FAIL|UNSURE","evidence":"short"}},
  "on_task":true,"drift":"empty, or what drifted",
  "score":0.0-1.0,"verdict":"accept"|"revise"|"reassign",
- "feedback":"for each failing criterion: what's wrong and the specific fix"}
+ "feedback":"for each failing criterion: what's wrong and the specific fix",
+ "failure_category":"spec|misalignment|verification|other (only when not accepting)"}
 "accept" only if every criterion is PASS and on_task is true. "revise" when it's fixable,
-"reassign" when this agent seems unable to do it.`;
+"reassign" when this agent seems unable to do it.
+failure_category: "spec" if the task itself was unclear or contradictory, "misalignment" if the agent
+drifted or clashed with other agents' work or the decisions, "verification" if it claimed done without
+checking (its self-report says PASS where the work fails), else "other".`;
 
 export const replanPrompt = (task: Task, contract: Contract | undefined, agents: AgentConfig[]) => `[[REPLAN]]
 A task under a work contract failed twice. Don't retry the same approach: change it.

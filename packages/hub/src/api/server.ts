@@ -13,6 +13,7 @@ import { isAllowedLocalAddress, pushNotify, tailscaleIp } from "../net.js";
 import { openSignIn, signInLog } from "../setup.js";
 import { pairingCode, token } from "../util.js";
 import { listFiles } from "../orchestrator/workspace.js";
+import { routingJsonl } from "../orchestrator/routing.js";
 import { runProc } from "../adapters/proc.js";
 import { PathDenied } from "../files/paths.js";
 
@@ -387,6 +388,17 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     return { ok: true };
   });
   app.get("/scores", async () => store.listScores());
+  // 0.2 routing decision log (+ 0.5 failure tags on each record)
+  const routingQuery = z.object({ goalId: z.string().optional(), since: z.coerce.number().optional(), limit: z.coerce.number().int().min(1).max(100_000).optional() });
+  app.get("/routing", async (req) => store.listRouting(routingQuery.parse(req.query ?? {})));
+  app.get("/routing/export.jsonl", async (req, reply) => {
+    const rows = store.listRouting(routingQuery.parse(req.query ?? {}));
+    store.audit("owner", "routing.exported", `${rows.length} records`);
+    return reply
+      .header("content-type", "application/x-ndjson; charset=utf-8")
+      .header("content-disposition", `attachment; filename="agent-room-routing-${new Date().toISOString().slice(0, 10)}.jsonl"`)
+      .send(routingJsonl(rows));
+  });
   app.get("/settings", async () => ({ ...store.getSettings(), calibration: store.getKV("judge_calibration", { n: 0, absErr: 0 }) }));
   app.put("/settings", async (req) => {
     const s = z.object({

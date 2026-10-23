@@ -158,6 +158,10 @@ export interface Task {
   flagged?: string[];
   /** Consecutive reviews where the only blockers were UNSURE verdicts. */
   unsureRounds?: number;
+  /** Routing log record for the current attempt (0.2). */
+  routingId?: string;
+  /** Every failure or send-back on this task, tagged by family (0.5). */
+  failures?: FailureRecord[];
   /** A failure the goal already recovered from (so it isn't handled twice). */
   recovered?: boolean;
   /** Added to close a gap found by goal verification or recovery. */
@@ -179,6 +183,8 @@ export interface Judgment {
   criteria?: Record<string, { verdict: Verdict; evidence: string }>;
   onTask?: boolean;
   drift?: string;
+  /** The judge's read on why it isn't accepted (0.5). Mechanical evidence overrides it. */
+  failureCategory?: FailureTag;
 }
 
 /** How an owner message sent while work is running was taken. */
@@ -461,4 +467,88 @@ export interface WriteProposal {
   reason?: string;
   createdAt: number;
   decidedAt?: number;
+}
+
+// ---- 0.2 Routing decision log, 0.5 Failure tags
+
+/** Why a task came back: the MAST failure families (spec 42%, misalignment 37%, verification 21%), plus other. */
+export type FailureTag = "spec" | "misalignment" | "verification" | "other";
+export const FAILURE_TAGS: { id: FailureTag; label: string; hint: string }[] = [
+  { id: "spec", label: "Spec", hint: "The task or goal was unclear, incomplete or contradictory, so the agent blocked, asked, or built the wrong thing." },
+  { id: "misalignment", label: "Misalignment", hint: "The agent drifted from its task, went out of scope, or contradicted other agents' work or the room's decisions." },
+  { id: "verification", label: "Verification", hint: "The agent called it done when it wasn't: its own checks passed what the reviewer or a command failed, or it skipped checking." },
+  { id: "other", label: "Other", hint: "Crashes, timeouts, rate limits, or plain quality shortfalls that fit none of the above." },
+];
+
+/** One failure or send-back on a task. */
+export interface FailureRecord { at: number; agentId: string; tag: FailureTag; note: string; routingId?: string }
+
+/** Token and cost figures an adapter reports for one run. Anything unknown is left out, never guessed. */
+export interface RunUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** USD as the CLI reports it (for subscription runs this is the notional API price). */
+  costUsd?: number;
+}
+
+/** How the orchestrator came to pick this agent. */
+export type RoutingReason =
+  | "learned"          // epsilon-greedy exploit: best expected score
+  | "explore"          // epsilon-greedy explore: uniform random
+  | "planned_owner"    // the plan named this agent and it was free
+  | "revision"         // a revision stays with the same agent
+  | "planner_choice"   // the planner answered "direct" and named the agent
+  | "only_candidate";  // one agent connected
+
+export interface RoutingCandidate {
+  agentId: string;
+  /** Expected quality from learned scores at decision time (optimistic prior for untried agents). */
+  expected: number;
+  /** Graded runs behind that expectation. */
+  runs: number;
+  /** Probability this agent would have been picked by the policy that made the decision. */
+  p: number;
+}
+
+export type RoutingOutcome =
+  | "pending" | "accepted" | "revise" | "reassign" | "run_failed" | "blocked" | "needs_input" | "interrupted" | "answered";
+
+/** One routing decision and what came of it. Append-only history: the record for replay and kill-criteria reviews. */
+export interface RoutingRecord {
+  id: string;
+  at: number;
+  roomId: string;
+  goalId: string;
+  goalText: string;
+  taskId: string;
+  taskTitle: string;
+  taskType: string;
+  /** "task" = a planned task attempt; "direct" = a conversational answer with no plan. */
+  kind: "task" | "direct";
+  /** Attempt number on this task (1 = first try). */
+  attempt: number;
+  revision: boolean;
+  reason: RoutingReason;
+  epsilon: number;
+  candidates: RoutingCandidate[];
+  chosen: string;
+  /** Probability of the chosen agent under the deciding policy (1 for deterministic picks). */
+  pChosen: number;
+  /** Agents excluded because they already tried this task. */
+  excluded?: string[];
+  profileId?: string;
+  /** The model asked for (profile or agent setting). */
+  modelRequested?: string;
+  /** The model version the CLI reported actually running, when it says. */
+  modelVersion?: string;
+  usage?: RunUsage;
+  /** Wall-clock seconds of the agent's run(s) for this attempt, retries included. */
+  seconds?: number;
+  outcome: RoutingOutcome;
+  judgment?: { score: number; verdict: Judgment["verdict"]; judgeAgentId: string };
+  failureTag?: FailureTag;
+  failureNote?: string;
+  completedAt?: number;
 }

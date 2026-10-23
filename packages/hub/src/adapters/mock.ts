@@ -13,7 +13,8 @@ import type { Adapter, RunRequest, RunResult } from "./types.js";
  * (also write this file, outside scope), verifyGap (the first goal check finds a gap),
  * recoverAsk (recovery asks the owner), recoverOwner (who recovery hands the new task to), transient (fail the
  * first N task runs with a rate-limit error), unsure (as a judge, can't verify anything), decide (report this
- * DECISIONS line), badPlan (the first plan is broken; the repair round fixes it).
+ * DECISIONS line), badPlan (the first plan is broken; the repair round fixes it), failureCategory (as a judge,
+ * the failure_category it gives work it sends back), noOwner (plans name no owner, so routing is learned).
  */
 export class MockAdapter implements Adapter {
   /** Every run, for tests: which profile reached the agent. */
@@ -42,6 +43,7 @@ export class MockAdapter implements Adapter {
           files: checks ? ["summary.md"] : [], criteria: checks ? [{ text: "summary.md has content", check: "test -s summary.md" }] : ["Under 200 words"], taskType: "writing", dependsOn: ["a"] },
       ];
       if (st.bigPlan) tasks.push({ key: "c", owner: agents[0], role: "reviewer", title: "Review it", description: "Check the summary against the research for errors.", criteria: ["No errors"], taskType: "analysis", dependsOn: ["b"] });
+      if ((st as { noOwner?: boolean }).noOwner) for (const t of tasks as { owner?: string }[]) delete t.owner;
       const bad = !!(st as { badPlan?: boolean }).badPlan && !p.includes("can't run as written");
       for (const t of tasks as { key: string; output?: string; covers?: string[]; dependsOn?: string[] }[]) {
         if (bad) { if (t.key === "b") t.dependsOn = ["zz"]; continue; }
@@ -65,6 +67,7 @@ export class MockAdapter implements Adapter {
         criteria: Object.fromEntries(ids.map((k) => [k, { verdict: pass ? "PASS" : "FAIL", evidence: pass ? "shown in the work" : "missing" }])),
         on_task: !drift, drift: drift ? "did work outside its scope" : "",
         score: quality, verdict: pass ? "accept" : "revise", feedback: pass ? "Meets the criteria." : "Too thin, add detail.",
+        ...(pass ? {} : { failure_category: (st as { failureCategory?: string }).failureCategory ?? "other" }),
       });
     } else if (p.includes("[[VERIFY]]")) {
       // verifyGap: the first whole-goal check finds G2 missing; the re-check passes.
@@ -123,6 +126,8 @@ export class MockAdapter implements Adapter {
       if (aborted) return { ok: false, text: "", durationMs: Date.now() - t0, error: "Cancelled." };
     }
     req.onChunk?.(text);
-    return { ok: true, text, durationMs: Date.now() - t0 };
+    // Rough token counts (4 chars/token) so the routing log has something real to record in tests.
+    const usage = { inputTokens: Math.ceil(p.length / 4), outputTokens: Math.ceil(text.length / 4), costUsd: 0 };
+    return { ok: true, text, durationMs: Date.now() - t0, usage, model: `mock-${req.model ?? "default"}` };
   }
 }

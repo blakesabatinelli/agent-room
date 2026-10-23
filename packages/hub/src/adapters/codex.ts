@@ -51,6 +51,7 @@ export class CodexAdapter implements Adapter {
       : [];
     const attempt = async (extra: string[]) => {
       let streamed = "", evError = "";
+      let usage: RunResult["usage"], model: string | undefined;
       const r = await runProc(s.binary || "codex", [...args, ...extra, prompt], {
         cwd: req.cwd, signal: req.signal, timeoutMs: 30 * 60_000,
         env: req.mcp ? { AGENT_ROOM_MCP_TOKEN: req.mcp.token } : undefined,
@@ -62,21 +63,34 @@ export class CodexAdapter implements Adapter {
             if (msg) { streamed += msg; req.onChunk?.(msg); }
             const err = ev.type === "error" ? ev.message : ev.msg?.type === "error" ? ev.msg.message : ev.type === "turn.failed" ? ev.error?.message : undefined;
             if (err) evError = String(err);
+            usage = codexUsage(ev) ?? usage;
+            const m = ev.model ?? ev.msg?.model ?? ev.item?.model;
+            if (typeof m === "string") model = m;
           } catch { /* ignore */ }
         },
       });
       let text = "";
       try { text = readFileSync(outFile, "utf8").trim(); } catch { text = streamed; }
-      return { r, text, evError };
+      return { r, text, evError, usage, model };
     };
-    let { r, text, evError } = await attempt(mcpArgs);
+    let { r, text, evError, usage, model: ranModel } = await attempt(mcpArgs);
     // If the room's MCP server is what broke this Codex version, answer without it rather than fail.
     if ((r.code !== 0 || !text) && mcpArgs.length && !req.signal?.aborted && /mcp|config|bearer/i.test(`${r.stderr}\n${evError}`)) {
-      ({ r, text, evError } = await attempt([]));
+      ({ r, text, evError, usage, model: ranModel } = await attempt([]));
     }
     rmSync(tmp, { recursive: true, force: true });
     const ok = r.code === 0 && !!text;
     const detail = evError || r.stderr.trim().split("\n").slice(-6).join("\n") || `exit ${r.code}`;
-    return { ok, text, durationMs: Date.now() - t0, error: ok ? undefined : detail.slice(0, 2000) };
+    return { ok, text, durationMs: Date.now() - t0, error: ok ? undefined : detail.slice(0, 2000), usage, model: ranModel };
   }
+}
+
+const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+/** Token usage from a Codex `--json` event: `turn.completed` (current) or a `token_count` message (older). */
+export function codexUsage(ev: { type?: string; usage?: Record<string, unknown>; msg?: { type?: string; info?: { total_token_usage?: Record<string, unknown> } } }): RunResult["usage"] {
+  const u = ev.type === "turn.completed" ? ev.usage : ev.msg?.type === "token_count" ? ev.msg.info?.total_token_usage : undefined;
+  if (!u) return undefined;
+  const cached = num(u.cached_input_tokens);
+  const input = num(u.input_tokens);
+  return { inputTokens: input !== undefined && cached !== undefined ? input - cached : input, outputTokens: num(u.output_tokens), cacheReadTokens: cached };
 }

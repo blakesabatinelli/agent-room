@@ -1,4 +1,4 @@
-import type { AgentConfig } from "@agent-room/shared";
+import type { AgentConfig, RunUsage } from "@agent-room/shared";
 
 export interface RunRequest {
   agent: AgentConfig;
@@ -27,6 +27,10 @@ export interface RunResult {
   text: string;
   durationMs: number;
   error?: string;
+  /** Tokens and cost, when the CLI reports them. */
+  usage?: RunUsage;
+  /** The model version the CLI says it ran, when it says. */
+  model?: string;
 }
 
 import type { AgentState } from "@agent-room/shared";

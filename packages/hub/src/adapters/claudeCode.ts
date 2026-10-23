@@ -77,6 +77,7 @@ export class ClaudeCodeAdapter implements Adapter {
   async run(req: RunRequest): Promise<RunResult> {
     const t0 = Date.now();
     let finalText = "", streamed = "", isError = false;
+    let model: string | undefined, usage: RunResult["usage"];
     const bin = (req.agent.settings.binary as string) || "claude";
     const r = await runProc(bin, this.buildArgs(req), {
       cwd: req.cwd, signal: req.signal, timeoutMs: 30 * 60_000,
@@ -84,6 +85,7 @@ export class ClaudeCodeAdapter implements Adapter {
         if (!line.trim()) return;
         try {
           const ev = JSON.parse(line);
+          if (ev.type === "system" && ev.subtype === "init" && typeof ev.model === "string") model = ev.model;
           if (ev.type === "assistant") {
             for (const c of ev.message?.content ?? []) {
               if (c.type === "text") { streamed += c.text; req.onChunk?.(c.text); }
@@ -92,12 +94,28 @@ export class ClaudeCodeAdapter implements Adapter {
           } else if (ev.type === "result") {
             finalText = typeof ev.result === "string" ? ev.result : finalText;
             isError = !!ev.is_error;
+            usage = claudeUsage(ev);
+            // modelUsage is keyed by the model ids that actually ran; the biggest one is the worker.
+            const mu = ev.modelUsage && typeof ev.modelUsage === "object" ? Object.entries(ev.modelUsage as Record<string, { outputTokens?: number }>) : [];
+            if (mu.length) model = mu.sort((a, b) => (b[1]?.outputTokens ?? 0) - (a[1]?.outputTokens ?? 0))[0][0];
           }
         } catch { /* non-JSON noise */ }
       },
     });
     const text = finalText || streamed;
     const ok = r.code === 0 && !isError && !!text;
-    return { ok, text, durationMs: Date.now() - t0, error: ok ? undefined : (r.stderr || text || `exit ${r.code}`).slice(0, 2000) };
+    return { ok, text, durationMs: Date.now() - t0, error: ok ? undefined : (r.stderr || text || `exit ${r.code}`).slice(0, 2000), usage, model };
   }
+}
+
+const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+/** Token and cost figures from Claude Code's final `result` event. */
+export function claudeUsage(ev: { usage?: Record<string, unknown>; total_cost_usd?: unknown }): RunResult["usage"] {
+  const u = ev.usage ?? {};
+  const out = {
+    inputTokens: num(u.input_tokens), outputTokens: num(u.output_tokens),
+    cacheReadTokens: num(u.cache_read_input_tokens), cacheWriteTokens: num(u.cache_creation_input_tokens),
+    costUsd: num(ev.total_cost_usd),
+  };
+  return Object.values(out).some((v) => v !== undefined) ? out : undefined;
 }
