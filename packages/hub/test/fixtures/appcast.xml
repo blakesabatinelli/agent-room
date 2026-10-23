@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Agent Room</title>
+    <description>Agent Room updates</description>
+    <language>en</language>
+    <item>
+      <title>Version 1.2.0 (beta)</title>
+      <pubDate>Mon, 02 Nov 2026 17:00:00 +0000</pubDate>
+      <sparkle:version>1.2.0</sparkle:version>
+      <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
+      <sparkle:channel>beta</sparkle:channel>
+      <enclosure url="https://updates.example.com/AgentRoom-1.2.0.dmg" length="1" type="application/octet-stream" sparkle:edSignature="BETA=="/>
+    </item>
+    <item>
+      <title>Version 1.1.0</title>
+      <pubDate>Fri, 23 Oct 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>1.1.0</sparkle:version>
+      <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://updates.example.com/notes/1.1.0.html</sparkle:releaseNotesLink>
+      <description><![CDATA[<p>Faster &amp; calmer.</p>]]></description>
+      <enclosure url="https://updates.example.com/AgentRoom-1.1.0.dmg?x=1&amp;y=2" length="123456" type="application/octet-stream" sparkle:edSignature="SIG110=="/>
+    </item>
+    <item>
+      <title>Version 2.0.0</title>
+      <pubDate>Sat, 01 Jan 2028 12:00:00 +0000</pubDate>
+      <sparkle:version>2.0.0</sparkle:version>
+      <sparkle:shortVersionString>2.0.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>99.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://updates.example.com/AgentRoom-2.0.0.dmg" length="1" type="application/octet-stream" sparkle:edSignature="FUTURE=="/>
+    </item>
+    <item>
+      <title>Version 1.0.0</title>
+      <pubDate>Thu, 01 Oct 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>1.0.0</sparkle:version>
+      <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+      <enclosure url="http://updates.example.com/AgentRoom-1.0.0.dmg" length="100" type="application/octet-stream" sparkle:edSignature="SIG100=="/>
+    </item>
+  </channel>
+</rss>

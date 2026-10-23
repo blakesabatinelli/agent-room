@@ -1,0 +1,83 @@
+/* Agent Room download page. Self-contained: system fonts, no images from elsewhere, no scripts. */
+:root {
+  --bg: #fbfaf8;
+  --surface: #ffffff;
+  --ink: #1d1c1a;
+  --muted: #5d5a54;
+  --line: #e4e0d8;
+  --accent: #3b4fd1;
+  --accent-ink: #ffffff;
+  --mark: #3b4fd1;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #151514;
+    --surface: #1e1e1c;
+    --ink: #f1efe9;
+    --muted: #aaa69c;
+    --line: #333230;
+    --accent: #8d9bff;
+    --accent-ink: #11121c;
+    --mark: #8d9bff;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+.wrap { max-width: 920px; margin: 0 auto; padding-left: 16px; padding-right: 16px; }
+a { color: var(--accent); }
+h1, h2 { line-height: 1.2; margin: 0 0 12px; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2rem, 6vw, 3.1rem); max-width: 18ch; }
+h2 { font-size: 1.5rem; }
+p { margin: 0 0 14px; }
+
+.top { border-bottom: 1px solid var(--line); background: var(--bg); position: sticky; top: 0; z-index: 2; }
+.bar { display: flex; align-items: center; justify-content: space-between; min-height: 60px; gap: 12px; }
+.brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 650; color: var(--ink); text-decoration: none; }
+.mark { width: 22px; height: 22px; border-radius: 6px; background: var(--mark); display: inline-block; position: relative; }
+.mark::after { content: ""; position: absolute; left: 5px; top: 5px; width: 12px; height: 12px; border: 2px solid var(--bg); border-radius: 50%; }
+nav { display: flex; align-items: center; gap: 18px; font-size: 0.95rem; }
+nav a { color: var(--muted); text-decoration: none; }
+nav a:hover { color: var(--ink); }
+nav a.btn { color: var(--accent-ink); }
+
+.btn {
+  display: inline-block; background: var(--accent); color: var(--accent-ink); text-decoration: none;
+  font-weight: 600; padding: 12px 22px; border-radius: 10px; border: 0;
+}
+.btn:hover { filter: brightness(1.08); }
+.btn:focus-visible, a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.btn.small { padding: 7px 14px; border-radius: 8px; font-size: 0.92rem; }
+
+.hero { padding-top: 64px; padding-bottom: 40px; }
+.eyebrow { text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.78rem; color: var(--muted); margin-bottom: 10px; }
+.lead { font-size: 1.2rem; color: var(--muted); max-width: 40em; }
+.cta { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 22px; }
+.note { color: var(--muted); font-size: 0.92rem; }
+
+.strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding-top: 16px; padding-bottom: 40px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+.card h2 { font-size: 1.1rem; }
+.card p { margin: 0; color: var(--muted); font-size: 0.97rem; }
+
+.how, .privacy, .download { padding-top: 32px; padding-bottom: 32px; border-top: 1px solid var(--line); }
+.steps { padding-left: 1.3em; margin: 0 0 16px; }
+.steps li { margin-bottom: 10px; }
+.small-print { color: var(--muted); font-size: 0.94rem; }
+.ticks { list-style: none; padding: 0; margin: 0 0 16px; }
+.ticks li { padding-left: 28px; position: relative; margin-bottom: 8px; }
+.ticks li::before { content: ""; position: absolute; left: 4px; top: 0.5em; width: 8px; height: 14px; border: solid var(--accent); border-width: 0 3px 3px 0; transform: rotate(40deg) scale(0.8); transform-origin: center; }
+
+.foot { padding-top: 28px; padding-bottom: 48px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+.foot p { margin-bottom: 6px; }
+
+@media (max-width: 720px) {
+  .strip { grid-template-columns: 1fr; }
+  .hero { padding-top: 40px; }
+  nav a:not(.btn) { display: none; }
+}

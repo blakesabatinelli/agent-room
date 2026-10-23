@@ -39,5 +39,26 @@
     <string>$(SRCROOT)/../../hub</string>
     <key>CFBundleDisplayName</key>
     <string>Agent Room</string>
+    <!-- 4.7 Sparkle 2 auto-update. Both values are placeholders on purpose: scripts/package-mac.sh --release writes the real ones
+         (AGENT_ROOM_FEED_URL, AGENT_ROOM_SPARKLE_ED_PUBLIC_KEY) into the built app and refuses to build while these are still here.
+         Only read when the app is built with AR_SPARKLE=1. The hub reads SUFeedURL too, for the "new version available" banner. -->
+    <key>SUFeedURL</key>
+    <string>https://updates.example.invalid/agent-room/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>REPLACE_WITH_SPARKLE_PUBLIC_ED_KEY</string>
+    <!-- 4.7 Where opt-in crash reports and usage counts would be sent. Empty on purpose: with no address nothing can be sent, whatever the
+         switches say. scripts/package-mac.sh --release writes AGENT_ROOM_REPORT_URL here when the owner sets it for the build.
+         AGENT_ROOM_REPORT_URL in the hub's environment overrides it. -->
+    <key>AgentRoomReportURL</key>
+    <string></string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    <!-- Sparkle's optional "anonymous system profile" is off: the app sends nothing but the request for the appcast. -->
+    <key>SUEnableSystemProfiling</key>
+    <false/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
   </dict>
 </plist>

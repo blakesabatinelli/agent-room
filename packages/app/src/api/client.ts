@@ -156,6 +156,16 @@ export class Hub {
   writeProposals = () => this.req<WriteProposalSummary[]>("/write-proposals");
   /** One proposal whole: the diff, files[] and skipped[] of a task, unappliable. File approvals are decided from this, never from the approval's preview text. */
   writeProposal = (id: string) => this.req<WriteProposal>(`/write-proposals/${id}`);
+  // 4.7 version and updates, crash reports, opt-in usage counts. Both privacy switches start off.
+  version = () => this.req<import("@agent-room/shared").VersionInfo>("/version");
+  checkVersion = () => this.send<import("@agent-room/shared").VersionInfo>("POST", "/version/check");
+  privacy = () => this.req<import("@agent-room/shared").PrivacyState>("/privacy");
+  savePrivacy = (patch: { crashReports?: boolean; telemetry?: boolean; updateChecks?: boolean }) => this.send<import("@agent-room/shared").PrivacyState>("PUT", "/privacy", patch);
+  /** The exact JSON the next weekly batch would carry. Reading it sends nothing. */
+  telemetryPreview = () => this.req<{ payload: import("@agent-room/shared").TelemetryPayload; on: boolean; endpointConfigured: boolean; endpointHost?: string; lastSentAt?: number; nextAt?: number }>("/telemetry/preview");
+  crashes = () => this.req<import("@agent-room/shared").CrashList>("/crashes");
+  crashesSeen = () => this.send("POST", "/crashes/seen");
+  clearCrashes = () => this.send<{ ok: boolean; deleted: number }>("POST", "/crashes/clear");
   mcpToken = (agentId: string, name: string) => this.send<{ token: string; url: string }>("POST", "/mcp-tokens", { agentId, name });
 
   /** Live events with automatic reconnect. Returns a stop function. */

@@ -3,6 +3,7 @@
 // with no shell. Xcode dev runs have no bundle, so they fall back to ./run.sh in the repo's hub folder (Info.plist AgentRoomHubDir).
 // Copied into the macOS Xcode target by Setup.command.
 #import <Foundation/Foundation.h>
+#import <Cocoa/Cocoa.h> // 4.7: NSApp, for the update check
 #import <unistd.h>
 #import <React/RCTBridgeModule.h>
 
@@ -151,6 +152,25 @@ RCT_EXPORT_METHOD(ensureRunning:(RCTPromiseResolveBlock)resolve rejecter:(RCTPro
 RCT_EXPORT_METHOD(localPairSecret:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   NSString *secret = ARLocalPairSecret();
   resolve(secret ?: [NSNull null]);
+}
+
+// 4.7: Sparkle. True only in a build that links it (the release build); the app shows "Check for updates" only then.
+RCT_EXPORT_METHOD(updaterAvailable:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  resolve(@(NSClassFromString(@"SPUStandardUpdaterController") != nil && [NSApp.delegate respondsToSelector:NSSelectorFromString(@"checkForUpdates:")]));
+}
+
+// 4.7: opens Sparkle's own update window (the same as the "Check for Updates…" menu item). Does nothing without Sparkle.
+RCT_EXPORT_METHOD(checkForUpdates) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    id delegate = NSApp.delegate;
+    SEL check = NSSelectorFromString(@"checkForUpdates:");
+    if (NSClassFromString(@"SPUStandardUpdaterController") != nil && [delegate respondsToSelector:check]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+      [delegate performSelector:check withObject:nil];
+#pragma clang diagnostic pop
+    }
+  });
 }
 
 RCT_EXPORT_METHOD(startAtLoginEnabled:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {

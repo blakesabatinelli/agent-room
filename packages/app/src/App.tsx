@@ -17,6 +17,7 @@ import { OfficeScreen } from "./screens/OfficeScreen"; // 3.4
 import { Sidebar } from "./components/Sidebar";
 import { Button } from "./components/ui";
 import { CommandPalette } from "./components/CommandPalette"; // 3.1
+import { UpdateBanner } from "./components/UpdateBanner"; // 4.7
 import { useCommandPalette } from "./state/commandPalette";
 import { loadAppearance } from "./state/appearance";
 import { launcher } from "./native/hub";
@@ -63,6 +64,7 @@ export default function App() {
   return (
     <SafeAreaView {...({ keyDownEvents: [{ key: "k", metaKey: true }], onKeyDown: () => togglePalette() } as object)} style={{ flex: 1, backgroundColor: wide ? p.canvas : p.sidebar }}>
       <StatusBar barStyle={p.mode === "dark" ? "light-content" : "dark-content"} />
+      <UpdateBanner />
       {error ? (
         <Pressable onPress={() => setError(undefined)} style={{ backgroundColor: p.danger, paddingVertical: space(2), paddingHorizontal: space(4) }}>
           <Text style={[t.small, { color: p.onAccent, fontWeight: "600" }]}>{error} (click to dismiss)</Text>

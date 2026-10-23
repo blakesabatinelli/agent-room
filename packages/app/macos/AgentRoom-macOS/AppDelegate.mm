@@ -3,7 +3,46 @@
 #import <React/RCTBundleURLProvider.h>
 #import <ReactAppDependencyProvider/RCTAppDependencyProvider.h>
 
-@implementation AppDelegate
+// 4.7: Sparkle 2. Compiled in only when the build defines AR_SPARKLE=1 (and the Sparkle pod is installed: AGENT_ROOM_SPARKLE=1 pod install),
+// so a plain Xcode build without it still compiles and simply has no updater. NEEDS A MAC to build and try; nothing here can run elsewhere.
+#ifndef AR_SPARKLE
+#define AR_SPARKLE 0
+#endif
+#if AR_SPARKLE
+#import <Sparkle/Sparkle.h>
+#endif
+
+@implementation AppDelegate {
+#if AR_SPARKLE
+  SPUStandardUpdaterController *_updaterController;
+#endif
+}
+
++ (BOOL)updaterAvailable
+{
+  return AR_SPARKLE ? YES : NO;
+}
+
+- (void)checkForUpdates:(id)sender
+{
+#if AR_SPARKLE
+  [_updaterController checkForUpdates:sender];
+#endif
+}
+
+#if AR_SPARKLE
+// "Check for Updates…" under the app's own menu, right after "About Agent Room".
+- (void)installUpdateMenuItem
+{
+  NSMenu *appMenu = NSApp.mainMenu.itemArray.firstObject.submenu;
+  if (!appMenu) return;
+  NSString *title = @"Check for Updates…";
+  if ([appMenu itemWithTitle:title]) return;
+  NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:@selector(checkForUpdates:) keyEquivalent:@""];
+  item.target = self;
+  [appMenu insertItem:item atIndex:MIN(1, appMenu.numberOfItems)];
+}
+#endif
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
 {
@@ -15,7 +54,13 @@
   self.initialProps = @{};
   self.dependencyProvider = [RCTAppDependencyProvider new];
   
-  return [super applicationDidFinishLaunching:notification];
+  [super applicationDidFinishLaunching:notification];
+#if AR_SPARKLE
+  // SUFeedURL and SUPublicEDKey come from Info.plist. The updater checks once a day (SUScheduledCheckInterval) and installs only
+  // updates signed with the matching EdDSA key, from a Developer ID signed app by the same team.
+  _updaterController = [[SPUStandardUpdaterController alloc] initWithStartingUpdater:YES updaterDelegate:nil userDriverDelegate:nil];
+  [self installUpdateMenuItem];
+#endif
 }
 
 - (NSURL *)sourceURLForBridge:(RCTBridge *)bridge

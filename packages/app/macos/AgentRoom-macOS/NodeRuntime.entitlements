@@ -2,9 +2,22 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
   <dict>
-    <!-- For the Node runtime shipped inside the app. Harmless under today's ad-hoc signature; required once item 4.7
-         turns on the hardened runtime for Developer ID signing, because V8 compiles JavaScript at run time and
-         loads the better-sqlite3 addon. -->
+    <!-- For the Node runtime shipped inside the app (Contents/Resources/node) and for nothing else: the app itself gets none of these.
+         Harmless under the ad-hoc signature of local builds; required by the hardened runtime of the Developer ID build (item 4.7,
+         scripts/package-mac.sh --release). Why each one is here:
+
+         allow-jit                           V8 compiles JavaScript to machine code at run time and maps that memory with MAP_JIT.
+                                             Without it the hardened runtime kills node at its first compile. Needed.
+         allow-unsigned-executable-memory    Lets the process make executable memory outside MAP_JIT regions. The official Node build
+                                             carries it for V8 and WebAssembly. Kept to match the official build (the release script prints
+                                             the official entitlements next to ours). To tighten: remove it, build with --release, and see
+                                             whether verify-dmg.sh --release still passes and the hub still boots.
+         disable-library-validation          Library validation only lets a process load code signed by Apple or by its own team. The
+                                             hub loads better-sqlite3's compiled addon. The release script signs node and the addon with
+                                             the same identity, so this should not be needed; it is kept so a native addon that is ever
+                                             added with another signer still loads. Same way to tighten as above.
+
+         The agent CLIs (claude, codex, hermes) are separate programs the hub starts. They are not loaded into node, so none of this applies to them. -->
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>

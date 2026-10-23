@@ -8,6 +8,10 @@ type Launcher = {
   chooseFolder?(): Promise<string | null>;
   /** 1.2: the hub's local pairing secret, read from ~/.agent-room/local-pair.secret. Resolves to null when the file is missing, unreadable or not private to this user. */
   localPairSecret?(): Promise<string | null>;
+  /** 4.7: true in a build that carries Sparkle (the release build). Older builds don't have the method. */
+  updaterAvailable?(): Promise<boolean>;
+  /** 4.7: opens Sparkle's update window, the same as "Check for Updates…" in the app menu. */
+  checkForUpdates?(): void;
 };
 
 const native = NativeModules.HubLauncher as Launcher | undefined;

@@ -14,6 +14,10 @@ import { DiscoveryService } from "./discovery/service.js"; // 1.3
 import { ensurePhaseStart } from "./retro/index.js"; // 2.1
 import { startScheduled } from "./report/schedule.js"; // 2.7
 import { joinOpenRosters } from "./rooms/index.js"; // 4.3
+import { installCrashHandlers } from "./distribution/crash.js"; // 4.7
+import { sendPendingCrashes } from "./distribution/reporting.js"; // 4.7
+import { UpdateChecker, startTelemetryTimer } from "./distribution/schedule.js"; // 4.7
+import { appVersion } from "./distribution/version.js"; // 4.7
 
 // Apps launched from Finder get a thin PATH; make sure the agent CLIs are findable.
 const home = homedir();
@@ -25,6 +29,8 @@ const port = Number(process.env.AGENT_ROOM_PORT ?? 4747);
 const demo = process.env.AGENT_ROOM_DEMO === "1";
 const ownerName = process.env.AGENT_ROOM_OWNER ?? "Blake";
 mkdirSync(dataDir, { recursive: true });
+// 4.7: an uncaught exception or unhandled rejection is written (scrubbed) to <data>/crashes/ and the hub exits; launchd or the app starts it again.
+installCrashHandlers({ dataDir, version: appVersion() });
 
 const store = new Store(join(dataDir, demo ? "demo.db" : "agent-room.db"));
 seed(store, demo);
@@ -42,7 +48,8 @@ startScheduled(store, orch.library);
 const tailscale = defaultTailscale();
 // 1.3: finds the agents, tools and local model servers on this Mac and joins Hermes to the hub.
 const discovery = new DiscoveryService(store, { control: () => orch.control, mcpUrl: () => `http://127.0.0.1:${port}/mcp` });
-const app = await buildServer({ store, orch, approvals, ownerName, tailscale, discovery });
+const updates = new UpdateChecker(store); // 4.7: reads the appcast once a day, only when a feed address is set and the owner hasn't turned update checks off
+const app = await buildServer({ store, orch, approvals, ownerName, tailscale, discovery, distribution: { updates } });
 // 1.5: record what the hub found, so a surprising schedule can be explained later.
 const cap = orch.governor.snapshot();
 store.audit("hub", "capacity.detected", `${cap.summary}. ${cap.plan.reason}`);
@@ -51,6 +58,10 @@ console.log(`Capacity: ${cap.summary}`);
 await app.listen({ host: "0.0.0.0", port });
 // 1.3: look around in the background (it can take a few seconds) and again every half hour. Not in demo mode, which uses practice agents.
 if (!demo) {
+  // 4.7: all three do nothing unless their switch is on (update checks default on, crash reports and usage counts default off) and an address is set.
+  updates.start();
+  startTelemetryTimer(store, { dataDir });
+  void sendPendingCrashes(store, dataDir).catch(() => undefined);
   void discovery.run().then((r) => console.log(`Discovery: ${r.summary}`)).catch((e) => console.error(`Discovery failed: ${(e as Error).message}`));
   discovery.startTimer();
 }

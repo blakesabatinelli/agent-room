@@ -7,6 +7,11 @@ target 'AgentRoom-macOS' do
   platform :macos, '14.0'
   use_native_modules!
 
+  # 4.7: Sparkle 2, the auto-updater for Developer ID apps. Only when AGENT_ROOM_SPARKLE=1 (scripts/package-mac.sh --release sets it), so
+  # day-to-day builds don't need it. AppDelegate.mm and HubLauncher.m use it only when the build also defines AR_SPARKLE=1 (the release
+  # script passes that to xcodebuild). The version is the 2.x line; scripts/make-appcast.sh uses this pod's own sign_update.
+  pod 'Sparkle', '~> 2.6' if ENV['AGENT_ROOM_SPARKLE'] == '1'
+
   # Flags change depending on the env values.
   flags = get_default_flags()
 

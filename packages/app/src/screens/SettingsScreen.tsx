@@ -8,6 +8,9 @@ import { Button, Field, Screen, Section, Toggle } from "../components/ui";
 import { SubscriptionList } from "../components/subscriptions";
 import { RemoteAccess } from "../components/RemoteAccess";
 import { Appearance } from "../components/Appearance"; // 3.1
+import { PrivacyPanel } from "../components/Privacy"; // 4.7
+import { ProviderTerms } from "../components/ProviderTerms"; // 4.7 / D5
+import { About } from "../components/About"; // 4.7
 import { space, type as t, usePalette } from "../theme";
 
 export function SettingsScreen() {
@@ -213,6 +216,15 @@ export function SettingsScreen() {
             ) : null}
           </Section>
         ) : null}
+        <Section title="Privacy and updates" hint="What can leave this Mac, and only if you allow it. Everything is off until you turn it on, except looking for updates.">
+          <PrivacyPanel />
+        </Section>
+        <Section title="Sign-in and provider terms">
+          <ProviderTerms />
+        </Section>
+        <Section title="About">
+          <About />
+        </Section>
         <Section title="Setup">
           <View style={{ padding: space(4), gap: space(2) }}>
             <Text style={[t.small, { color: p.muted }]}>Go back through the welcome steps: sign agents in, pair your phone, start at login. Agents can also be connected any time from Agents & connections.</Text>

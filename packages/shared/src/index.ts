@@ -1643,3 +1643,55 @@ export interface A2aStatus {
   /** Where the endpoint is reachable from: this Mac only, the tailnet, or the public internet (Funnel). */
   reach: "local" | "tailnet" | "funnel";
 }
+
+// ---- 4.7 1.0 distribution: version and updates, crash reports, opt-in telemetry
+/** An update the appcast offers that is newer than this app. */
+export interface UpdateOffer { version: string; shortVersion?: string; title?: string; pubDate?: string; /** https only. */ downloadUrl?: string; notesUrl?: string }
+/** GET /version (and POST /version/check, which asks the appcast now). */
+export interface VersionInfo {
+  /** The app's version, in the form the Info.plist and the appcast use. */
+  version: string;
+  macos: string;
+  /** False until the app is built with an appcast address (SUFeedURL, or AGENT_ROOM_APPCAST_URL). Nothing is then fetched. */
+  feedConfigured: boolean;
+  /** The owner's "check for updates automatically" choice (on by default; it fetches only the appcast file). */
+  checksOn: boolean;
+  checkedAt?: number;
+  update?: UpdateOffer;
+  /** Why the last check failed, in plain words. */
+  error?: string;
+}
+/** One field of the opt-in telemetry batch, as shown to the owner. */
+export interface TelemetryField { key: string; label: string; example: string }
+/** The batch itself. Counts only; see hub/src/distribution/telemetry.ts for the allow-list that builds it. */
+export interface TelemetryPayload {
+  type: "telemetry";
+  schema: 1;
+  periodDays: 7;
+  appVersion: string;
+  macosVersion: string;
+  agentsByKind: Record<string, number>;
+  /** Goals started on each of the last 7 days, oldest first. */
+  goalsPerDay: number[];
+  /** Accepted tasks / finished tasks over the period, 0 to 1; null when none finished. */
+  taskAcceptanceRate: number | null;
+  crashCount: number;
+}
+/** GET /privacy. Both switches are off until the owner turns them on, and nothing leaves this Mac without a switch AND an endpoint. */
+export interface PrivacyState {
+  crashReports: boolean;
+  telemetry: boolean;
+  updateChecks: boolean;
+  /** Whether AGENT_ROOM_REPORT_URL is set to a usable address. Its host is shown so the owner sees where reports would go. */
+  endpointConfigured: boolean;
+  endpointHost?: string;
+  telemetryFields: TelemetryField[];
+  telemetryLastSentAt?: number;
+  telemetryNextAt?: number;
+}
+/** One crash the hub wrote down (no user content; paths under the home folder are shown as ~). */
+export interface CrashEntry { name: string; at: number; kind: string; message: string; sent: boolean }
+/** One macOS crash report for Agent Room, listed only (never read in full, never uploaded). */
+export interface MacCrashReport { name: string; at: number; bytes: number; isNew: boolean }
+/** GET /crashes */
+export interface CrashList { hub: CrashEntry[]; mac: MacCrashReport[]; dir: string; macDir: string }

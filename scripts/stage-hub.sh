@@ -21,6 +21,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 cp "$ROOT/packages/hub/dist/hub.mjs" "$OUT/hub.mjs"
 [ -f "$ROOT/packages/hub/dist/hub.mjs.map" ] && cp "$ROOT/packages/hub/dist/hub.mjs.map" "$OUT/hub.mjs.map"
 cp -R "$ROOT/packages/hub/web" "$OUT/web"
+cp "$ROOT/VERSION" "$OUT/VERSION" # 4.7: the hub's /version and its crash reports read it from next to hub.mjs
 node "$ROOT/scripts/stage-hub-package.mjs" "$OUT"
 
 # Runtime dependencies only, for the target Node. prebuild-install (run by better-sqlite3's install script) reads these.

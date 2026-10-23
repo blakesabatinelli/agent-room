@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
   <dict>
+    <!-- The Mac app itself. Not sandboxed on purpose (D4): the Room starts the user's own CLIs and reads folders the user grants, which the App
+         Store sandbox would block. Network client: the app talks to the hub on 127.0.0.1 and Sparkle fetches the appcast.
+         No allow-jit and no disable-library-validation here: only the bundled node needs those (NodeRuntime.entitlements). If the notarized
+         app turns out to need allow-jit for its own JavaScript engine, build with AGENT_ROOM_APP_ALLOW_JIT=1 (docs/release.md, "Entitlements"). -->
     <key>com.apple.security.app-sandbox</key>
     <false/>
     <key>com.apple.security.network.client</key>

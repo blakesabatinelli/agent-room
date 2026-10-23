@@ -8,6 +8,8 @@ import { Avatar, Button, CodeBlock, Section, Toggle } from "../components/ui";
 import { RemoteAccess } from "../components/RemoteAccess";
 import { Discovery } from "../components/Discovery";
 import { SignInPanel } from "../components/SignIn";
+import { ProviderTerms } from "../components/ProviderTerms"; // 4.7 / D5
+import { PrivacyPanel } from "../components/Privacy"; // 4.7
 import { space, type as t, usePalette } from "../theme";
 
 const clock = (secs: number) => `${Math.floor(Math.max(0, secs) / 60)}:${String(Math.floor(Math.max(0, secs) % 60)).padStart(2, "0")}`;
@@ -75,6 +77,10 @@ export function OnboardingScreen() {
           hint="Stand-in agents that answer instantly, so you can try the room before signing in. Turn off in Settings." />
       </Section>
 
+      <Section title="How sign-in and terms work" hint="Read this before you sign in. Nothing here changes how sign-in works.">
+        <ProviderTerms />
+      </Section>
+
       <Section title="2. Connect Tailscale">
         <RemoteAccess />
       </Section>
@@ -103,6 +109,10 @@ export function OnboardingScreen() {
             hint={busy ? "Restarting the hub…" : "Lets your phone reach the room even when this app is closed."} />
         </Section>
       ) : null}
+
+      <Section title={`${launcher ? "5" : "4"}. Crash reports and usage counts (optional)`} hint="Both are off. Turn one on only if you want to help. You can change this any time in Settings.">
+        <PrivacyPanel onboarding />
+      </Section>
 
       {info.timer?.startedAt ? (
         <Text style={[t.small, { color: p.muted, marginBottom: space(3) }]}>

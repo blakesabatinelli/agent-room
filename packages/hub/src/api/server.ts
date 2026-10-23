@@ -45,6 +45,7 @@ import { join } from "node:path";
 import { isLive } from "../memory/model.js"; // 2.5
 import { A2A_FUNNEL_PATHS, a2aRemoteOpen, isA2aOpenPath } from "../interop/paths.js"; // 4.6
 import { a2aFunnelOn, registerInteropRoutes } from "../interop/routes.js"; // 4.6
+import { registerDistributionRoutes, type DistributionDeps } from "../distribution/routes.js"; // 4.7
 
 export interface ServerDeps {
   store: Store; orch: Orchestrator; approvals: Approvals; ownerName: string; restrictInterfaces?: boolean;
@@ -56,9 +57,11 @@ export interface ServerDeps {
   discovery?: DiscoveryService;
   /** 1.7: in-app CLI sign-in (tests inject one with scripted CLIs). */
   signin?: SignInManager;
+  /** 4.7: the update checker (main.ts shares one with its timer) and test seams for the report endpoint, fetch and macOS crash-report folder. */
+  distribution?: Partial<DistributionDeps>;
 }
 
-export async function buildServer({ store, orch, approvals, ownerName, restrictInterfaces = true, tailscale = defaultTailscale(), remoteAuth, discovery: discoveryDep, signin }: ServerDeps) {
+export async function buildServer({ store, orch, approvals, ownerName, restrictInterfaces = true, tailscale = defaultTailscale(), remoteAuth, discovery: discoveryDep, signin, distribution }: ServerDeps) {
   const app = Fastify({ logger: false, bodyLimit: 5 * 1024 * 1024 });
   // Accept POSTs that say "JSON" but carry no body (e.g. button actions with nothing to send).
   app.removeContentTypeParser("application/json");
@@ -685,6 +688,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   registerReportRoutes(app, store); // 2.7: GET /reports/scorecard, /reports/ledger, /reports/kill-review, GET /attention
   registerRoomRoutes(app, () => ({ store, control: () => orch.control, files: orch.files, standing: orch.standing })); // 4.3: GET and PUT /rooms/:id/definition
   registerOfficeRoutes(app, store); // 3.4: GET /office?roomId=
+  registerDistributionRoutes(app, store, { dataDir: orch.dataDir, ...distribution }); // 4.7: GET /version, /privacy, /telemetry/preview, /crashes
   app.put("/settings", async (req) => {
     const s = z.object({
       orchestratorAgentId: z.string(), judgeRotation: z.array(z.string()),

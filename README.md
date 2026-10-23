@@ -14,7 +14,7 @@ A local-first room where agents from different providers work together. You give
 ## Install from the DMG
 
 1. Open `AgentRoom-<version>.dmg` and drag **AgentRoom** onto **Applications**.
-2. Open it from Applications. The app is signed locally for now (a Developer ID signature and notarization come with item 4.7), so macOS warns the first time. On macOS 15 and later, click **Done**, open System Settings > Privacy & Security, and choose **Open Anyway**. On macOS 14 and earlier, right-click the app and choose **Open**. No Terminal needed.
+2. Open it from Applications. The app is signed locally until the owner publishes a notarized release (`docs/release.md`), so a local build makes macOS warn the first time. On macOS 15 and later, click **Done**, open System Settings > Privacy & Security, and choose **Open Anyway**. On macOS 14 and earlier, right-click the app and choose **Open**. No Terminal needed.
 3. Follow the welcome screen: **Sign in** for Claude and Codex (the app installs each CLI if it's missing, opens its sign-in page, and notices when you're done), connect Tailscale (the app shows how if it isn't installed), and open the room.
 
 The DMG carries its own Node and the hub, so there is nothing else to install: no Xcode, no Homebrew, no Terminal. The app starts the hub on your Mac by itself and connects to it with no codes. A short welcome screen signs in Claude and Codex with your subscriptions, switches on practice agents if you'd rather try it first, shows the code for your phone, and keeps the hub running when the app is closed. If something goes wrong, the hub's log is at `~/.agent-room/hub.log`. The timed clean-account install test is `docs/install-test.md`.
