@@ -344,3 +344,12 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .tsub { margin-top: 2px; font-size: 13px; color: var(--muted); }
 .tsub.s-done { color: var(--ok); } .tsub.s-failed { color: var(--danger); } .tsub.s-waiting { color: var(--warn); }
 .tag { display: inline-block; margin-left: 4px; padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: 99px; font-size: 11px; font-weight: 600; color: var(--muted); vertical-align: 1px; }
+/* 4.1 two-key: the two drafts side by side; what differs is marked */
+.tk-cols { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+.tk-pane { flex: 1 1 240px; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); }
+.tk-who { font-weight: 700; color: var(--ink-strong); margin-bottom: 6px; }
+.tk-line { font-size: 14px; color: var(--ink); overflow-wrap: anywhere; white-space: pre-wrap; padding: 2px 4px; border-radius: 4px; }
+.tk-k { color: var(--muted); font-weight: 600; }
+.tk-m { background: var(--warn-bg); color: var(--warn); }
+.tk-body { margin-top: 6px; padding: 6px 4px; font-size: 14px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; border-top: 1px solid var(--line); }
+.tk-w { background: var(--warn-bg); color: var(--warn); border-radius: 3px; padding: 0 2px; }

@@ -6,6 +6,7 @@ import { fetchProposalForApproval, isFileWriteApproval, opWords, parseChangeDiff
 import { useRoom } from "../state/store";
 import { Button, Empty, Screen, Strip } from "../components/ui";
 import { FileChangeReview } from "../components/DiffViewer";
+import { TwoKeyApproval } from "../components/TwoKeyCard";
 import { space, type as t, usePalette } from "../theme";
 
 /** What the card says a proposal is: one file, or everything one task changed. */
@@ -37,7 +38,7 @@ export function ApprovalsScreen() {
 
   useEffect(() => {
     for (const a of approvals) {
-      if (!isFileWriteApproval(a) || proposals[a.id] || tried.current.has(a.id)) continue;
+      if (a.twoKey || !isFileWriteApproval(a) || proposals[a.id] || tried.current.has(a.id)) continue;
       tried.current.add(a.id);
       void load(a);
     }
@@ -76,7 +77,7 @@ export function ApprovalsScreen() {
         {!approvals.length ? <Empty text="Nothing to approve. Agents ask here before sending email, posting to Slack, changing CRM records, running shell commands or changing your files." /> : null}
         {approvals.map((a) => {
           const agent = agents.find((x) => x.id === a.agentId);
-          const file = isFileWriteApproval(a);
+          const file = !a.twoKey && isFileWriteApproval(a);
           const proposal = file ? proposals[a.id] : undefined;
           const parsed = proposal ? parseChangeDiff(proposal.diff, proposal.files) : undefined;
           const isLoading = !!loading[a.id], err = loadError[a.id];
@@ -84,7 +85,10 @@ export function ApprovalsScreen() {
             <View key={a.id} style={{ flexDirection: "row", gap: space(3), padding: space(4), borderRadius: 12, backgroundColor: p.surface, borderWidth: 1, borderColor: p.line }}>
               <Strip color={agent?.color ?? p.muted} />
               <View style={{ flex: 1, gap: space(2) }}>
-                {a.question ? (
+                {a.twoKey ? (
+                  // 4.1: two agents drafted the action on their own; the owner sees both and picks
+                  <TwoKeyApproval approval={a} agentName={agent?.name ?? a.agentId} onAnswer={(choice) => answer(a, choice)} />
+                ) : a.question ? (
                   // 2.5: a memory question has three answers, not approve or reject
                   <>
                     <Text style={[t.heading, { color: p.ink }]}>The room remembers two different things</Text>

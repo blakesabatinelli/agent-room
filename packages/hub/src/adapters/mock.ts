@@ -30,6 +30,7 @@ function readContext(cwd: string): string | undefined {
  * Every call also records the cwd it ran in (MockAdapter.calls[].cwd), so tests can see which worktree a task used.
  * wide (the plan is N independent tasks), needs (1.3: every planned task lists these data sources in its `needs`).
  * retro (2.1: how a `[[RETRO]]` call is answered: "invalid" | "empty" | "ghost" | "positive"; see the branch below).
+ * twokey (4.1: what this agent answers when asked to be the second key of a two-key action: a draft object (sent as JSON), or a string).
  */
 export class MockAdapter implements Adapter {
   /** Every run, for tests: which profile reached the agent. */
@@ -78,6 +79,10 @@ export class MockAdapter implements Adapter {
         if (mode === "ghost") lessons.push({ agentId: "nobody", taskType: "coding", lesson: "This names an agent that was not in the goal.", evidence: "none" });
         text = JSON.stringify({ lessons, playbook });
       }
+    } else if (p.startsWith("[[TWOKEY]]")) {
+      // 4.1: the second key of a two-key action. settings.twokey is the reply (an object goes out as JSON, a string as it is); without it the agent can't draft.
+      const t = (st as { twokey?: unknown }).twokey;
+      text = t === undefined ? "I cannot draft this." : typeof t === "string" ? t : JSON.stringify(t);
     } else if (p.includes("[[PLAN]]") && /^Goal: .*\?\s*$/m.test(p)) {
       text = JSON.stringify({ mode: "direct", agent: req.agent.id });
     } else if (p.includes("[[PLAN]]")) {

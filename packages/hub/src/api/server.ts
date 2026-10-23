@@ -33,6 +33,7 @@ import { commandGroups, loadCommandIndex } from "../commands/index.js"; // 2.6
 import { SignInManager } from "../install/signin.js";
 import { registerInstallRoutes } from "../install/routes.js";
 import { registerJuryRoutes } from "../jury/routes.js"; // 2.2
+import { registerTwoKeyRoutes } from "../twokey/routes.js"; // 4.1
 import { registerRoomRoutes } from "../rooms/routes.js"; // 4.3
 import { registerPersonaRoutes } from "../persona/routes.js"; // 3.2
 import { registerResumeRoutes } from "../resume/routes.js"; // 2.3
@@ -680,6 +681,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   app.get("/settings", async () => ({ ...store.getSettings(), calibration: store.getKV("judge_calibration", { n: 0, absErr: 0 }), capacityProfile: orch.governor.snapshot() }));
   app.get("/capacity", async () => orch.governor.snapshot());
   registerJuryRoutes(app, store); // 2.2: GET /juries, GET /jury/stats
+  registerTwoKeyRoutes(app, () => orch.twoKey); // 4.1: GET /twokey, GET /twokey/:id
   registerPersonaRoutes(app, store, () => orch.control); // 3.2: GET /personas/templates, GET and PUT /agents/:id/persona
   registerResumeRoutes(app, store, orch.resumes); // 2.3: GET /agents/:id/resume, GET /resumes, POST /agents/:id/probation
   registerReportRoutes(app, store); // 2.7: GET /reports/scorecard, /reports/ledger, /reports/kill-review, GET /attention
@@ -708,6 +710,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
         quietFrom: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/).optional(),
         quietTo: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/).optional(),
       }).optional(),
+      twoKey: z.object({ enabled: z.boolean().optional(), threshold: z.number().min(0.5).max(1).optional() }).optional(), // 4.1
       minutesSavedPerTask: z.number().min(0).max(600).optional(), // 2.7
       standingCatchUpHours: z.number().min(0).max(168).optional(), // 4.3: how late a standing room's scheduled run may still start after the hub was asleep
       capacity: z.object({
@@ -771,6 +774,12 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     const { decision, choice } = z.object({ decision: z.enum(["approved", "rejected"]).optional(), choice: z.string().max(40).optional() }).parse(req.body);
     const aid = (req.params as { id: string }).id;
     const cur = store.getApproval(aid);
+    // 4.1: a two-key card is answered with run A, run B or neither; a plain Reject is "neither", and a plain Approve is refused (it would not say which draft).
+    if (cur?.twoKey && cur.status === "pending") {
+      const pick = choice ?? (decision === "rejected" ? "neither" : undefined);
+      if (!pick || !cur.twoKey.choices.some((c) => c.id === pick)) return reply.code(400).send({ error: "Pick one of the answers on the card." });
+      return pick === "neither" ? approvals.decide(aid, "rejected", "owner", "neither") : approvals.decide(aid, "approved", "owner", pick);
+    }
     // 2.5: a question card (a memory contradiction) is answered with one of its own choices; a plain Reject means "keep what we had".
     if (cur?.question && cur.status === "pending") {
       const pick = choice ?? (decision === "rejected" ? "keep_old" : undefined);

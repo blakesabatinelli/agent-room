@@ -446,6 +446,7 @@ test("Mac app: Folders is in the sidebar and the page map, approvals use the ful
 
 test("a task's write-back: one approval, every file in order, each with its operation, and the skipped ones named", async (t) => {
   const { app, base, h, orch, store, room } = await boot(); t.after(() => app.close());
+  store.setSettings({ ...store.getSettings(), twoKey: { enabled: false } }); // 4.1 has its own tests: this one is about the full-diff view of a task approval that deletes a file
   const root = realpathSync(mkdtempSync(join(tmpdir(), "grant-task-")));
   writeFileSync(join(root, "keep.txt"), "line 1\nline 2\nline 3\n");
   writeFileSync(join(root, "gone.txt"), "bye\nbye\n");

@@ -35,6 +35,8 @@ import { MemoryKeeper, type KeeperOptions, type ProposeOptions } from "../memory
 import { withPersona } from "../persona/index.js"; // 3.2
 import { Resumes, ShadowRunner, barredSet, planNotes, realAgents, type ShadowHost } from "../resume/index.js"; // 2.3
 import { attentionFor, type Attention } from "../attention/index.js"; // 2.7
+import { TwoKey } from "../twokey/index.js"; // 4.1
+import { localModelsFor } from "../discovery/usage.js"; // 4.1
 import { Subagents, subagentSettings, type SubagentHost } from "../subagents/index.js"; // 3.3
 import { RoomRules, StandingRooms } from "../rooms/index.js"; // 4.3
 
@@ -123,6 +125,8 @@ export class Orchestrator {
   rooms: RoomRules;
   /** 4.3: scheduled goals for standing rooms. */
   standing: StandingRooms;
+  /** 4.1: two agents from different vendors draft an email send, a CRM write or a delete; it runs only if they match, else the owner decides. */
+  twoKey: TwoKey;
 
   /** 1.2: the hub's data folder (the API server keeps local-pair.secret there). */
   get dataDir(): string { return this.opts.dataDir; }
@@ -131,7 +135,7 @@ export class Orchestrator {
     this.library = new Library(store, opts.libraryDir ?? defaultLibraryRoot());
     this.rooms = new RoomRules({ store, control: () => this.control }); // 4.3
     // 1.1: the control folder's version history can never be granted to agents (it is read lazily: the control folder may be attached after this).
-    this.files = new FileBroker(store, approvals, { rooms: this.rooms /* 4.3 */, extraProtected: () => (this.control ? [{ path: join(this.control.root, ".git"), because: "the Agent Room control folder's version history can't be shared with agents" }] : []) });
+    this.files = new FileBroker(store, approvals, { rooms: this.rooms /* 4.3 */, twoKey: (q) => this.twoKey.checkDeletes(q) /* 4.1: read at call time */, extraProtected: () => (this.control ? [{ path: join(this.control.root, ".git"), because: "the Agent Room control folder's version history can't be shared with agents" }] : []) });
     this.goalSources = new GoalSources(this.files, store); // 1.1
     this.workspaces = new TaskWorkspaces({ dataDir: opts.dataDir, git: opts.gitBin, onSecurity: (action, detail) => store.audit("hub", action, detail) }); // 1.1: git config restored, hard links left out
     this.control = opts.control; // 1.9
@@ -151,6 +155,8 @@ export class Orchestrator {
     this.governor = opts.governor ?? new CapacityGovernor(store, detectHardware());
     this.attention = attentionFor(store); // 2.7
     this.attention.zoneHint = () => this.control?.timezone();
+    // 4.1: the second key for emails, CRM writes and deletes (logic in twokey/; requestApproval and the file broker call it).
+    this.twoKey = new TwoKey({ store, approvals, readyAgents: (r) => this.readyAgents(r), call: (a, p, o) => this.call(a, p, o), quotaLimited: (aid) => quotaLimited(store, aid), governor: this.governor, realAgents: (xs) => realAgents(store, xs), localModels: () => localModelsFor(store) });
     this.memory = new MemoryKeeper({ store, approvals, control: () => this.control, dataDir: opts.dataDir, ask: (prompt) => this.callJson(prompt, undefined, undefined, "quick") }, opts.memory); // 2.5
     // 2.3: résumés (RESUME.md after graded runs) and shadow tasks for agents on probation.
     this.resumes = new Resumes({ store, control: () => this.control, say: (roomId, text) => { if (roomId) this.post(roomId, SYS, text, "system"); } });
@@ -367,7 +373,7 @@ export class Orchestrator {
       readOnly: o.readOnly, // 3.3
       onSubagent: o.taskId && !o.shadow && !o.jsonOnly ? (e) => this.subagents.native(o.taskId!, agent.id, e) : undefined, // 3.3: the agent's own subagents, for the tree
       // 4.6: an ACP agent asks permission for a tool mid-run; the answer is the owner's (or "run without asking"), and a practice run never gets one
-      approve: (tool, action, detail) => this.requestApproval({ agentId: agent.id, roomId: o.roomId, taskId: o.taskId, shadow: o.shadow }, tool, action, detail).then((a) => a.status === "approved"),
+      approve: (tool, action, detail) => this.requestApproval({ agentId: agent.id, roomId: o.roomId, taskId: o.taskId, shadow: o.shadow }, tool, action, detail).then((a) => a.status === "approved" && a.choice !== "b" /* 4.1: this agent can't be handed the other agent's draft */),
     });
     if (!res.ok) this.forgetStatus(agent.id); // re-check sign-in before routing to it again
     if (grant) this.grants.delete(grant.token);
@@ -1784,13 +1790,19 @@ export class Orchestrator {
     this.store.audit("owner", "judgment.rated", `${t.title}: judge ${t.judgment.score} owner ${ownerScore}`);
   }
 
-  requestApproval(grant: McpGrant, tool: string, action: string, detail: string): Promise<Approval> {
+  requestApproval(grant: McpGrant, tool: string, action: string, detail: string, input?: unknown, o: { twoKeyDone?: boolean } = {}): Promise<Approval> {
     const p = { agentId: grant.agentId, roomId: grant.roomId, tool, action, detail };
     if (grant.shadow) { // 2.3: a practice run is never allowed anything sensitive, and never puts a card in front of the owner
       this.store.audit(grant.agentId, "shadow.denied", `${tool}: ${action}`.slice(0, 200));
       return Promise.resolve({ id: id("apr"), ...p, detail: "", status: "rejected", createdAt: now(), decidedAt: now() });
     }
     const a = this.store.getAgent(grant.agentId);
+    // 4.1: an email send, a CRM write or a delete needs a second agent of another family to draft it independently. Drafts that match go on to the rules below;
+    // anything else becomes one card for the owner. (A room that forbids the tool is refused first, with no second agent asked.)
+    if (!o.twoKeyDone && !this.rooms.forbids(a, grant.roomId, tool)) {
+      const two = this.twoKey.gate(grant, tool, action, detail, input, (note) => this.requestApproval(grant, tool, action, detail + note, input, { twoKeyDone: true }));
+      if (two) return two;
+    }
     // 4.3: the room's ROOM.md decides first. "off" is a refusal (no card for the owner); "ask" is never skipped, whatever the agent auto-approves.
     const level = this.rooms.level(grant.agentId, grant.roomId, tool);
     if (this.rooms.forbids(a, grant.roomId, tool)) {
