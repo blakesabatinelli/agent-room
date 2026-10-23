@@ -1,6 +1,6 @@
 import type {
   AgentConfig, AgentScore, VersionScoreRow, ModelShift, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
-  Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal, JuryCalibration, CommandsResponse, FirstPassMetrics, MemoryExportInfo,
+  Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal, JuryCalibration, CommandsResponse, FirstPassMetrics, MemoryExportInfo, PersonaInput, PersonaTemplate, PersonaView,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -118,6 +118,10 @@ export class Hub {
   controlHistory = (path?: string) => this.req<ControlCommit[]>(`/control/history${path ? `?path=${encodeURIComponent(path)}` : ""}`);
   controlRevert = (commit: string) => this.send<{ ok: boolean; commit: string; files: string[] }>("POST", `/control/revert/${commit}`);
   controlLint = () => this.send<{ blocks: ControlNotice[]; flags: ControlNotice[] }>("POST", "/control/lint");
+  // 3.2 personas: SOUL.md per agent (or the agent's record without a control folder), and the starters. A refused save throws the linter's message.
+  persona = (agentId: string) => this.req<PersonaView>(`/agents/${agentId}/persona`);
+  savePersona = (agentId: string, input: PersonaInput) => this.send<PersonaView>("PUT", `/agents/${agentId}/persona`, input);
+  personaTemplates = () => this.req<PersonaTemplate[]>("/personas/templates");
   // 2.6 the / palette: room commands, then each agent's skills, commands and prompts
   commands = () => this.req<CommandsResponse>("/commands");
   // 1.3 agent discovery

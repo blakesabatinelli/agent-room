@@ -32,6 +32,7 @@ import { loadCommandIndex, plannerCommands } from "../commands/index.js"; // 2.6
 import { buildInvocation, parseCommand, unknownReply, type Invocation } from "../commands/invoke.js"; // 2.6
 import { learnedBlock, runRetro } from "../retro/index.js"; // 2.1
 import { MemoryKeeper, type KeeperOptions, type ProposeOptions } from "../memory/keeper.js"; // 2.5
+import { withPersona } from "../persona/index.js"; // 3.2
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -550,9 +551,9 @@ export class Orchestrator {
     this.working(roomId, agent, true, "replying");
     const agents = this.enabledAgents();
     const asker = agents.find((a) => a.id === o.from);
-    const prompt = asker
+    const prompt = withPersona(asker // 3.2: the agent's persona rides at the end of every chat reply (voice only)
       ? tagPrompt(asker.name, o.text, this.conversation(roomId), this.store.listShared(roomId), this.store.listPrivate(agent.id), agents, agent.id, hops - o.hop - 1)
-      : directPrompt(this.conversation(roomId), this.store.listShared(roomId), this.store.listPrivate(agent.id), [], agents, agent.id, o.inProgress);
+      : directPrompt(this.conversation(roomId), this.store.listShared(roomId), this.store.listPrivate(agent.id), [], agents, agent.id, o.inProgress), this.store, this.control, agent, "chat");
     const res = await this.call(agent, prompt, { roomId, hop: o.hop + (asker ? 1 : 0) });
     this.working(roomId, agent, false);
     this.chatting.delete(agent.id);
@@ -887,7 +888,7 @@ export class Orchestrator {
     if (!convo.includes(goal.text)) convo += `${convo ? "\n" : ""}Owner: ${goal.text}`;
     const res = await this.call(agent,
       command ? command.prompt : // 2.6: the skill invocation itself (a Claude Code `/command` has to start the prompt)
-      directPrompt(convo, this.store.listShared(goal.roomId), this.store.listPrivate(agent.id), this.ownerNotes.get(goal.id) ?? [], this.enabledAgents(), agent.id),
+      withPersona(directPrompt(convo, this.store.listShared(goal.roomId), this.store.listPrivate(agent.id), this.ownerNotes.get(goal.id) ?? [], this.enabledAgents(), agent.id), this.store, this.control, agent, "chat"), // 3.2
       { roomId: goal.roomId, taskId: task.id, signal });
     this.working(goal.roomId, agent, false);
     this.busy.delete(agent.id);
@@ -1324,7 +1325,7 @@ export class Orchestrator {
     const deps = this.store.listTasks({ goalId: goal.id }).filter((t) => task.dependsOn.includes(t.id));
     const notes = this.ownerNotes.get(goal.id) ?? [];
     const before = snapshot(work);
-    const prompt = taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.store.listPrivate(agent.id), notes, this.enabledAgents(), agent.id, feedback, { path: work, files: [...before.keys()], ledger: join(folder, "LEDGER.md"), note: this.goalSources.note(fresh) /* 1.1 */ }, this.ledgerText(fresh), this.decisionsFor(fresh), learnedBlock(this.store, this.control, agent, task.taskType) /* 2.1 */);
+    const prompt = withPersona(taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.store.listPrivate(agent.id), notes, this.enabledAgents(), agent.id, feedback, { path: work, files: [...before.keys()], ledger: join(folder, "LEDGER.md"), note: this.goalSources.note(fresh) /* 1.1 */ }, this.ledgerText(fresh), this.decisionsFor(fresh), learnedBlock(this.store, this.control, agent, task.taskType) /* 2.1 */), this.store, this.control, agent, "task"); // 3.2: persona last, voice only
     let res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: work });
     let usage: RunUsage | undefined = res.usage, ms = res.durationMs, ranModel = res.model;
     // A rate limit or timeout says nothing about the agent's work: wait and retry, without spending an attempt.
@@ -1601,7 +1602,7 @@ export class Orchestrator {
     }
     const orch = (await this.readyAgents()).find((a) => a.id === this.store.getSettings().orchestratorAgentId) ?? this.orchestratorAgent()!;
     this.writeLedger(g);
-    const text = await this.call(orch, summaryPrompt(g.text, g.contract, live, report), { jsonOnly: true });
+    const text = await this.call(orch, withPersona(summaryPrompt(g.text, g.contract, live, report), this.store, this.control, orch, "chat"), { jsonOnly: true }); // 3.2: the final report is the orchestrator speaking
     const checks = (report.passed ? `✓ ${gateText(report)}` : `⚠︎ ${gateText(report)}`) + jurySummary(this.store, g.id); // 2.2: how it was judged
     const reqLine = g.contract?.requirements?.length
       ? `\n${g.contract.requirements.map((r) => `${r.status === "met" ? "✓" : r.status === "unmet" ? "✗" : "·"} ${r.id} ${r.text}`).join("\n")}` : "";

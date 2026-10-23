@@ -39,7 +39,7 @@ export function normalizeAgent(a: AgentConfig): string {
     if (v && SENSITIVE.has(k) && a.autoApprove?.[k]) auto.push(k);
   }
   return stable({
-    name: a.name, color: a.color.toLowerCase(), provider: a.provider, adapter: a.adapter, enabled: !!a.enabled,
+    name: a.name, color: a.color.toLowerCase(), avatar: a.avatar ?? null, provider: a.provider, adapter: a.adapter, enabled: !!a.enabled,
     model: (a.settings?.model as string | undefined) || null, binary: (a.settings?.binary as string | undefined) || null,
     profiles: a.profiles ?? [], tools, auto: auto.sort(),
   });
@@ -54,7 +54,7 @@ export function agentFromFiles(
   const next: AgentConfig = base ? { ...base, settings: { ...base.settings }, tools: {}, autoApprove: undefined } : {
     id, name: id, provider: "custom", adapter: "mock", enabled: false, color: "#5e6875", settings: {}, tools: {},
   };
-  if (soul) { next.name = soul.name; next.color = soul.color; }
+  if (soul) { next.name = soul.name; next.color = soul.color; if (soul.avatar) next.avatar = soul.avatar; else delete next.avatar; } // 3.2: the avatar is part of the persona
   if (tools) {
     const rt = tools.runtime;
     next.adapter = rt.adapter; next.provider = rt.provider; next.enabled = rt.enabled;
@@ -119,11 +119,13 @@ Write how you like to work and what you expect from agents here. Every agent rea
 }
 
 export function soulMd(a: AgentConfig, by = "hub", today = today0()): string {
+  // 3.2: a persona kept in the agent's record (no control folder yet) becomes the file's content, so nothing the owner wrote is lost.
+  const kept = a.settings?.persona as { role?: string; tone?: string; body?: string } | undefined;
   return emitFile({
-    ...head("soul", by, today), name: a.name, color: a.color,
-    role: a.canBeOrchestrator ? "Plans, routes and does the work" : "Does the work it is given",
-    tone: "Plain, direct and brief",
-  }, `# ${a.name}
+    ...head("soul", by, today), name: a.name, color: a.color, ...(a.avatar ? { avatar: a.avatar } : {}),
+    role: kept?.role || (a.canBeOrchestrator ? "Plans, routes and does the work" : "Does the work it is given"),
+    tone: kept?.tone || "Plain, direct and brief",
+  }, kept?.body?.trim() ? `${kept.body.replace(/\s+$/, "")}\n` : `# ${a.name}
 
 Describe this agent's voice here. It shapes how the agent writes in the room and is left out when its work is judged.
 `);
@@ -174,6 +176,7 @@ export function patchSoul(text: string, a: AgentConfig, by: string, today: strin
     let changed = false;
     if (doc.get("name") !== a.name) { doc.set("name", a.name); changed = true; }
     if (String(doc.get("color")).toLowerCase() !== a.color.toLowerCase()) { doc.set("color", a.color); changed = true; }
+    if (((doc.get("avatar") as string | undefined) ?? "") !== (a.avatar ?? "")) { if (a.avatar) doc.set("avatar", a.avatar); else doc.delete("avatar"); changed = true; } // 3.2
     if (changed) touch(doc, by, today);
   });
 }

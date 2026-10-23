@@ -110,13 +110,13 @@ export function Strip({ color }: { color: string }) {
 }
 
 /** Slack-style rounded-square avatar with the first letter, in the agent's colour. */
-export function Avatar({ name, color, size = 36, presence }: { name: string; color: string; size?: number; presence?: "ready" | "busy" | "off" }) {
+export function Avatar({ name, color, size = 36, presence, glyph }: { name: string; color: string; size?: number; presence?: "ready" | "busy" | "off"; /** 3.2: the persona's letter or emoji; empty means the first letter of the name */ glyph?: string }) {
   const p = usePalette();
   const dot = presence === "ready" ? p.ok : presence === "busy" ? p.warn : presence === "off" ? p.faint : undefined;
   return (
     <View style={{ width: size, height: size }}>
       <View style={{ width: size, height: size, borderRadius: size * 0.22, backgroundColor: color, alignItems: "center", justifyContent: "center" }}>
-        <Text style={{ color: "#FFFFFF", fontFamily: t.name.fontFamily, fontWeight: "600", fontSize: size * 0.46 }}>{name.slice(0, 1).toUpperCase()}</Text>
+        <Text style={{ color: "#FFFFFF", fontFamily: t.name.fontFamily, fontWeight: "600", fontSize: size * 0.46 }}>{glyph || name.slice(0, 1).toUpperCase()}</Text>
       </View>
       {dot ? (
         <View style={{ position: "absolute", right: -3, bottom: -3, width: size * 0.36, height: size * 0.36, borderRadius: size, backgroundColor: dot, borderWidth: 2, borderColor: p.sidebar }} />

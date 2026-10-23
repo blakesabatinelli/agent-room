@@ -6,6 +6,7 @@ import type { SetupInfo } from "../api/client";
 import { presence, useRoom } from "../state/store";
 import { Avatar, Button, CodeBlock, Field, Pill, Screen, Toggle } from "../components/ui";
 import { Profiles } from "../components/Profiles";
+import { PersonaEditor } from "../components/PersonaEditor"; // 3.2
 import { Discovery } from "../components/Discovery";
 import { SignInPanel } from "../components/SignIn";
 import { radius, space, type as t, usePalette } from "../theme";
@@ -85,7 +86,7 @@ function AgentCard({ a, scores, version, shift }: { a: AgentConfig; scores: Agen
   return (
     <View style={{ borderWidth: 1, borderColor: p.line, borderRadius: radius.xl, backgroundColor: p.surface, overflow: "hidden" }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space(3), padding: space(4) }}>
-        <Avatar name={a.name} color={a.color} size={40} presence={pres === "error" ? "off" : pres} />
+        <Avatar name={a.name} color={a.color} glyph={a.avatar} size={40} presence={pres === "error" ? "off" : pres} />
         <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: space(2) }}>
             <Text style={[t.heading, { color: p.inkStrong, fontSize: 16 }]}>{a.name}</Text>
@@ -124,6 +125,8 @@ function AgentCard({ a, scores, version, shift }: { a: AgentConfig; scores: Agen
           {a.adapter === "mcp" ? <McpSetup a={a} /> : null}
 
           {a.adapter !== "mcp" ? <Profiles a={a} /> : null}
+
+          <PersonaEditor a={a} />
 
           <View style={{ borderWidth: 1, borderColor: p.line, borderRadius: radius.lg, overflow: "hidden" }}>
             <Toggle label="Available in the room" accent={p.ok} value={a.enabled}
