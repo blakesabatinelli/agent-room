@@ -423,7 +423,7 @@ export class Orchestrator {
       readOnly: o.readOnly, // 3.3
       onSubagent: o.taskId && !o.shadow && !o.jsonOnly ? (e) => this.subagents.native(o.taskId!, agent.id, e) : undefined, // 3.3: the agent's own subagents, for the tree
       // 4.6: an ACP agent asks permission for a tool mid-run; the answer is the owner's (or "run without asking"), and a practice run never gets one
-      approve: (tool, action, detail) => this.requestApproval({ agentId: agent.id, roomId: o.roomId, taskId: o.taskId, shadow: o.shadow }, tool, action, detail).then((a) => a.status === "approved" && a.choice !== "b" /* 4.1: this agent can't be handed the other agent's draft */),
+      approve: (tool, action, detail, input) => this.requestApproval({ agentId: agent.id, roomId: o.roomId, taskId: o.taskId, shadow: o.shadow }, tool, action, detail, input).then((a) => a.status === "approved" && a.choice !== "b" /* 4.1: this agent can't be handed the other agent's draft */),
     });
     if (!res.ok) this.forgetStatus(agent.id); // re-check sign-in before routing to it again
     if (grant) this.grants.delete(grant.token);
@@ -1865,10 +1865,12 @@ export class Orchestrator {
       return Promise.resolve({ id: id("apr"), ...p, detail: "", status: "rejected", createdAt: now(), decidedAt: now() });
     }
     // 4.2: the owner's accepted rules and leases (policy/): deny refuses, allow auto-approves, ask always shows the card. Never wider than the layers above.
-    const viaPolicy = this.policy.gate(grant, a, p, { twoKeyPassed: o.twoKeyDone === true }); // a send, CRM write or delete may only auto-approve after two keys matched
+    const viaPolicy = this.policy.gate(grant, a, p, { twoKeyPassed: o.twoKeyDone === true, input }); // a send, CRM write or delete may only auto-approve after two keys matched; the policy reads the whole input, not the cut-short detail (4.2 M2)
     if (viaPolicy) return viaPolicy;
     // "Run without asking" only counts while the tool itself is switched on.
-    if (level !== "ask" && a?.tools[tool] && a.autoApprove?.[tool]) return Promise.resolve(this.approvals.auto(p));
+    // 4.1: and an agent's own "run without asking" never stands in for the two keys on a send, CRM write or delete (unless the owner switched the check off).
+    const needsTwoKeys = this.twoKey.enabled && !o.twoKeyDone && this.twoKey.classify(tool, action, detail, input).twoKey;
+    if (level !== "ask" && a?.tools[tool] && a.autoApprove?.[tool] && !needsTwoKeys) return Promise.resolve(this.approvals.auto(p));
     return this.approvals.request(p);
   }
 

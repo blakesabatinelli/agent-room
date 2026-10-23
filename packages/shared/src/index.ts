@@ -1958,8 +1958,8 @@ export interface PolicyRulePatch { effect?: "allow" | "ask" | "deny"; match?: st
 export type TwoKeyKind = "email" | "crm" | "delete";
 /** The action as one agent drafted it. Email: who, what. CRM: which object, which record, which fields. Delete: what goes. */
 export type TwoKeyDraft =
-  | { kind: "email"; to: string[]; cc: string[]; bcc?: string[]; subject: string; body: string }
-  | { kind: "crm"; object: string; op: "create" | "update" | "upsert" | "delete"; id?: string; fields: Record<string, unknown> }
+  | { kind: "email"; to: string[]; cc: string[]; bcc?: string[]; subject: string; body: string; /** the request carries fields the hub does not compare (attachments, from, headers...): it can never match */ unparsed?: string }
+  | { kind: "crm"; object: string; op: "create" | "update" | "upsert" | "delete"; id?: string; fields: Record<string, unknown>; /** the request carries keys the hub does not compare: it can never match */ unparsed?: string }
   | { kind: "delete"; targets: string[]; /** the request named something that could not be listed as paths (git clean, find -delete, a computed command) */ unparsed?: string };
 /** OrchestratorSettings.twoKey. Default on, threshold 0.85 (how alike two email texts must be, 0 to 1). */
 export interface TwoKeySettings { enabled?: boolean; threshold?: number }

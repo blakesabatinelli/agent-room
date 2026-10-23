@@ -11,6 +11,7 @@ import { localModelsFor, mcpReportShape, normalizeMcpReport } from "../discovery
 import { annotate } from "../memory/model.js"; // 2.5
 import { RoomRules } from "../rooms/rules.js"; // 4.3
 import { overlayDraft } from "../twokey/draft.js"; // 4.1
+import { toolIdOf } from "../twokey/classify.js"; // 4.1: a tool name stands for a hub tool only by whole words (pipedrive is not drive)
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
@@ -161,7 +162,7 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
     description: "Permission gate used by Claude Code for sensitive tools.",
     inputSchema: { tool_name: z.string(), input: z.record(z.unknown()).optional(), tool_use_id: z.string().optional() },
   }, async ({ tool_name, input }) => {
-    const toolId = TOOLS.find((t) => tool_name.toLowerCase().includes(t.id) || (t.id === "shell" && tool_name === "Bash"))?.id ?? tool_name;
+    const toolId = toolIdOf(tool_name);
     const a = agent();
     if (a && a.tools[toolId] === false) return text(JSON.stringify({ behavior: "deny", message: `${toolId} is switched off for this agent.` }));
     if (readOnly() && /^(Write|Edit|MultiEdit|NotebookEdit|Bash)$/.test(tool_name)) { // 3.3: a read-only helper never writes, even if a permission rule would have allowed it
@@ -183,9 +184,9 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
     // 4.1: the owner picked the other agent's draft of a two-key action. Run it through the tool's own input when it fits, else tell the agent to ask again with it.
     const other = res.status === "approved" && res.choice === "b" ? res.twoKey?.b?.draft : undefined;
     if (other) {
-      const next = input ? overlayDraft(input, other) : undefined;
+      const next = input ? overlayDraft(input, other, tool_name) : undefined;
       if (next) return text(JSON.stringify({ behavior: "allow", updatedInput: next }));
-      orch.twoKey.permit(grant.agentId, other);
+      orch.twoKey.permit(grant, toolId, other);
       return text(JSON.stringify({ behavior: "deny", message: `The owner chose the other agent's version of this action. Do exactly this instead, and ask again: ${JSON.stringify(other)}` }));
     }
     return text(JSON.stringify(res.status === "approved"

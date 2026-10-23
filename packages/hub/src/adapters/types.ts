@@ -32,8 +32,9 @@ export interface RunRequest {
   /**
    * 4.6: asks the owner (through the approvals queue) whether a tool the agent wants to use may run. `tool` is one of the room's tool ids
    * (shell, web, filesystem...). Resolves true only when it was approved. Absent for runs that can't ask: such a run is refused anything sensitive.
+   * `detail` is for display and may be cut short; `input` is the tool call's own input, whole, and is what the two-key check and the policy read (4.1, 4.2).
    */
-  approve?: (tool: string, action: string, detail: string) => Promise<boolean>;
+  approve?: (tool: string, action: string, detail: string, input?: unknown) => Promise<boolean>;
 }
 
 export interface RunResult {

@@ -12,7 +12,9 @@ import type { RoomRules } from "../rooms/rules.js";
 import { id, now } from "../util.js";
 import { POLICY_SOFT_CAP, addRules, describeRule, lineFor, patchRule, removeRules, type RuleOut } from "./file.js";
 import { FORGET_DAYS, LEARN_DEFAULTS, describeProposal, learn, type LearnConfig, type Proposal } from "./learn.js";
-import { matches, parseMatch } from "./match.js";
+import { couldHideBehindCut, matches, parseMatch } from "./match.js";
+import { desiredLevel } from "../control/storemap.js";
+import { parsedInput } from "../twokey/classify.js";
 import { shapeOf, twoKeyClass, verbOf } from "./shape.js";
 
 /**
@@ -156,14 +158,14 @@ export class PolicyEngine {
   // ---------------------------------------------------------------- the decision
 
   /** What the owner's accepted rules say about one request. Never throws; a request nothing covers is "none". */
-  evaluate(agentId: string, roomId: string | undefined, goalId: string | undefined, tool: string, action: string, detail: string): Decision {
+  evaluate(agentId: string, roomId: string | undefined, goalId: string | undefined, tool: string, action: string, detail: string, input?: unknown): Decision {
     const c = this.control();
     const rules = this.fileRules();
     if (!rules.length) return { effect: "none" };
     const slug = roomId ? c?.slugFor(roomId) : undefined;
-    const shape = shapeOf(tool, action, detail);
+    const shape = shapeOf(tool, action, detail, input);
     const t = this.clock();
-    let allow: PolicyRule | undefined, ask: PolicyRule | undefined, deny: PolicyRule | undefined;
+    let allow: PolicyRule | undefined, ask: PolicyRule | undefined, deny: PolicyRule | undefined, maybe: PolicyRule | undefined;
     for (const r of rules) {
       if (!r.accepted || (r.expires && t >= expiryMs(r.expires))) continue;
       if (r.tool !== tool && r.tool !== "*") continue;
@@ -173,18 +175,21 @@ export class PolicyEngine {
       // A rule for the whole tool is the permission layers' business (POLICY.md levels, TOOLS.md, ROOM.md). Counting an allow here would
       // let it loosen what a narrower layer asked for. Only a rule tied to one goal (which those layers can't see) is read in full.
       if (r.effect === "allow" && pm.all && !/(^|\s)goal:/.test(r.scope)) continue;
-      if (!matches(pm, shape, action, r.effect === "allow")) continue;
+      // A request cut short (and no whole input to read) may hide what a rule talks about: never allow it, and let a rule that would hold it back ask.
+      if (r.effect === "allow" && shape.truncated) continue;
+      if (!matches(pm, shape, action, r.effect === "allow")) { if (shape.truncated && r.effect !== "allow" && couldHideBehindCut(pm, shape, action)) maybe ??= r; continue; }
       if (r.effect === "deny") deny ??= r; else if (r.effect === "ask") ask ??= r; else allow ??= r;
     }
     if (deny) return { effect: "deny", rule: deny };
     if (ask) return { effect: "ask", rule: ask };
-    if (allow) return { effect: "allow", rule: allow, twoKey: twoKeyClass(tool, shape.verb) };
+    if (maybe) return { effect: "ask", rule: maybe }; // fail toward ask
+    if (allow) return { effect: "allow", rule: allow, twoKey: twoKeyClass(tool, action, parsedInput(detail, input) ?? input ?? detail) };
     return { effect: "none" };
   }
 
   /** `allow | ask | deny | none` for one request, from the accepted rules (owner's and learned) that apply to this agent, room and goal. */
-  policyDecision(agentId: string, roomId: string | undefined, goalId: string | undefined, tool: string, action: string, detail: string): Effect {
-    return this.evaluate(agentId, roomId, goalId, tool, action, detail).effect;
+  policyDecision(agentId: string, roomId: string | undefined, goalId: string | undefined, tool: string, action: string, detail: string, input?: unknown): Effect {
+    return this.evaluate(agentId, roomId, goalId, tool, action, detail, input).effect;
   }
 
   /**
@@ -192,9 +197,9 @@ export class PolicyEngine {
    * and undefined when it has nothing to say, so the caller carries on as before.
    * `twoKeyPassed`: the two-key check (4.1) has run for this action and the drafts matched; only then may an allow cover its classes.
    */
-  gate(grant: { agentId: string; roomId?: string; taskId?: string }, agent: AgentConfig | undefined, p: { agentId: string; roomId?: string; tool: string; action: string; detail: string }, o: { twoKeyPassed?: boolean } = {}): Promise<Approval> | undefined {
+  gate(grant: { agentId: string; roomId?: string; taskId?: string }, agent: AgentConfig | undefined, p: { agentId: string; roomId?: string; tool: string; action: string; detail: string }, o: { twoKeyPassed?: boolean; input?: unknown } = {}): Promise<Approval> | undefined {
     let d: Decision;
-    try { d = this.evaluate(grant.agentId, grant.roomId, grant.taskId ? this.store.getTask(grant.taskId)?.goalId : undefined, p.tool, p.action, p.detail); } catch { return undefined; }
+    try { d = this.evaluate(grant.agentId, grant.roomId, grant.taskId ? this.store.getTask(grant.taskId)?.goalId : undefined, p.tool, p.action, p.detail, o.input); } catch { return undefined; }
     if (d.effect === "none") return undefined;
     const why = `${p.tool}: ${p.action}`.slice(0, 200);
     if (d.effect === "deny") {
@@ -208,10 +213,21 @@ export class PolicyEngine {
     // allow: never wider than the layers above it
     const roomSays = this.host.rooms.says(grant.roomId, p.tool);
     if (agent?.tools?.[p.tool] !== true || (roomSays !== undefined && roomSays !== "on") || this.host.rooms.level(grant.agentId, grant.roomId, p.tool) === "off") return undefined;
+    // An "ask" the owner wrote (ROOM.md tools, TOOLS.md room_allows) is never carved out by a rule or a lease: ask beats on (CONTROL.md section 3). Only the catalog's own default ask can be.
+    if (this.ownerAsks(grant.agentId, grant.roomId, p.tool, agent)) return undefined;
     if (d.twoKey && !o.twoKeyPassed) return undefined;
     const a = this.host.approvals.auto(p);
     this.store.audit(p.agentId, "policy.allowed", `${why} (rule ${d.rule!.id})`);
     return Promise.resolve(a);
+  }
+
+  /** Does ROOM.md or the agent's TOOLS.md (or, with no TOOLS.md yet, the owner's "asks first" in the app) say "ask" for this tool? */
+  private ownerAsks(agentId: string, roomId: string | undefined, tool: string, agent: AgentConfig | undefined): boolean {
+    const c = this.control(), snap = c?.snapshot();
+    const slug = roomId ? c?.slugFor(roomId) : undefined;
+    if (slug && snap?.rooms[slug]?.room?.fm.tools?.[tool] === "ask") return true;
+    const allows = snap?.agents[agentId]?.tools?.fm.room_allows?.[tool] ?? (agent ? desiredLevel(agent, tool) : undefined);
+    return allows === "ask";
   }
 
   // ---------------------------------------------------------------- learning
@@ -461,7 +477,10 @@ export class PolicyEngine {
         }
         notes.push(`${lease.tool} was off for ${agent.name}. It is on until the lease ends.`);
       }
-      if (twoKeyClass(lease.tool, action === "*" ? "send" : action)) notes.push("Sends, CRM writes and deletes still need the two-key check.");
+      if (twoKeyClass(lease.tool, action === "*" ? "delete" : action, "") || ["shell", "gmail", "salesforce"].includes(lease.tool)) notes.push("Sends, CRM writes and deletes still need the two-key check.");
+      // An "ask first" the owner's files wrote (TOOLS.md, ROOM.md) is stronger than a lease: say so, so a lease that will not skip the card is not a surprise.
+      const latest = this.store.getAgent(agent.id);
+      if (this.ownerAsks(agent.id, roomId, lease.tool, latest)) notes.push(`${agent.name} asks first about ${lease.tool} (TOOLS.md or ROOM.md), and a lease can't change that. The card will still come.`);
       return { ok: true, lease: this.view(lease), notes };
     });
   }
@@ -483,6 +502,8 @@ export class PolicyEngine {
   leaseFromApproval(approval: Approval, o: { minutes?: number; forGoal?: boolean }, approve: (id: string) => Approval | undefined): Promise<LeaseResult> {
     if (approval.status !== "pending") return Promise.resolve(fail(409, "That request has already been answered."));
     if (approval.question || approval.proposalId) return Promise.resolve(fail(400, "This kind of card can't be turned into a lease."));
+    // A two-key card asks the owner to pick a draft. Approving it for a lease would pick draft A without them choosing it.
+    if (approval.twoKey) return Promise.resolve(fail(400, "A two-key card needs you to pick a draft. It can't be turned into a lease."));
     const verb = verbOf(approval.action);
     if (!verb) return Promise.resolve(fail(400, "The hub can't tell what to allow from this request. Approve it, or grant a lease from the Policy screen."));
     const goalId = o.forGoal ? this.goalForApproval(approval) : undefined;

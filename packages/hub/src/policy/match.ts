@@ -63,6 +63,17 @@ export function matchFor(verb: string, narrow: Narrow): string {
 const glob = (pattern: string, s: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`).test(s);
 
 /**
+ * A request that was cut short (Shape.truncated) did not match a rule: could the part that was cut have made it match? True for a rule that names a
+ * path, a recipient or a command (those sit in the input) when its action fits. The caller treats such a rule as one that asks.
+ */
+export function couldHideBehindCut(p: ParsedMatch, s: Shape, rawAction: string): boolean {
+  if (!p.ok || p.all) return false;
+  const { action, path, to, cmd } = p.m;
+  if (path === undefined && to === undefined && cmd === undefined) return false;
+  return action === undefined || glob(action, s.verb) || glob(action, rawAction.trim().toLowerCase());
+}
+
+/**
  * Does a request fall under a match?
  *
  * `strict` is for rules that let things through ("allow"): every path, every recipient and the whole command must satisfy the rule, a

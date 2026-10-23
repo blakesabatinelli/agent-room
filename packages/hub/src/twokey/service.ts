@@ -7,7 +7,7 @@ import type { Approvals } from "../orchestrator/approvals.js";
 import { pickProfile } from "../orchestrator/contract.js";
 import { familyOf, isLocalAgent } from "../jury/family.js";
 import { id, now } from "../util.js";
-import { isTwoKey, type TwoKeyClass } from "./classify.js";
+import { isTwoKey, parsedInput, type TwoKeyClass } from "./classify.js";
 import { brief, clip, draftFromRequest, parseReply, redact, safeDraft, targetsOf, type Reply, type RequestDraft } from "./draft.js";
 import { compareDrafts, draftKey, type Comparison } from "./match.js";
 import { pickSecond } from "./pick.js";
@@ -93,6 +93,7 @@ export type DeleteOutcome =
 const KIND_WORD: Record<TwoKeyKind, string> = { email: "email", crm: "CRM write", delete: "delete" };
 const PERMIT_MS = 30 * 60_000;
 const asObj = (x: unknown): Record<string, unknown> | undefined => (x && typeof x === "object" && !Array.isArray(x) ? (x as Record<string, unknown>) : undefined);
+type Who = { agentId: string; roomId?: string; taskId?: string };
 
 export class TwoKey {
   /** Drafts the owner picked (draft B) that an agent has been told to run itself: one use each, for 30 minutes. */
@@ -106,15 +107,16 @@ export class TwoKey {
 
   // ---- one-time permits (the owner picked the other agent's draft, and the agent must run it itself)
 
-  private permitKey(agentId: string, d: TwoKeyDraft) { return `${agentId}|${draftKey(d)}`; }
-  /** The owner picked this draft: the agent that asks for exactly it next goes through, once. */
-  permit(agentId: string, d: TwoKeyDraft) {
+  /** A permit is for one agent, through one tool, in one room, for one task, for exactly one draft. */
+  private permitKey(who: Who, tool: string, d: TwoKeyDraft) { return [who.agentId, tool, who.roomId ?? "", who.taskId ?? "", draftKey(d)].join("|"); }
+  /** The owner picked this draft: the agent that asks for exactly it next, through the same tool, in the same room and task, goes through once. */
+  permit(who: Who, tool: string, d: TwoKeyDraft) {
     const t = now();
     for (const [k, until] of this.permits) if (until < t) this.permits.delete(k);
-    this.permits.set(this.permitKey(agentId, d), t + PERMIT_MS);
+    this.permits.set(this.permitKey(who, tool, d), t + PERMIT_MS);
   }
-  private takePermit(agentId: string, d: TwoKeyDraft): boolean {
-    const k = this.permitKey(agentId, d), until = this.permits.get(k);
+  private takePermit(who: Who, tool: string, d: TwoKeyDraft): boolean {
+    const k = this.permitKey(who, tool, d), until = this.permits.get(k);
     if (until === undefined) return false;
     this.permits.delete(k);
     return until >= now();
@@ -122,16 +124,24 @@ export class TwoKey {
 
   // ---- the front doors
 
+  /** Is the check on? (The owner can switch it off in settings.) */
+  get enabled(): boolean { return this.settings().enabled; }
+
+  /**
+   * The one classification of a request, for every caller: the gate below, the policy layer, the learning loop and the agent's own auto-approval.
+   * `input` is the tool's input when there is one; the text `detail` is read only when it is a JSON object.
+   */
+  classify(tool: string, action: string, detail: string, input?: unknown): TwoKeyClass { return isTwoKey(tool, action, parsedInput(detail, input) ?? input ?? detail); }
+
   /**
    * Orchestrator.requestApproval calls this first. Returns undefined when the action is not two-key (or two-key is off): carry on as before.
    * Otherwise a promise of the final answer: `proceed` runs the usual approval rules (called when the drafts match), or the owner's own decision card.
    */
   gate(grant: { agentId: string; roomId?: string; taskId?: string; cwd?: string }, tool: string, action: string, detail: string, input: unknown, proceed: (note: string) => Promise<Approval>): Promise<Approval> | undefined {
     if (!this.settings().enabled) return undefined;
-    const parsed = (() => { if (asObj(input)) return input; const t = detail.trim(); if (!t.startsWith("{")) return undefined; try { return JSON.parse(t) as unknown; } catch { return undefined; } })();
-    const cls: TwoKeyClass = isTwoKey(tool, action, parsed ?? input ?? detail);
+    const cls = this.classify(tool, action, detail, input);
     if (!cls.twoKey || !cls.kind) return undefined;
-    const a = draftFromRequest(cls, tool, action, detail, parsed ?? input, grant.cwd);
+    const a = draftFromRequest(cls, tool, action, detail, parsedInput(detail, input) ?? input, grant.cwd);
     const task = grant.taskId ? this.host.store.getTask(grant.taskId) : undefined;
     return this.run({
       kind: cls.kind, tool, action, why: cls.why, agentId: grant.agentId, roomId: grant.roomId, taskId: grant.taskId, goalId: task?.goalId, a, cwd: grant.cwd,
@@ -181,7 +191,7 @@ export class TwoKey {
     };
     store.audit(r.agentId, "twokey.requested", `${r.kind} via ${r.tool} (${r.why}); first key ${brief(r.a.draft)}`);
 
-    if (r.a.draft && this.takePermit(r.agentId, r.a.draft)) {
+    if (r.a.draft && this.takePermit({ agentId: r.agentId, roomId: r.roomId, taskId: r.taskId }, r.tool, r.a.draft)) {
       Object.assign(rec, { verdict: "match" as TwoKeyVerdict, why: "The owner already picked this version.", outcome: "permitted" as const, decidedAt: now() });
       saveTwoKey(store, rec);
       store.audit("owner", "twokey.permitted", `${r.kind} via ${r.tool}: ${brief(r.a.draft)}`);
@@ -278,7 +288,13 @@ export class TwoKey {
     const parent = task && (task as { parentTaskId?: string }).parentTaskId ? store.getTask((task as { parentTaskId?: string }).parentTaskId!) : undefined;
     const needles = needlesOf(r.a.draft);
     const mine = (author: { kind: string; id: string }) => author.kind === "agent" && author.id === r.agentId;
-    const conversation = r.roomId ? store.listMessages(r.roomId, 30).filter((m) => !m.quiet && m.text.trim()).map((m) => {
+    // The second key hears the owner and the work, not the agent being checked: an agent can seed a paraphrase of what it means to do, in the room or in a
+    // task update. So no message from the requesting agent, none from any agent since the task started (or at all, when the start is not known), and
+    // none from the hub's own voices (they relay agents' output). Owner messages stay.
+    const since = task ? Math.min(task.createdAt, task.claimedAt ?? task.createdAt) : undefined;
+    const heard = (m: { author: { kind: string; id: string }; type: string; createdAt: number }) =>
+      m.author.kind === "human" || (m.author.kind === "agent" && !mine(m.author) && m.type !== "task_update" && since !== undefined && m.createdAt < since);
+    const conversation = r.roomId ? store.listMessages(r.roomId, 30).filter((m) => !m.quiet && m.text.trim() && heard(m)).map((m) => {
       const leaks = needles.some((n) => m.text.includes(n)) && (mine(m.author) || needles.some((n) => n.length >= 25 && m.text.includes(n)));
       return `${m.author.name}: ${leaks ? "(left out: it quotes the action being checked)" : clip(redact(m.text.replace(/\s+/g, " ").trim()), 600)}`;
     }) : [];

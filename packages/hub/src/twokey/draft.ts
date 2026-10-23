@@ -62,17 +62,40 @@ export function targetsOf(list: unknown[], base?: string): string[] {
 
 const stripHtml = (h: string) => h.replace(/<(br|\/p|\/div|\/li|\/h\d)\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
 
-/** An email draft from an object with email-ish keys, or undefined when it has neither a recipient nor a body. */
+/** Every key an email request may use, by part. A request with any other key carries something the hub does not compare. */
+const EMAIL_KEYS = {
+  to: ["to", "recipients", "recipient", "toAddresses", "to_addresses", "sendTo", "emails", "email", "address"],
+  cc: ["cc", "ccAddresses", "cc_addresses"],
+  bcc: ["bcc", "bccAddresses", "bcc_addresses"],
+  body: ["body", "message", "text", "content", "plainBody", "textBody", "messageBody", "emailBody", "htmlBody", "html", "bodyText"],
+  subject: ["subject", "title"],
+};
+/** The values of every key whose name (ignoring case, underscores and dashes) is one of `names`. */
+function pickAll(o: Obj, names: string[]): unknown[] {
+  const want = new Set(names.map(key));
+  return Object.keys(o).filter((k) => want.has(key(k))).map((k) => o[k]);
+}
+/** Keys of `o` that are none of `groups`' names. */
+function keysOutside(o: Obj, ...groups: string[][]): string[] {
+  const known = new Set(groups.flat().map(key));
+  return Object.keys(o).filter((k) => !known.has(key(k)));
+}
+const distinct = (xs: string[]) => { const seen = new Set<string>(); return xs.filter((x) => { const k = x.replace(/\s+/g, " ").trim().toLowerCase(); if (!k || seen.has(k)) return false; seen.add(k); return true; }); };
+
+/**
+ * An email draft from an object with email-ish keys, or undefined when it has neither a recipient nor a body. Every recipient, subject and body-like key
+ * is read (a request with `body` and `html` sends both), and a key the hub doesn't know (attachments, from, replyTo, headers...) marks the draft `unparsed`,
+ * so it can never match and the owner decides.
+ */
 export function emailFrom(o: Obj): TwoKeyDraft | undefined {
-  const to = addressesOf(pick(o, ["to", "recipients", "recipient", "toAddresses", "to_addresses", "sendTo", "emails", "email", "address"]));
-  const cc = addressesOf(pick(o, ["cc", "ccAddresses", "cc_addresses"]));
-  const bcc = addressesOf(pick(o, ["bcc", "bccAddresses", "bcc_addresses"]));
-  const bodyRaw = pick(o, ["body", "message", "text", "content", "plainBody", "textBody", "messageBody", "emailBody", "htmlBody", "html", "bodyText"]);
-  let body = str(bodyRaw) ?? "";
-  if (/<\/?[a-z][\s\S]*>/i.test(body)) body = stripHtml(body);
-  const subject = str(pick(o, ["subject", "title"])) ?? "";
+  const to = addressesOf(pickAll(o, EMAIL_KEYS.to));
+  const cc = addressesOf(pickAll(o, EMAIL_KEYS.cc));
+  const bcc = addressesOf(pickAll(o, EMAIL_KEYS.bcc));
+  const body = distinct(pickAll(o, EMAIL_KEYS.body).map((v) => { const b = str(v) ?? ""; return (/<\/?[a-z][\s\S]*>/i.test(b) ? stripHtml(b) : b).trim(); })).join("\n\n");
+  const subject = distinct(pickAll(o, EMAIL_KEYS.subject).map((v) => (str(v) ?? "").trim())).join(" / ");
   if (!to.length && !body.trim()) return undefined;
-  return { kind: "email", to, cc, ...(bcc.length ? { bcc } : {}), subject: subject.trim(), body: body.trim() };
+  const extra = keysOutside(o, EMAIL_KEYS.to, EMAIL_KEYS.cc, EMAIL_KEYS.bcc, EMAIL_KEYS.body, EMAIL_KEYS.subject);
+  return { kind: "email", to, cc, ...(bcc.length ? { bcc } : {}), subject, body: body.trim(), ...(extra.length ? { unparsed: `the request also sets ${extra.slice(0, 4).map((k) => clip(k, 30)).join(", ")}${extra.length > 4 ? " and more" : ""}` } : {}) };
 }
 
 const CRM_OPS: [RegExp, "create" | "update" | "upsert" | "delete"][] = [[/delete|remove|destroy|purge/, "delete"], [/upsert/, "upsert"], [/create|insert|add|new|post/, "create"], [/update|patch|modify|edit|set|put|change|merge/, "update"]];
@@ -82,20 +105,23 @@ export function crmOp(text: unknown): "create" | "update" | "upsert" | "delete" 
   return undefined;
 }
 const CRM_META = ["object", "sobject", "sobjectType", "objectType", "objectName", "entity", "type", "resource", "table", "op", "operation", "action", "method", "verb", "id", "recordId", "objectId"];
+const CRM_BOX = ["fields", "data", "record", "values", "attributes", "properties", "payload", "changes", "body"];
 /** A CRM draft from an object with object/op/id/fields keys. `hint` says the operation when the object doesn't (the tool's name). */
 export function crmFrom(o: Obj, hint?: string): TwoKeyDraft | undefined {
   const object = str(pick(o, ["object", "sobject", "sobjectType", "objectType", "objectName", "entity", "type", "resource", "table"]))?.trim();
   if (!object) return undefined;
   const op = crmOp(pick(o, ["op", "operation", "action", "method", "verb"])) ?? crmOp(hint);
   if (!op) return undefined;
-  const box = asObj(pick(o, ["fields", "data", "record", "values", "attributes", "properties", "payload", "changes", "body"]));
+  const boxKey = actualKey(o, CRM_BOX), box = boxKey !== undefined ? asObj(o[boxKey]) : undefined;
   const meta = new Set(CRM_META.map(key));
   const fields: Obj = box ? { ...box } : Object.fromEntries(Object.entries(o).filter(([k]) => !meta.has(key(k))));
   // A record's id may sit inside the fields (Salesforce's Id): it names the record, it is not a change to it.
   let id = str(pick(o, ["id", "recordId", "objectId"]))?.trim();
   const inner = Object.keys(fields).find((k) => key(k) === "id");
   if (inner !== undefined) { id ??= str(fields[inner])?.trim(); delete fields[inner]; }
-  return { kind: "crm", object, op, ...(id ? { id } : {}), fields };
+  // With the fields in a box, any other key is something the hub does not compare (a second box, a flag, a header...)
+  const extra = box ? Object.keys(o).filter((k) => k !== boxKey && !meta.has(key(k))) : [];
+  return { kind: "crm", object, op, ...(id ? { id } : {}), fields, ...(extra.length ? { unparsed: `the request also sets ${extra.slice(0, 4).map((k) => clip(k, 30)).join(", ")}${extra.length > 4 ? " and more" : ""}` } : {}) };
 }
 
 /** A delete draft from an object naming what goes. */
@@ -173,6 +199,8 @@ export function parseReply(kind: TwoKeyKind, text: string, cwd?: string): Reply 
     else d = deleteFrom(inner, cwd);
     if (d && d.kind === "delete" && !d.targets.length) return { none: "it listed nothing to delete" };
   }
+  // What the second agent adds to its reply (a reason, an action word) is not part of the draft; only the first request's extra fields count against a match.
+  if (d && d.kind !== "delete") delete d.unparsed;
   return d ? { draft: d } : { error: `the reply has no ${kind} draft in it` };
 }
 
@@ -184,11 +212,17 @@ const SECRETS: RegExp[] = [
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g, /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi,
   /\b(password|passwd|pwd|passcode|secret|token|api[_-]?key|access[_-]?key)(["']?\s*[:=]\s*["']?)[^\s"',;]{4,}/gi,
 ];
+/** A Salesforce session id: the 15 or 18 character org id (it starts 00D), a bang, then the token. */
+const SALESFORCE_SESSION = /\b00[Dd][A-Za-z0-9]{12,15}![A-Za-z0-9._-]{16,}/g;
+/** A long run of base64 or hex characters: a token, a key or a session secret whatever its prefix. It needs digits and letters, and mixed case or hex only, so words and identifiers survive. */
+const LONG_TOKEN = /[A-Za-z0-9+_-]{32,}={0,2}/g;
+const looksRandom = (t: string) => /\d/.test(t) && /[A-Za-z]/.test(t) && ((/[a-z]/.test(t) && /[A-Z]/.test(t)) || /^[0-9a-f]+$/i.test(t.replace(/=+$/, "")));
 /** Replace anything that looks like a credential. */
 export function redact(s: string): string {
   let out = s;
   for (const re of SECRETS) out = out.replace(re, (m, k, sep) => (typeof k === "string" && typeof sep === "string" ? `${k}${sep}[secret removed]` : "[secret removed]"));
-  return out;
+  out = out.replace(SALESFORCE_SESSION, "[secret removed]");
+  return out.replace(LONG_TOKEN, (t) => (looksRandom(t) ? "[secret removed]" : t));
 }
 export const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, Math.max(0, n - 3))}...` : s);
 
@@ -214,10 +248,13 @@ const actualKey = (o: Obj, names: string[]) => { const want = new Set(names.map(
 
 /**
  * The tool input of a request with draft B's content put in, for Claude Code's `updatedInput` when the owner picked the other agent's draft.
- * Only when every part of B has a place in the original input (same keys); otherwise undefined and the agent is told what to run instead.
+ * Only when the whole input is B's: every key of the input is one the draft covers, each part has exactly one place, and B has a place for everything it says.
+ * An input that carries anything else (html beside a body, attachments, from, replyTo, headers, a second recipient key) would run as a mix of A and B:
+ * undefined, and the agent is told what to run instead. `hint` is the tool's name, which says the CRM operation when the input doesn't.
  */
-export function overlayDraft(input: Obj, d: TwoKeyDraft): Obj | undefined {
+export function overlayDraft(input: Obj, d: TwoKeyDraft, hint?: string): Obj | undefined {
   const out: Obj = { ...input };
+  const once = (names: string[]) => Object.keys(input).filter((k) => names.map(key).includes(key(k))).length <= 1;
   const setList = (names: string[], values: string[], required: boolean): boolean => {
     const k = actualKey(out, names);
     if (k === undefined) return !required || !values.length;
@@ -231,15 +268,26 @@ export function overlayDraft(input: Obj, d: TwoKeyDraft): Obj | undefined {
     return true;
   };
   if (d.kind === "email") {
-    const ok = setList(["to", "recipients", "recipient", "toAddresses", "sendTo"], d.to, true) && setList(["cc", "ccAddresses"], d.cc, true) && setList(["bcc", "bccAddresses"], d.bcc ?? [], true)
-      && setText(["subject", "title"], d.subject) && setText(["body", "message", "text", "content", "plainBody", "textBody", "messageBody", "emailBody", "bodyText"], d.body);
+    if (keysOutside(input, EMAIL_KEYS.to, EMAIL_KEYS.cc, EMAIL_KEYS.bcc, EMAIL_KEYS.body, EMAIL_KEYS.subject).length) return undefined;
+    if (!(Object.values(EMAIL_KEYS).every(once))) return undefined;
+    const ok = setList(EMAIL_KEYS.to, d.to, true) && setList(EMAIL_KEYS.cc, d.cc, true) && setList(EMAIL_KEYS.bcc, d.bcc ?? [], true)
+      && setText(EMAIL_KEYS.subject, d.subject) && setText(EMAIL_KEYS.body, d.body);
     return ok ? out : undefined;
   }
   if (d.kind === "crm") {
-    const box = actualKey(out, ["fields", "data", "record", "values", "attributes", "properties", "payload", "changes"]);
-    if (box !== undefined && asObj(out[box])) out[box] = d.fields;
-    else return undefined;
-    const set = (names: string[], v: string | undefined) => { const k = actualKey(out, names); if (k !== undefined && v !== undefined) out[k] = v; };
+    const boxKey = actualKey(out, CRM_BOX.filter((x) => x !== "body"));
+    if (boxKey === undefined || !asObj(out[boxKey])) return undefined;
+    const meta = new Set(CRM_META.map(key));
+    if (Object.keys(input).some((k) => k !== boxKey && !meta.has(key(k)))) return undefined;
+    // the operation is A's: if B's differs, running B's fields under A's operation would be a third action
+    const opKey = actualKey(input, ["op", "operation", "action", "method", "verb"]);
+    if ((opKey !== undefined ? crmOp(input[opKey]) : crmOp(hint)) !== d.op) return undefined;
+    // the record id sits beside the fields or inside them (Salesforce's Id), where A put it; B must name one when A's request did
+    const innerId = Object.keys(asObj(input[boxKey])!).find((k) => key(k) === "id");
+    const outerId = actualKey(input, ["id", "recordId", "objectId"]);
+    if ((innerId !== undefined || outerId !== undefined) && d.id === undefined) return undefined;
+    out[boxKey] = innerId !== undefined && d.id !== undefined ? { ...d.fields, [innerId]: d.id } : d.fields;
+    const set =(names: string[], v: string | undefined) => { const k = actualKey(out, names); if (k !== undefined && v !== undefined) out[k] = v; };
     set(["object", "sobject", "sobjectType", "objectType", "objectName"], d.object);
     set(["id", "recordId"], d.id);
     return out;

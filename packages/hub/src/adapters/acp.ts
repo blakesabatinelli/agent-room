@@ -351,10 +351,15 @@ export class AcpAdapter implements Adapter {
       req.onChunk?.(`\n[refused: ${title} (${tool} is off for this agent)]\n`);
       return answer(false);
     }
-    if (tool && !TOOLS.find((t) => t.id === tool)?.sensitive) return answer(true);
+    // A delete or a move is never "just a file tool": it removes or overwrites something, so it goes to the owner (through the two-key check) like a shell command.
+    const destructive = kind === "delete" || kind === "move";
+    if (tool && !destructive && !TOOLS.find((t) => t.id === tool)?.sensitive) return answer(true);
     if (!req.approve) return answer(false);
     const raw = call.rawInput === undefined ? "" : JSON.stringify(call.rawInput).slice(0, 300);
-    const decided = await Promise.race([req.approve(tool ?? "other", title, raw ? `${title}: ${raw}` : title), aborted]);
+    // The card's text is cut short; the tool call's own input goes along whole, because that is what the two-key check and the policy read.
+    // The kind goes in the action too: the title is the agent's own word for what it is doing and may not say "delete".
+    const action = destructive ? `${kind === "move" ? "move" : "delete"}: ${title}` : title;
+    const decided = await Promise.race([req.approve(tool ?? "other", action, raw ? `${title}: ${raw}` : title, call.rawInput), aborted]);
     if (decided === "aborted") return { outcome: { outcome: "cancelled" } };
     return answer(decided);
   }

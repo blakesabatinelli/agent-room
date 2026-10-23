@@ -187,9 +187,10 @@ test("learn: only the owner's own answers count, in the window, grouped by agent
   assert.equal(learn([...five(), mk1({ status: "rejected" })], T)[0].effect, "ask", "one rejection spoils an allow");
   assert.equal(learn(five({ tool: "shell", action: "Bash", detail: JSON.stringify({ command: "rm -rf x" }) }), T).length, 0, "no stable command, nothing to learn");
   assert.equal(learn(five({ tool: "gmail", action: "send", detail: JSON.stringify({ body: "hi" }) }), T).length, 0, "a send with no recipient is too wide to learn");
-  const one = learn(five({ tool: "gmail", action: "send", detail: JSON.stringify({ to: "a@atmosphere.tv" }) }), T)[0];
-  assert.equal(one.match, "action:send to:@atmosphere.tv");
-  assert.equal(one.id, learnedId("claude", "gmail", "send", { kind: "to", value: "atmosphere.tv" }));
+  assert.equal(learn(five({ tool: "gmail", action: "send", detail: JSON.stringify({ to: "a@atmosphere.tv" }) }), T).length, 0, "a send is the two-key check's: never learned as an allow");
+  const one = learn(five({ tool: "gmail", action: "draft", detail: JSON.stringify({ to: "a@atmosphere.tv" }) }), T)[0];
+  assert.equal(one.match, "action:draft to:@atmosphere.tv");
+  assert.equal(one.id, learnedId("claude", "gmail", "draft", { kind: "to", value: "atmosphere.tv" }));
 });
 
 test("file: rules and their plain lines go in and out of POLICY.md without touching what the owner wrote", () => {
@@ -422,7 +423,10 @@ test("layers only tighten: a POLICY allow can't override ROOM.md off or ask, a s
   assert.equal(await pending(c, s), true);
   await declineAll(c, [s]);
 
-  // two-key: the allow doesn't stand in for the drafts check
+  // two-key: the allow doesn't stand in for the drafts check (Claude runs Gmail without asking here: an agent that asks first can't be carved out, see M5 below)
+  c.store.saveAgent({ ...c.store.getAgent("claude")!, autoApprove: { shell: true, gmail: true } });
+  await c.control.idle();
+  assert.match(read(c.root, "agents/claude/TOOLS.md"), /gmail: on/);
   const mail = JSON.stringify({ to: ["amy@atmosphere.tv"], subject: "Hi" });
   assert.equal(c.policy.policyDecision("claude", c.general.id, undefined, "gmail", "send", mail), "allow");
   const m = ask(c, {}, "gmail", "send", mail);
@@ -437,35 +441,35 @@ test("layers only tighten: a POLICY allow can't override ROOM.md off or ask, a s
 test("AC2: a 30-minute lease allows the action, then expires on its own and the previous state comes back", async (t) => {
   const c = await mk(t);
   const before = c.control.snapshot().policy!.fm.rules.map((r) => r.id).sort();
-  const slackPost = (n = "to #general") => ask(c, {}, "slack", "post", n);
+  const drivePost = (n = "to #general") => ask(c, {}, "drive", "write", n);
 
-  const p0 = slackPost();
+  const p0 = drivePost();
   assert.equal(await pending(c, p0), true, "no lease: the owner is asked");
   await declineAll(c, [p0]);
 
-  const g = await c.policy.grant({ agentId: "claude", tool: "slack", minutes: 30, action: "post" });
+  const g = await c.policy.grant({ agentId: "claude", tool: "drive", minutes: 30, action: "write" });
   assert.ok(g.ok);
   if (!g.ok) return;
   assert.equal(g.lease.remainingMs, 30 * MIN);
   assert.equal(g.lease.expiresAt, T0 + 30 * MIN);
   const file = read(c.root, "POLICY.md");
-  assert.match(file, new RegExp(`id: ${g.lease.id}\\n\\s+effect: allow\\n\\s+tool: slack\\n\\s+match: action:post\\n\\s+scope: agent:claude\\n\\s+expires: 2026-10-23T18:30:00\\.000Z\\n\\s+source: owner\\n\\s+accepted: true`));
+  assert.match(file, new RegExp(`id: ${g.lease.id}\\n\\s+effect: allow\\n\\s+tool: drive\\n\\s+match: action:write\\n\\s+scope: agent:claude\\n\\s+expires: 2026-10-23T18:30:00\\.000Z\\n\\s+source: owner\\n\\s+accepted: true`));
   assert.match(file, /## Active leases/);
-  assert.match(file, new RegExp(`- Allow Claude's Slack posts until Oct 23, 1:30 PM CDT \\(for 30 minutes\\) \\[${g.lease.id}\\]`));
+  assert.match(file, new RegExp(`- Allow Claude's Drive writes until Oct 23, 1:30 PM CDT \\(for 30 minutes\\) \\[${g.lease.id}\\]`));
   assert.deepEqual(c.store.getKV<{ id: string }[]>("policy_leases", []).map((l) => l.id), [g.lease.id], "mirrored in the database");
   assert.ok(auditHas(c, "lease.granted", g.lease.id));
   assert.deepEqual(c.control.lint().blocks, []);
 
-  assert.equal((await slackPost()).auto, true);
+  assert.equal((await drivePost()).auto, true);
   c.clock.t = T0 + 29 * MIN;
-  assert.equal((await slackPost()).auto, true, "still inside the lease");
+  assert.equal((await drivePost()).auto, true, "still inside the lease");
   assert.equal(c.policy.leases()[0].remainingMs, MIN);
-  const react = ask(c, {}, "slack", "react", "to #general");
+  const react = ask(c, {}, "drive", "read", "to #general");
   assert.equal(await pending(c, react), true, "only the verb that was leased");
   await declineAll(c, [react]);
 
   c.clock.t = T0 + 31 * MIN;
-  const late = slackPost();
+  const late = drivePost();
   assert.equal(await pending(c, late), true, "past its time the lease no longer applies, even before the sweep has run");
   await declineAll(c, [late]);
   assert.deepEqual(c.policy.leases(), []);
@@ -493,29 +497,29 @@ test("AC2: the timer removes an expired lease by itself", async (t) => {
 
 test("AC2: a lease on a tool the agent doesn't have switches it on, and turns it back off when the lease ends", async (t) => {
   const c = await mk(t);
-  assert.equal(c.store.getAgent("codex")!.tools.slack ?? false, false);
-  const g = await c.policy.grant({ agentId: "codex", tool: "slack", minutes: 30, action: "post" });
+  assert.equal(c.store.getAgent("codex")!.tools.drive ?? false, false);
+  const g = await c.policy.grant({ agentId: "codex", tool: "drive", minutes: 30, action: "write" });
   assert.ok(g.ok);
   if (!g.ok) return;
   assert.equal(g.lease.switchedOn, true);
-  assert.match(g.notes.join(" "), /slack was off for Codex/);
-  assert.equal(c.store.getAgent("codex")!.tools.slack, true);
-  assert.equal((await ask(c, { agentId: "codex" }, "slack", "post", "to #general")).auto, true);
-  assert.match(read(c.root, "agents/codex/TOOLS.md"), /slack: ask/, "the switch is written to its files like any change in the app");
+  assert.match(g.notes.join(" "), /drive was off for Codex/);
+  assert.equal(c.store.getAgent("codex")!.tools.drive, true);
+  assert.equal((await ask(c, { agentId: "codex" }, "drive", "write", "to #general")).auto, true);
+  assert.match(read(c.root, "agents/codex/TOOLS.md"), /drive: on/, "the switch is written to its files like any change in the app");
 
   c.clock.t += 31 * MIN;
   await c.policy.sweep();
   await c.control.idle();
-  assert.equal(c.store.getAgent("codex")!.tools.slack, false, "back to what it was");
-  assert.match(read(c.root, "agents/codex/TOOLS.md"), /slack: off/);
-  assert.ok(auditHas(c, "lease.expired", "slack is off again"));
+  assert.equal(c.store.getAgent("codex")!.tools.drive, false, "back to what it was");
+  assert.match(read(c.root, "agents/codex/TOOLS.md"), /drive: off/);
+  assert.ok(auditHas(c, "lease.expired", "drive is off again"));
 
-  // a layer that keeps the tool off can't be widened by a lease (the owner's own deny rule for Codex's Slack)
-  await ownerRules(c, [{ effect: "deny", tool: "slack", match: "*", scope: "agent:codex" }]);
-  const no = await c.policy.grant({ agentId: "codex", tool: "slack", minutes: 30, action: "post" });
+  // a layer that keeps the tool off can't be widened by a lease (the owner's own deny rule for Codex's Drive)
+  await ownerRules(c, [{ effect: "deny", tool: "drive", match: "*", scope: "agent:codex" }]);
+  const no = await c.policy.grant({ agentId: "codex", tool: "drive", minutes: 30, action: "write" });
   assert.equal(no.ok, false);
   assert.deepEqual(c.control.snapshot().policy!.fm.rules.filter((r) => r.id.startsWith("lease-")), [], "and nothing is left behind");
-  assert.equal(c.store.getAgent("codex")!.tools.slack, false);
+  assert.equal(c.store.getAgent("codex")!.tools.drive, false);
 });
 
 test("AC2: a lease for one goal ends when the goal ends (done, failed or stopped), or at its time, whichever is first", async (t) => {
@@ -523,15 +527,15 @@ test("AC2: a lease for one goal ends when the goal ends (done, failed or stopped
     const c = await mk(t);
     const goal = runningGoal(c);
     const task = runningTask(c, goal);
-    const g = await c.policy.grant({ agentId: "claude", tool: "slack", goalId: goal.id, action: "post" });
+    const g = await c.policy.grant({ agentId: "claude", tool: "drive", goalId: goal.id, action: "write" });
     assert.ok(g.ok, ending);
     if (!g.ok) return;
     assert.equal(g.lease.goalOnly, true);
     assert.equal(g.lease.expiresAt, T0 + 24 * HOUR, "a goal-only lease has a ceiling");
     assert.match(read(c.root, "POLICY.md"), new RegExp(`scope: agent:claude room:general goal:${goal.id}`));
 
-    assert.equal((await ask(c, { taskId: task.id }, "slack", "post", "to #general")).auto, true, "inside the goal");
-    const chat = ask(c, {}, "slack", "post", "to #general"); // a request that isn't part of the goal
+    assert.equal((await ask(c, { taskId: task.id }, "drive", "write", "to #general")).auto, true, "inside the goal");
+    const chat = ask(c, {}, "drive", "write", "to #general"); // a request that isn't part of the goal
     assert.equal(await pending(c, chat), true, "outside the goal it still asks");
     await declineAll(c, [chat]);
 
@@ -540,21 +544,21 @@ test("AC2: a lease for one goal ends when the goal ends (done, failed or stopped
     assert.deepEqual(c.policy.leases(), [], ending);
     assert.doesNotMatch(read(c.root, "POLICY.md"), /lease-/);
     assert.ok(auditHas(c, "lease.expired", "its goal ended"), ending);
-    const after = ask(c, { taskId: task.id }, "slack", "post", "to #general");
+    const after = ask(c, { taskId: task.id }, "drive", "write", "to #general");
     assert.equal(await pending(c, after), true);
     await declineAll(c, [after]);
   }
   const c = await mk(t);
   const goal = runningGoal(c);
-  const g = await c.policy.grant({ agentId: "claude", tool: "slack", goalId: goal.id, minutes: 10, action: "post" });
+  const g = await c.policy.grant({ agentId: "claude", tool: "drive", goalId: goal.id, minutes: 10, action: "write" });
   assert.ok(g.ok);
   c.clock.t += 11 * MIN; // the goal is still running, the time is up
-  assert.equal(c.policy.policyDecision("claude", c.general.id, goal.id, "slack", "post", "x"), "none");
+  assert.equal(c.policy.policyDecision("claude", c.general.id, goal.id, "drive", "write", "x"), "none");
   await c.policy.sweep();
   assert.deepEqual(c.policy.leases(), []);
   assert.ok(auditHas(c, "lease.expired", "its time ran out"));
   // an ended goal can't be leased
-  const dead = await c.policy.grant({ agentId: "claude", tool: "slack", goalId: runningGoal(c, c.general.id, "done").id });
+  const dead = await c.policy.grant({ agentId: "claude", tool: "drive", goalId: runningGoal(c, c.general.id, "done").id });
   assert.equal(dead.ok, false);
 });
 
@@ -598,32 +602,32 @@ test("AC2: approval-card buttons make the right lease: 'Allow for 30 minutes' an
   const task = runningTask(c, goal);
 
   // 30 minutes
-  const p1 = ask(c, { taskId: task.id }, "slack", "post", "to #general: hello");
+  const p1 = ask(c, { taskId: task.id }, "drive", "write", "to #general: hello");
   assert.equal(await pending(c, p1), true);
   const card1 = c.store.listApprovals("pending")[0];
   const r1 = await api(c, "POST", `/approvals/${card1.id}/lease`, { minutes: 30 });
   assert.equal(r1.status, 201, JSON.stringify(r1.body));
   assert.equal((await p1).status, "approved", "the request that was waiting goes ahead");
   assert.equal(r1.body.approval.status, "approved");
-  assert.deepEqual([r1.body.lease.agentId, r1.body.lease.tool, r1.body.lease.action, r1.body.lease.goalOnly], ["claude", "slack", "post", false]);
+  assert.deepEqual([r1.body.lease.agentId, r1.body.lease.tool, r1.body.lease.action, r1.body.lease.goalOnly], ["claude", "drive", "write", false]);
   assert.equal(r1.body.lease.expiresAt, T0 + 30 * MIN);
   assert.equal(r1.body.lease.roomId, c.general.id);
-  assert.equal((await ask(c, {}, "slack", "post", "to #general: again")).auto, true);
+  assert.equal((await ask(c, {}, "drive", "write", "to #general: again")).auto, true);
   assert.equal(c.policy.leases().length, 1);
 
   // this goal
   await api(c, "DELETE", `/leases/${r1.body.lease.id}`);
-  const p2 = ask(c, { taskId: task.id }, "slack", "post", "to #general: hello");
+  const p2 = ask(c, { taskId: task.id }, "drive", "write", "to #general: hello");
   assert.equal(await pending(c, p2), true);
   const r2 = await api(c, "POST", `/approvals/${c.store.listApprovals("pending")[0].id}/lease`, { forGoal: true });
   assert.equal(r2.status, 201, JSON.stringify(r2.body));
   assert.equal((await p2).status, "approved");
-  assert.deepEqual([r2.body.lease.goalId, r2.body.lease.goalOnly, r2.body.lease.action], [goal.id, true, "post"]);
+  assert.deepEqual([r2.body.lease.goalId, r2.body.lease.goalOnly, r2.body.lease.action], [goal.id, true, "write"]);
   assert.match(read(c.root, "POLICY.md"), new RegExp(`goal:${goal.id}`));
-  assert.equal((await ask(c, { taskId: task.id }, "slack", "post", "to #general")).auto, true);
+  assert.equal((await ask(c, { taskId: task.id }, "drive", "write", "to #general")).auto, true);
 
   // the card needs to say how long; a question or an already-answered card can't be leased; no goal, no goal lease
-  const p3 = ask(c, {}, "slack", "post", "to #general");
+  const p3 = ask(c, {}, "drive", "write", "to #general");
   assert.equal(await pending(c, p3), true);
   const open = c.store.listApprovals("pending")[0];
   assert.equal((await api(c, "POST", `/approvals/${open.id}/lease`, {})).status, 400);
@@ -646,7 +650,11 @@ test("AC2: an email-send lease is granted, but the two-key check still owns send
   await declineAll(c, [p]);
   const draft = await c.policy.grant({ agentId: "claude", tool: "gmail", minutes: 30, action: "draft" });
   assert.ok(draft.ok);
-  assert.equal((await ask(c, {}, "gmail", "draft", JSON.stringify({ to: ["a@b.com"] }))).auto, true);
+  // Claude asks first about Gmail (TOOLS.md says ask), and a lease can't carve out an ask the owner's files wrote: the grant says so, and the card still comes
+  if (draft.ok) assert.match(draft.notes.join(" "), /asks first/);
+  const dp = ask(c, {}, "gmail", "draft", JSON.stringify({ to: ["a@b.com"] }));
+  assert.equal(await pending(c, dp), true);
+  await declineAll(c, [dp]);
 });
 
 // ---------------------------------------------------------------- HTTP
@@ -677,20 +685,20 @@ test("HTTP: GET /policy groups rules by source with plain lines; accept, edit an
   assert.equal((await api(c, "DELETE", `/policy/rules/${learned.id}`)).status, 404);
 
   // leases
-  assert.equal((await api(c, "POST", "/leases", { agentId: "claude", tool: "slack" })).status, 400, "needs a time or a goal");
-  assert.equal((await api(c, "POST", "/leases", { agentId: "claude", tool: "slack", minutes: 0 })).status, 400);
-  assert.equal((await api(c, "POST", "/leases", { agentId: "ghost", tool: "slack", minutes: 5 })).status, 404);
+  assert.equal((await api(c, "POST", "/leases", { agentId: "claude", tool: "drive" })).status, 400, "needs a time or a goal");
+  assert.equal((await api(c, "POST", "/leases", { agentId: "claude", tool: "drive", minutes: 0 })).status, 400);
+  assert.equal((await api(c, "POST", "/leases", { agentId: "ghost", tool: "drive", minutes: 5 })).status, 404);
   assert.equal((await api(c, "POST", "/leases", { agentId: "claude", tool: "nonsense", minutes: 5 })).status, 400);
-  assert.equal((await api(c, "POST", "/leases", { agentId: "claude", tool: "slack", minutes: 5, goalId: "nope" })).status, 400);
-  const made = await api(c, "POST", "/leases", { agentId: "claude", tool: "slack", minutes: 30, action: "post", roomId: c.board.id });
+  assert.equal((await api(c, "POST", "/leases", { agentId: "claude", tool: "drive", minutes: 5, goalId: "nope" })).status, 400);
+  const made = await api(c, "POST", "/leases", { agentId: "claude", tool: "drive", minutes: 30, action: "write", roomId: c.board.id });
   assert.equal(made.status, 201, JSON.stringify(made.body));
   assert.match(read(c.root, "POLICY.md"), /scope: agent:claude room:board/);
   const list = (await api(c, "GET", "/leases")).body;
   assert.equal(list.length, 1);
   assert.equal(list[0].remainingMs, 30 * MIN);
-  assert.match(list[0].text, /Claude's Slack posts/);
-  assert.equal((await ask(c, { roomId: c.board.id }, "slack", "post", "x")).auto, true, "in the room it was granted for");
-  const elsewhere = ask(c, { roomId: c.general.id }, "slack", "post", "x");
+  assert.match(list[0].text, /Claude's Drive writes/);
+  assert.equal((await ask(c, { roomId: c.board.id }, "drive", "write", "x")).auto, true, "in the room it was granted for");
+  const elsewhere = ask(c, { roomId: c.general.id }, "drive", "write", "x");
   assert.equal(await pending(c, elsewhere), true, "and nowhere else");
   await declineAll(c, [elsewhere]);
   const revoke = await api(c, "DELETE", `/leases/${made.body.lease.id}`);
@@ -702,7 +710,7 @@ test("HTTP: GET /policy groups rules by source with plain lines; accept, edit an
   // a file the owner broke stops the apps' edits with a clear message, and nothing else
   write(c.root, "POLICY.md", "---\nkind: policy\nschema: 1\nupdated: 2026-10-23\nupdated_by: owner\ndefaults: [oops\n---\n");
   await c.control.load();
-  const broken = await api(c, "POST", "/leases", { agentId: "claude", tool: "slack", minutes: 5 });
+  const broken = await api(c, "POST", "/leases", { agentId: "claude", tool: "drive", minutes: 5 });
   assert.equal(broken.status, 409);
   assert.match(broken.body.error, /POLICY\.md has a problem/);
   assert.equal((await api(c, "GET", "/policy")).body.ok, true, "the last good version is still what's shown");
@@ -726,4 +734,113 @@ test("4.2 apps: the phone and the Mac show the rules, the leases with a Revoke, 
   assert.match(cards, /Allow for this goal/);
   const phoneCopy = web.match(/4\.2 approval rules[\s\S]*?\n  \/\/ ---------- 1\.1/)?.[0] ?? "";
   assert.ok(phoneCopy.length > 500 && !phoneCopy.includes("\u2014") && !screen.includes("\u2014"), "no em dashes in the new copy");
+});
+
+// ---------------------------------------------------------------- 4.2 security review: regression tests (one per finding)
+
+test("M1: a two-key card cannot be turned into a lease: the owner has to pick a draft, and nothing is granted", async (t) => {
+  const c = await boot(t);
+  const card: Approval = {
+    id: id("apr"), agentId: "claude", roomId: c.general.id, tool: "gmail", action: "mcp__Gmail__send_message", detail: "a disagreement between two drafts",
+    status: "pending", createdAt: c.clock.t, twoKey: { kind: "email" } as unknown as Approval["twoKey"],
+  };
+  c.store.saveApproval(card);
+  for (const body of [{ minutes: 30 }, { forGoal: true }]) {
+    const r = await api(c, "POST", `/approvals/${card.id}/lease`, body);
+    assert.equal(r.status, 400, JSON.stringify(r.body));
+    assert.match(String(r.body.error ?? r.body.message), /two-key card needs you to pick a draft/);
+  }
+  assert.equal(c.store.getApproval(card.id)!.status, "pending", "the card is still waiting for the owner");
+  assert.equal(c.policy.leases().length, 0, "and nothing was granted");
+  assert.doesNotMatch(read(c.root, "POLICY.md"), /lease-/);
+});
+
+test("M2: a rule is read against the tool's whole input, not the cut-short text: a long body can't push the path a deny rule names out of sight", async (t) => {
+  const c = await mk(t);
+  await ownerRules(c, [{ effect: "deny", tool: "drive", match: "action:write path:/Board/secret", scope: "*" }, { effect: "allow", tool: "drive", match: "action:write", scope: "agent:claude" }]);
+  const input = { content: "x".repeat(6000), path: "/Board/secret/plan.md" };
+  const whole = JSON.stringify(input);
+  const cut = whole.slice(0, 4000); // what request_approval keeps of a tool input
+  assert.ok(!cut.includes("secret"));
+
+  // with the input: denied, no card
+  const denied = await c.orch.requestApproval({ agentId: "claude", roomId: c.general.id }, "drive", "write", cut, input);
+  assert.equal(denied.status, "rejected");
+  assert.equal(c.store.listApprovals("pending").length, 0);
+  assert.deepEqual(shapeOf("drive", "write", cut, input).paths, ["/Board/secret/plan.md"]);
+
+  // with only the cut text: never auto-approved, and a deny rule that might have been cut away is not skipped over; the owner decides
+  assert.equal(shapeOf("drive", "write", cut).truncated, true);
+  assert.equal(shapeOf("drive", "write", whole).truncated, undefined, "whole text is read as it is");
+  const p = ask(c, {}, "drive", "write", cut);
+  assert.equal(await pending(c, p), true, "an allow does not stand for text that was cut");
+  await declineAll(c, [p]);
+  assert.equal(c.policy.policyDecision("claude", c.general.id, undefined, "drive", "write", cut), "ask");
+
+  // an ordinary request is unaffected: the allow still works for a path the deny doesn't name
+  const fine = await c.orch.requestApproval({ agentId: "claude", roomId: c.general.id }, "drive", "write", JSON.stringify({ path: "/Board/notes.md", content: "hi" }), { path: "/Board/notes.md", content: "hi" });
+  assert.equal(fine.auto, true);
+});
+
+test("M5: an allow rule or lease never overrides an `ask` the owner's files wrote (TOOLS.md or ROOM.md); only the catalog default ask can be carved out", async (t) => {
+  const c = await mk(t);
+  // Claude asks first about Gmail: TOOLS.md says ask. An allow rule or a lease for a draft doesn't skip the card.
+  assert.match(read(c.root, "agents/claude/TOOLS.md"), /gmail: ask/);
+  await ownerRules(c, [{ tool: "gmail", match: "action:draft", scope: "agent:claude" }]);
+  const detail = JSON.stringify({ to: ["amy@atmosphere.tv"], subject: "Hi" });
+  assert.equal(c.policy.gate({ agentId: "claude", roomId: c.general.id }, c.store.getAgent("claude"), { agentId: "claude", roomId: c.general.id, tool: "gmail", action: "draft", detail }), undefined, "the policy steps aside");
+  const p = ask(c, {}, "gmail", "draft", detail);
+  assert.equal(await pending(c, p), true, "an allow rule does not skip the card");
+  await declineAll(c, [p]);
+
+  const lease = await c.policy.grant({ agentId: "claude", tool: "gmail", minutes: 30, action: "draft" });
+  assert.ok(lease.ok);
+  if (lease.ok) assert.match(lease.notes.join(" "), /asks first/, "the grant says so");
+  const q = ask(c, {}, "gmail", "draft", detail);
+  assert.equal(await pending(c, q), true, "nor does a lease");
+  await declineAll(c, [q]);
+
+  // ROOM.md ask in one room: the allow doesn't reach it, and the other room keeps its own rules
+  await ownerRules(c, [{ tool: "drive", match: "action:read", scope: "*" }]);
+  write(c.root, "rooms/board/ROOM.md", read(c.root, "rooms/board/ROOM.md").replace("tools: {}", "tools:\n  drive: ask"));
+  await c.control.load();
+  const r = ask(c, { roomId: c.board.id }, "drive", "read", "/Board/a.md");
+  assert.equal(await pending(c, r), true);
+  await declineAll(c, [r]);
+  assert.equal((await ask(c, { roomId: c.general.id }, "drive", "read", "/Board/a.md")).auto, true, "a tool that is only ask by default is still carved out by the owner's allow");
+});
+
+test("M6: the learner and the policy use the same two-key class as the check: an unsure shell command and `git clean` are two-key, and no allow is ever learned for them", async (t) => {
+  assert.equal(twoKeyClass("shell", "Bash", { command: "git clean -fdx" }), true);
+  assert.equal(twoKeyClass("shell", "Bash", { command: "python3 -c \"__import__('o'+'s').remove('x')\"" }), true, "unsure counts");
+  assert.equal(twoKeyClass("shell", "Bash", { command: "mv a b" }), true);
+  assert.equal(twoKeyClass("drive", "mcp__pipedrive__update_deal"), true);
+  assert.equal(twoKeyClass("shell", "Bash", { command: "pnpm test" }), false);
+  assert.equal(twoKeyClass("shell", "Bash", JSON.stringify({ command: "git clean -fdx" })), true, "a JSON text is read as the input it is");
+
+  const mk1 = (over: Partial<Approval>): Approval => ({ id: id("apr"), agentId: "claude", tool: "shell", action: "Bash", detail: "", status: "approved", createdAt: T0 - 2000, decidedAt: T0 - 1000, ...over });
+  const six = (command: string) => Array.from({ length: 6 }, () => mk1({ detail: JSON.stringify({ command }) }));
+  for (const command of ["git clean -fdx", "git --work-tree . clean -fdx", "python3 -c \"print(1)\"", "mv a b", "cat <<< 'x' | sh"]) {
+    assert.deepEqual(learn(six(command), T0).filter((p) => p.effect === "allow"), [], `${command}: no allow is learned for a two-key action`);
+  }
+  assert.ok(learn(six("pnpm test"), T0).some((p) => p.effect === "allow"), "an ordinary command is still learned");
+
+  // and an agent's own "run without asking" never stands in for the two keys: Claude runs shell without asking here, yet `git clean -fdx` is not auto-approved
+  const c = await mk(t);
+  assert.equal(c.store.getAgent("claude")!.autoApprove?.shell, true);
+  assert.equal((await ask(c, {}, "shell", "Bash", JSON.stringify({ command: "ls -la" }))).auto, true, "an ordinary command still runs without asking");
+  const input = { command: "git --work-tree . clean -fdx" };
+  const p = c.orch.requestApproval({ agentId: "claude", roomId: c.general.id }, "shell", "Bash", JSON.stringify(input), input);
+  const first = await Promise.race([p.then((a) => (a.auto ? "auto" : a.status)), new Promise((r) => setTimeout(() => r("waiting"), 400))]);
+  assert.notEqual(first, "auto", "a delete the check can't clear is the owner's");
+  await declineAll(c, [p]);
+});
+
+test("L5: the linter flags an allow rule for every tool and every action, and not a narrower one", async (t) => {
+  const c = await mk(t);
+  await ownerRules(c, [{ tool: "*", match: "action:*", scope: "agent:claude" }]);
+  const flags = c.control.lint().flags.map((f) => f.message);
+  assert.ok(flags.some((m) => /tool \* with action:\*/.test(m) && /turns approvals off/.test(m)), flags.join("\n"));
+  await ownerRules(c, [{ tool: "drive", match: "action:*", scope: "agent:claude" }]);
+  assert.equal(c.control.lint().flags.filter((f) => /tool \* with action:\*/.test(f.message)).length, 1, "only the broad rule is flagged");
 });

@@ -1,3 +1,5 @@
+import { isTwoKey, parsedInput } from "../twokey/classify.js";
+
 /**
  * 4.2 The shape of an approval request: the parts of "tool, action, detail" that a rule can talk about.
  *
@@ -16,6 +18,11 @@ export interface Shape {
   paths: string[];
   domains: string[];
   command?: string;
+  /**
+   * The request was JSON that was cut short and no whole input was given, so a recipient, path or command a rule names may sit in the part that is
+   * missing. An allow never applies to such a request, and a rule that would hold it back is treated as matching.
+   */
+  truncated?: boolean;
 }
 
 const CLAUDE_VERBS: Record<string, string> = {
@@ -92,9 +99,19 @@ function parseJson(detail: string): Json | undefined {
   try { return JSON.parse(t); } catch { return undefined; }
 }
 
-/** Break an approval request into the parts a rule can match. Never throws. */
-export function shapeOf(tool: string, action: string, detail: string): Shape {
-  const json = parseJson(detail);
+/** Text that starts like JSON, fails to parse, and is as long as the longest text the hub keeps of a tool input: it was cut. */
+const CUT_AT = 4000;
+const looksCut = (detail: string) => /^[{[]/.test(detail.trim()) && detail.length >= CUT_AT && parseJson(detail) === undefined;
+
+/**
+ * Break an approval request into the parts a rule can match. Never throws.
+ * `input` is the tool's own input object when there is one: it is read in preference to `detail`, which is cut short for display (a long body can push
+ * the recipient past the cut, and a shape made from half a JSON text would miss it).
+ */
+export function shapeOf(tool: string, action: string, detail: string, input?: unknown): Shape {
+  const whole = input && typeof input === "object" ? input : undefined;
+  const json = whole ?? parseJson(detail);
+  const truncated = json === undefined && looksCut(detail);
   const verb = verbOf(action);
   let rawPaths: string[] = [];
   let recipients: string[] = [];
@@ -117,7 +134,7 @@ export function shapeOf(tool: string, action: string, detail: string): Shape {
     if (n === undefined) paths.push("/.."); // a path that climbs out is never inside anything a rule names
     else if (!paths.includes(n)) paths.push(n);
   }
-  return { tool, verb, paths, domains: domainsIn(recipients), ...(command ? { command } : {}) };
+  return { tool, verb, paths, domains: domainsIn(recipients), ...(command ? { command } : {}), ...(truncated ? { truncated } : {}) };
 }
 
 // ---- commands
@@ -175,7 +192,7 @@ export function narrowOf(s: Shape): Narrow | undefined {
 
 /** A shape that a learned rule can be made from: it has a verb, a stable narrowing, and (unless it only reads) at least one. */
 export function learnable(s: Shape): { verb: string; narrow: Narrow } | undefined {
-  if (!s.verb) return undefined;
+  if (!s.verb || s.truncated) return undefined; // a request that was cut short has no stable shape to learn from
   const narrow = narrowOf(s);
   if (!narrow) return undefined;
   if (narrow.kind === "none" && !READ_VERBS.has(s.verb)) return undefined;
@@ -184,17 +201,14 @@ export function learnable(s: Shape): { verb: string; narrow: Narrow } | undefine
 
 // ---- classes the two-key rule (4.1) owns
 
-const ALWAYS_TWO_KEY = new Set(["delete", "remove", "trash", "erase", "drop", "destroy", "purge"]);
-
 /**
- * Actions where two vendors must draft the action independently before it runs (PRODUCT.md 6.11): email sends, CRM writes, deletes.
- * A policy "allow" never stands in for that check.
+ * Actions where two vendors must draft the action independently before it runs (PRODUCT.md 6.11): email sends, CRM writes, deletes, and a shell
+ * command that deletes or can't be read. A policy "allow" never stands in for that check, and a rule is never learned to skip it.
+ * This is the two-key classifier itself (twokey/classify.ts): one table for the gate, the policy, the learner and auto-approval. `input` is the
+ * tool's input (an object) or the agent's detail text.
  */
-export function twoKeyClass(tool: string, verb: string): boolean {
-  if (ALWAYS_TWO_KEY.has(verb)) return true;
-  if (tool === "gmail") return verb === "send" || verb === "reply" || verb === "forward";
-  if (tool === "salesforce") return !!verb && !READ_VERBS.has(verb);
-  return false;
+export function twoKeyClass(tool: string, action: string, input?: unknown): boolean {
+  return isTwoKey(tool, action, parsedInput(typeof input === "string" ? input : "", input) ?? input).twoKey; // a JSON text is the input it holds
 }
 
 // ---- words

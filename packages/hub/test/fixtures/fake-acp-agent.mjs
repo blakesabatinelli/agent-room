@@ -6,6 +6,8 @@
 //   (none)           reads the task, writes the files the task allows through fs/write_text_file, reads one back, tries two writes outside the folder,
 //                    and ends with the STATUS block the orchestrator expects.
 //   --perm           also asks session/request_permission for an `execute` tool and reports what it was told.
+//   --perm-kind=K    with --perm: the permission request is for a tool of kind K (delete, move, ...) with a path as its input, not for `npm test`.
+//   --perm-long      with --perm: the shell command is a long one that hides `rm -rf x` after 400 characters of padding.
 //   --hang           streams one chunk, then waits for session/cancel and answers the prompt with stopReason "cancelled".
 //   --auth           session/new fails with "authentication required" (-32000).
 //   --max-tokens     ends the turn with stopReason "max_tokens".
@@ -65,10 +67,14 @@ async function prompt(params) {
   notify(SESSION, { sessionUpdate: "tool_call_update", toolCallId: "call_fs", status: "completed" });
 
   if (flag("--perm")) {
-    notify(SESSION, { sessionUpdate: "tool_call", toolCallId: "call_sh", title: "Run the test suite", kind: "execute", status: "pending" });
+    const kindArg = argv.find((a) => a.startsWith("--perm-kind="))?.slice("--perm-kind=".length);
+    const kind = kindArg ?? "execute";
+    const rawInput = kindArg ? { path: "notes/old.md" } : { command: flag("--perm-long") ? `echo ${"x".repeat(400)}; rm -rf important` : "npm test" };
+    const title = kindArg ? "Tidy up" : "Run the test suite";
+    notify(SESSION, { sessionUpdate: "tool_call", toolCallId: "call_sh", title, kind, status: "pending" });
     const r = await ask("session/request_permission", {
       sessionId: SESSION,
-      toolCall: { toolCallId: "call_sh", rawInput: { command: "npm test" } },
+      toolCall: { toolCallId: "call_sh", rawInput },
       options: [{ optionId: "allow-always", name: "Always allow", kind: "allow_always" }, { optionId: "allow-once", name: "Allow once", kind: "allow_once" }, { optionId: "reject-once", name: "Reject", kind: "reject_once" }],
     });
     report.permission = r.result?.outcome ?? { error: r.error?.code };

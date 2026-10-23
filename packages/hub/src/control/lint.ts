@@ -127,6 +127,11 @@ export function analyzeFolder(root: string, opts: LintOptions = {}): Analysis {
         const what = r.id.startsWith("lease-") || lease ? "lease" : "rule";
         policyFile.flags.push(flag("POLICY.md", `${what} "${r.id}" expired ${lease ? `at ${r.expires.replace("T", " ").replace(/(:\d\d)?(\.\d+)?Z$/, " UTC")}` : `on ${r.expires}`}; it no longer applies`, policyFile.parsed?.lineOf(["rules", i, "expires"])));
       }
+      // 4.2: an allow for every tool and every action is the whole approval policy switched off for that agent (sends, CRM writes and deletes still meet the two-key check)
+      const pm = r.match === "*" ? undefined : parseMatch(r.match);
+      if (r.effect === "allow" && r.tool === "*" && pm?.ok && pm.m.action === "*" && pm.m.path === undefined && pm.m.to === undefined && pm.m.cmd === undefined) {
+        policyFile.flags.push(flag("POLICY.md", `rule "${r.id}" allows every action of every tool (tool * with action:*). It turns approvals off for ${r.scope === "*" ? "everyone" : r.scope}; name the tools and actions you mean`, policyFile.parsed?.lineOf(["rules", i, "match"])));
+      }
       if (r.match !== "*" && !parseMatch(r.match).ok) policyFile.flags.push(flag("POLICY.md", `rule "${r.id}" has a match the hub can't read ("${r.match}"), so it never applies. Use * or words like action:read path:/Board`, policyFile.parsed?.lineOf(["rules", i, "match"])));
     });
     for (let i = 0; i < rules.length; i++) for (let j = i + 1; j < rules.length; j++) {

@@ -123,6 +123,8 @@ function sentence(problems: string[]): string {
 
 /** Compare two drafts of the same kind. */
 export function compareDrafts(a: TwoKeyDraft, b: TwoKeyDraft, threshold: number): Comparison {
+  // An email or CRM request that carries fields the hub does not compare (attachments, headers, a second body...) can't be checked against a draft: the owner decides.
+  if ((a.kind === "email" || a.kind === "crm") && a.unparsed) return { match: false, diffs: [{ field: "request", a: a.unparsed, b: "(the other draft has no such fields)", level: "critical" }], why: `The first request has more in it than the drafts compare (${a.unparsed}), so the owner decides.` };
   if (a.kind === "email" && b.kind === "email") {
     const diffs: TwoKeyDiff[] = [], problems: string[] = [];
     for (const [f, label] of [["to", "recipients"], ["cc", "cc"], ["bcc", "bcc"]] as const) {
@@ -141,7 +143,8 @@ export function compareDrafts(a: TwoKeyDraft, b: TwoKeyDraft, threshold: number)
 
 /** A stable key for a draft: what a one-time permit is matched on. Wording, case and spacing don't change it; recipients, records and targets do. */
 export function draftKey(d: TwoKeyDraft): string {
-  if (d.kind === "email") return `email|${addressesOf(d.to).join(",")}|${addressesOf(d.cc).join(",")}|${addressesOf(d.bcc ?? []).join(",")}|${squash(d.subject).toLowerCase()}|${contentTokens(maskEntities(stripSignoff(d.body))).join(" ")}`;
-  if (d.kind === "crm") return `crm|${d.object.toLowerCase().replace(/[^a-z0-9]/g, "")}|${d.op}|${d.id ?? ""}|${Object.entries(d.fields).map(([k, v]) => `${fieldKey(k)}=${normValue(v)}`).sort().join(";")}`;
-  return `delete|${[...d.targets].sort().join("\0")}`;
+  // Every compared field, and the words as written (case and spacing aside): "do not" and "do" are not the same draft.
+  if (d.kind === "email") return `email|${addressesOf(d.to).join(",")}|${addressesOf(d.cc).join(",")}|${addressesOf(d.bcc ?? []).join(",")}|${squash(d.subject).toLowerCase()}|${squash(stripSignoff(d.body)).toLowerCase()}|${d.unparsed ?? ""}`;
+  if (d.kind === "crm") return `crm|${d.object.toLowerCase().replace(/[^a-z0-9]/g, "")}|${d.op}|${d.id ?? ""}|${Object.entries(d.fields).map(([k, v]) => `${fieldKey(k)}=${normValue(v)}`).sort().join(";")}|${d.unparsed ?? ""}`;
+  return `delete|${[...d.targets].sort().join("\0")}|${d.unparsed ?? ""}`;
 }

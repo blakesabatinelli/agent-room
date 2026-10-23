@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Approval } from "@agent-room/shared";
+import { isTwoKey, parsedInput } from "../twokey/classify.js";
 import { matchFor } from "./match.js";
 import { labelFor, learnable, shapeOf, type Narrow } from "./shape.js";
 
@@ -11,6 +12,9 @@ import { labelFor, learnable, shapeOf, type Narrow } from "./shape.js";
  *   approved at least N times and never rejected   -> allow
  *   rejected at least 3 times and never approved   -> deny
  *   both, and at least N answers                   -> ask (with a note saying so)
+ *
+ * Never an "allow" for what the two-key check owns (email sends, CRM writes, deletes, a shell command that deletes or can't be read): the owner answered those
+ * with two drafts in front of them, and a rule must not skip that. A "deny" or "ask" is still fine.
  *
  * Nothing here writes a file. It returns proposals; the engine puts them in POLICY.md, unaccepted.
  */
@@ -51,20 +55,22 @@ export const ownerAnswered = (a: Approval) =>
 
 export function learn(history: Approval[], nowMs: number, cfg: LearnConfig = LEARN_DEFAULTS): Proposal[] {
   const from = nowMs - cfg.windowDays * 86_400_000;
-  const groups = new Map<string, { agentId: string; tool: string; verb: string; narrow: Narrow; approved: number; rejected: number; since: number }>();
+  const groups = new Map<string, { agentId: string; tool: string; verb: string; narrow: Narrow; approved: number; rejected: number; since: number; twoKey: boolean }>();
   for (const a of history) {
     if (!ownerAnswered(a) || a.decidedAt! < from) continue;
     const l = learnable(shapeOf(a.tool, a.action, a.detail));
     if (!l) continue;
     const id = learnedId(a.agentId, a.tool, l.verb, l.narrow);
-    const g = groups.get(id) ?? { agentId: a.agentId, tool: a.tool, verb: l.verb, narrow: l.narrow, approved: 0, rejected: 0, since: a.decidedAt! };
+    const g = groups.get(id) ?? { agentId: a.agentId, tool: a.tool, verb: l.verb, narrow: l.narrow, approved: 0, rejected: 0, since: a.decidedAt!, twoKey: false };
+    // One approval of a send, CRM write, delete or a shell command that can't be read makes the whole shape one the two-key check owns.
+    if (isTwoKey(a.tool, a.action, parsedInput(a.detail, undefined) ?? a.detail).twoKey) g.twoKey = true;
     if (a.status === "approved") g.approved++; else g.rejected++;
     g.since = Math.min(g.since, a.decidedAt!);
     groups.set(id, g);
   }
   const out: Proposal[] = [];
   for (const [id, g] of groups) {
-    const effect = g.rejected === 0 && g.approved >= cfg.minApprovals ? "allow"
+    const effect = g.rejected === 0 && g.approved >= cfg.minApprovals ? (g.twoKey ? undefined : "allow")
       : g.approved === 0 && g.rejected >= cfg.minRejections ? "deny"
       : g.approved > 0 && g.rejected > 0 && g.approved + g.rejected >= cfg.minApprovals ? "ask" : undefined;
     if (!effect) continue;
