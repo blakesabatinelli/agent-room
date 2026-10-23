@@ -9,7 +9,7 @@ import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { Approvals } from "../orchestrator/approvals.js";
 import { adapters, inbox } from "../adapters/index.js";
 import { handleMcp } from "../mcp/server.js";
-import { isAllowedLocalAddress, pushNotify } from "../net.js";
+import { isAllowedLocalAddress } from "../net.js";
 import { signInLog } from "../setup.js";
 import { pairingCode, token } from "../util.js";
 import { listFiles } from "../orchestrator/workspace.js";
@@ -35,6 +35,7 @@ import { registerInstallRoutes } from "../install/routes.js";
 import { registerJuryRoutes } from "../jury/routes.js"; // 2.2
 import { registerPersonaRoutes } from "../persona/routes.js"; // 3.2
 import { registerResumeRoutes } from "../resume/routes.js"; // 2.3
+import { registerReportRoutes } from "../report/routes.js"; // 2.7
 import { setupTimer } from "../install/timer.js";
 import { firstPassMetrics, retroDb } from "../retro/index.js"; // 2.1
 import { homedir } from "node:os";
@@ -664,6 +665,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   registerJuryRoutes(app, store); // 2.2: GET /juries, GET /jury/stats
   registerPersonaRoutes(app, store, () => orch.control); // 3.2: GET /personas/templates, GET and PUT /agents/:id/persona
   registerResumeRoutes(app, store, orch.resumes); // 2.3: GET /agents/:id/resume, GET /resumes, POST /agents/:id/probation
+  registerReportRoutes(app, store); // 2.7: GET /reports/scorecard, /reports/ledger, /reports/kill-review, GET /attention
   app.put("/settings", async (req) => {
     const s = z.object({
       orchestratorAgentId: z.string(), judgeRotation: z.array(z.string()),
@@ -679,6 +681,14 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
       memoryTtlDays: z.object({ fact: z.number().int().min(1).max(3650), preference: z.number().int().min(1).max(3650), status: z.number().int().min(1).max(3650) }).optional(), // 2.5
       memoryExportBytes: z.number().int().min(512).max(65536).optional(), // 2.5
       probationRuns: z.number().int().min(1).max(50).optional(), // 2.3
+      attention: z.object({ // 2.7
+        dailyInterruptCap: z.number().int().min(0).max(100).optional(),
+        digestAt: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/).optional(),
+        timezone: z.string().max(64).refine((tz) => { try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); return true; } catch { return false; } }, "Unknown time zone").optional(),
+        quietFrom: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/).optional(),
+        quietTo: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/).optional(),
+      }).optional(),
+      minutesSavedPerTask: z.number().min(0).max(600).optional(), // 2.7
       capacity: z.object({
         maxConcurrentTasks: z.number().int().min(1).max(32).optional(),
         localModels: z.enum(["auto", "on", "off"]).optional(),
@@ -700,6 +710,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     agentIds: z.array(z.string()), kind: z.enum(["subscription", "api", "local"]), modelMatch: z.string().max(120).optional(),
     windows: z.object({ fiveHour: limit.optional(), weekly: limit.optional() }),
     resetAnchor: z.object({ fiveHourStart: z.number().optional(), weekStart: z.number().optional() }).optional(),
+    monthlyUsd: z.number().min(0).max(100000).optional(), // 2.7: what the owner pays each month (the return ledger)
   });
   app.get("/quota/subscriptions", async () => quota.statuses());
   app.put("/quota/subscriptions", async (req) => { quota.saveSubscriptions(z.array(subSchema).parse(req.body) as never); return quota.statuses(); });
@@ -853,7 +864,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   const onEvent = (e: ServerEvent) => {
     const s = JSON.stringify(e);
     for (const ws of sockets) if (ws.readyState === 1) ws.send(s);
-    if (e.type === "approval" && e.approval.status === "pending") void pushNotify("Approval needed", `${e.approval.agentId} wants to use ${e.approval.tool}: ${e.approval.action}`);
+    // 2.7: the push for a pending approval is sent by the attention gate (which listens to the store itself), so it is counted and capped there.
   };
   store.on("event", onEvent);
   inbox.onSeen = (agentId) => { const a = store.getAgent(agentId); if (a) void orch.agentStatus(a, true); };

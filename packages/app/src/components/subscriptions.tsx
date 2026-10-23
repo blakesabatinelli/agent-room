@@ -40,6 +40,11 @@ function Limits({ sub, onSave }: { sub: Subscription; onSave: (s: Subscription) 
   return (
     <View style={{ gap: space(1), marginTop: space(2) }}>
       <Field label="Plan" defaultValue={sub.plan ?? ""} placeholder="for example, Max 5x" onEndEditing={(e) => onSave({ ...sub, plan: e.nativeEvent.text.trim() || undefined })} />
+      {sub.kind === "subscription" ? ( // 2.7: the return ledger divides this by accepted tasks
+        <Field label="What you pay each month (USD)" defaultValue={sub.monthlyUsd === undefined ? "" : String(sub.monthlyUsd)} placeholder="for example, 20" keyboardType="decimal-pad"
+          hint="Used by the monthly return ledger. Leave empty if you'd rather not say."
+          onEndEditing={(e) => { const v = Number(e.nativeEvent.text.replace(/[$, ]/g, "")); onSave({ ...sub, monthlyUsd: e.nativeEvent.text.trim() && Number.isFinite(v) && v >= 0 ? Math.round(v * 100) / 100 : undefined }); }} />
+      ) : null}
       <Field label="Runs per 5 hours" defaultValue={win("fiveHour", "limitRuns")} keyboardType="number-pad" hint="Leave empty to let the room learn it from rate limits" onEndEditing={(e) => set("fiveHour", "limitRuns", e.nativeEvent.text)} />
       <Field label="Tokens per 5 hours" defaultValue={win("fiveHour", "limitTokens")} keyboardType="number-pad" onEndEditing={(e) => set("fiveHour", "limitTokens", e.nativeEvent.text)} />
       <Field label="Runs per week" defaultValue={win("weekly", "limitRuns")} keyboardType="number-pad" onEndEditing={(e) => set("weekly", "limitRuns", e.nativeEvent.text)} />

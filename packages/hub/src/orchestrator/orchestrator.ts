@@ -34,6 +34,7 @@ import { learnedBlock, runRetro } from "../retro/index.js"; // 2.1
 import { MemoryKeeper, type KeeperOptions, type ProposeOptions } from "../memory/keeper.js"; // 2.5
 import { withPersona } from "../persona/index.js"; // 3.2
 import { Resumes, ShadowRunner, barredSet, planNotes, realAgents, type ShadowHost } from "../resume/index.js"; // 2.3
+import { attentionFor, type Attention } from "../attention/index.js"; // 2.7
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -112,6 +113,8 @@ export class Orchestrator {
   resumes: Resumes;
   /** 2.3: shadow copies of real tasks for agents on probation. */
   shadows: ShadowRunner;
+  /** 2.7: the gate every owner-facing alert goes through (pushes up to the daily cap, the rest wait for the evening digest). */
+  attention: Attention;
 
   /** 1.2: the hub's data folder (the API server keeps local-pair.secret there). */
   get dataDir(): string { return this.opts.dataDir; }
@@ -137,6 +140,8 @@ export class Orchestrator {
       beforeMerge: (c) => { if (this.control) restoreTaskContext(c.path); },
     };
     this.governor = opts.governor ?? new CapacityGovernor(store, detectHardware());
+    this.attention = attentionFor(store); // 2.7
+    this.attention.zoneHint = () => this.control?.timezone();
     this.memory = new MemoryKeeper({ store, approvals, control: () => this.control, dataDir: opts.dataDir, ask: (prompt) => this.callJson(prompt, undefined, undefined, "quick") }, opts.memory); // 2.5
     // 2.3: résumés (RESUME.md after graded runs) and shadow tasks for agents on probation.
     this.resumes = new Resumes({ store, control: () => this.control, say: (roomId, text) => { if (roomId) this.post(roomId, SYS, text, "system"); } });
@@ -241,6 +246,7 @@ export class Orchestrator {
     g.state = { ...(g.state ?? { decisions: [] }), nextAction: `Waiting on the owner: ${question}`, waitingOnOwner: question };
     this.store.saveGoal(g); this.writeLedger(g);
     this.post(g.roomId, SYS, `I need a decision from you before this can continue.\n\n${question}\n\nReply here and the work picks back up. Finished work is kept.`, "system");
+    this.attention.notify("decision", { title: "A decision is needed", body: question, roomId: g.roomId, goalId, key: `ask:${goalId}` }); // 2.7
   }
 
   /** Turn planner/recovery/verification task specs into stored tasks. Keys resolve within the batch. */
@@ -349,6 +355,7 @@ export class Orchestrator {
     if (cmd === "/pause") return this.setPaused(roomId, true);
     if (cmd === "/resume") return this.setPaused(roomId, false);
     if (cmd === "/stop") return this.stopRoom(roomId);
+    if (cmd === "/digest") { this.attention.digestNow(roomId); return msg; } // 2.7: the evening digest, now
     if (this.slashCommand(roomId, text)) return msg; // 2.6: /<agent>:<command> args, or an unknown /command
 
     // Direct-message room: the agent answers, nobody else is involved.
@@ -819,6 +826,7 @@ export class Orchestrator {
       g.state.nextAction = "Waiting for the owner to approve the plan.";
       this.store.saveGoal(g);
       this.store.addMessage({ roomId, author: SYS, type: "system", text: planCard(g.contract, tasks, agents, prof), mentions: [], planGoalId: g.id });
+      this.attention.notify("decision", { title: "A plan is ready for approval", body: g.contract.objective, roomId, goalId: g.id, key: `plan:${g.id}:${g.contract.version}` }); // 2.7
       return;
     }
     g.status = "running";
@@ -1024,6 +1032,7 @@ export class Orchestrator {
     await this.shadows.settle(goal.id); // 2.3: practice copies still running are given a moment, then dropped
     if (signal.aborted || this.store.getGoal(goal.id)?.state?.waitingOnOwner) return;
     await this.finish(goal);
+    this.attention.goalEnded(goal.id); // 2.7: counted in today's numbers, listed in the evening digest
     // 2.1 HOOK: the retro for a goal that ended (lessons per agent and task type, playbooks). Never throws; skips superseded goals.
     await runRetro({ store: this.store, control: this.control, callJson: (p, role) => this.callJson(p, undefined, undefined, role), post: (t) => this.log(goal.roomId, t) }, goal.id);
     await this.resumes.goalEnded(goal.id).catch(() => undefined); // 2.3 HOOK: every agent that worked on this goal gets a fresh RESUME.md now
@@ -1418,6 +1427,7 @@ export class Orchestrator {
       task.status = "waiting"; this.addHistory(task, agent.id, "needs_input", report.reason ?? "needs input");
       this.store.saveTask(task); this.floor.take(agent.id, goal.roomId);
       this.post(goal.roomId, SYS, `${agent.name} needs your input on "${task.title}"${report.reason ? `: ${report.reason}` : "."} Reply here and the work continues.`, "system", task.id);
+      this.attention.notify("decision", { title: `${agent.name} needs your input`, body: `"${task.title}"${report.reason ? `: ${report.reason}` : ""}`, roomId: goal.roomId, goalId: goal.id, taskId: task.id, key: `input:${task.id}:${task.attempts}` }); // 2.7
       this.checkpoint(goal.id, { next: `Waiting on owner for "${task.title}".` });
       return;
     }
@@ -1524,6 +1534,7 @@ export class Orchestrator {
       task.status = "failed"; this.store.saveTask(task);
       await this.discardWorktree(goal, task); // 1.4: rejected work is discarded
       this.post(task.roomId, SYS, `"${task.title}" failed after ${task.attempts} attempt${task.attempts > 1 ? "s" : ""}${task.replans ? " and a replan" : ""}.`, "system", task.id);
+      this.attention.notify("failure", { title: `"${task.title}" failed`, body: `After ${task.attempts} attempt${task.attempts > 1 ? "s" : ""}.`, roomId: task.roomId, goalId: goal.id, taskId: task.id, key: `failed:${task.id}` }); // 2.7: waits for the digest; a goal that then needs the owner asks through waitForOwner
       this.checkpoint(goal.id, { decision: `"${task.title}" failed.` });
       return;
     }

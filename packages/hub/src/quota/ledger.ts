@@ -51,6 +51,11 @@ export class QuotaLedger {
     return (this.db.prepare("SELECT * FROM usage WHERE subscription_id=? AND at>? AND at<=? ORDER BY at ASC, id ASC").all(subscriptionId, since, until) as Raw[]).map(row);
   }
 
+  /** 2.7: every run recorded for one task (all attempts and retries), oldest first. */
+  byTask(taskId: string): UsageRow[] {
+    return (this.db.prepare("SELECT * FROM usage WHERE task_id=? ORDER BY at ASC, id ASC").all(taskId) as Raw[]).map(row);
+  }
+
   /** Every rate-limit failure since a time, oldest first. */
   rateLimited(since: number): UsageRow[] {
     return (this.db.prepare("SELECT * FROM usage WHERE rate_limited=1 AND at>=? ORDER BY at ASC, id ASC").all(since) as Raw[]).map(row);
