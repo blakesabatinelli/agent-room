@@ -717,13 +717,47 @@
     try {
       // 1.1: the picked folder goes with the message. A folder the hub refuses comes back as a 400 with its reason, shown as is.
       await api(`/rooms/${st.roomId}/messages`, { method: "POST", body: st.folderId && !text.startsWith("/") ? { text, folderGrantId: st.folderId } : { text } });
-      $("#input").value = ""; grow(); st.folderId = ""; st.folderOpen = false; renderFolderPick();
+      $("#input").value = ""; grow(); renderPalette(); st.folderId = ""; st.folderOpen = false; renderFolderPick();
     }
     catch (e) { if (e.message !== "unpaired") toast(e.message); }
     finally { $("#sendBtn").disabled = false; }
   }
 
   function grow() { const i = $("#input"); i.style.height = "auto"; i.style.height = `${Math.min(i.scrollHeight, innerHeight * 0.4)}px`; }
+
+  // ---------- 2.6 slash commands: "/" at the start of the composer opens a palette, Room commands first, then each agent's skills
+  const pal = { groups: null, at: 0, loading: false, rows: [], idx: 0, off: false };
+  const palQuery = () => { const m = /^\/(\S*)$/.exec($("#input").value); return m && !pal.off ? m[1].toLowerCase() : null; };
+  async function loadCommands() {
+    if (pal.loading || (pal.groups && Date.now() - pal.at < 30000)) return;
+    pal.loading = true;
+    try { const r = await api("/commands"); pal.groups = r.groups; pal.at = Date.now(); } catch { /* the palette just stays closed */ }
+    pal.loading = false;
+    if (palQuery() !== null) renderPalette();
+  }
+  function renderPalette() {
+    const host = $("#palette"), q = palQuery();
+    pal.rows = [];
+    if (q === null || !pal.groups) { host.hidden = true; host.replaceChildren(); return; }
+    const hit = (c) => !q || c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q);
+    const kids = [];
+    for (const g of pal.groups) {
+      const cs = g.commands.filter(hit); if (!cs.length) continue;
+      kids.push(h("div", { class: "pgroup", text: g.label }));
+      for (const c of cs) {
+        const i = pal.rows.push(c) - 1;
+        kids.push(h("button", { type: "button", class: `prow${i === pal.idx ? " on" : ""}`, role: "option", "aria-selected": i === pal.idx ? "true" : "false", "data-cmd": c.name },
+          h("span", { class: "pname", text: `/${c.name}${c.argsHint ? ` ${c.argsHint}` : ""}` }), h("span", { class: "pdesc", text: c.description })));
+      }
+    }
+    if (!pal.rows.length) kids.push(h("div", { class: "pnone", text: "No commands match." }));
+    if (pal.idx >= pal.rows.length) pal.idx = 0;
+    host.replaceChildren(...kids); host.hidden = false;
+    host.querySelector(".prow.on")?.scrollIntoView({ block: "nearest" });
+  }
+  function chooseCommand(name) {
+    const i = $("#input"); i.value = `/${name} `; pal.idx = 0; renderPalette(); i.focus(); grow();
+  }
 
   document.addEventListener("click", async (e) => {
     const t = e.target.closest("button"); if (!t) return;
@@ -780,6 +814,7 @@
         if (st.view === "diff") go("approvals"); else { renderBadge(); renderApprovals(); }
         return;
       }
+      if (t.dataset.cmd) { chooseCommand(t.dataset.cmd); return; }
       if (t.dataset.steer) {
         if (t.dataset.steer === "/stop") { if (confirm("Stop all work in this room?")) await sendMessage("/stop"); return; }
         const i = $("#input"); i.value = t.dataset.steer + i.value.replace(/^\/(redirect|replan)\s*/, ""); i.focus(); grow();
@@ -850,7 +885,16 @@
   $("#approvalsBtn").onclick = () => go("approvals");
   $("#send").onsubmit = (e) => { e.preventDefault(); void sendMessage($("#input").value); };
   $("#input").addEventListener("input", grow);
+  $("#input").addEventListener("input", () => { pal.off = false; pal.idx = 0; if (palQuery() !== null) void loadCommands(); renderPalette(); });
+  $("#palette").addEventListener("mousedown", (e) => e.preventDefault()); // tapping a row keeps the cursor in the box
   $("#input").addEventListener("keydown", (e) => {
+    if (pal.rows.length && !$("#palette").hidden) {
+      // Palette open: up/down move, Enter or Tab pick, Escape closes. A command typed out in full still sends on Enter.
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); pal.idx = (pal.idx + (e.key === "ArrowDown" ? 1 : pal.rows.length - 1)) % pal.rows.length; renderPalette(); return; }
+      if (e.key === "Escape") { e.preventDefault(); pal.off = true; renderPalette(); return; }
+      const sel = pal.rows[pal.idx];
+      if ((e.key === "Enter" && !e.shiftKey && sel.name !== palQuery()) || e.key === "Tab") { e.preventDefault(); chooseCommand(sel.name); return; }
+    }
     // On a keyboard, Enter sends and Shift+Enter makes a new line. On a phone, Return is a new line; use the send button.
     if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); void sendMessage($("#input").value); }
   });

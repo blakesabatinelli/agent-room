@@ -1,6 +1,6 @@
 import type {
-  AgentConfig, AgentScore, VersionScoreRow, ModelShift, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
-  Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal, JuryCalibration,
+  AgentConfig, AgentScore, VersionScoreRow, ModelShift, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry,
+  MemoryProposal, Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal, JuryCalibration, CommandsResponse,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -112,6 +112,8 @@ export class Hub {
   controlHistory = (path?: string) => this.req<ControlCommit[]>(`/control/history${path ? `?path=${encodeURIComponent(path)}` : ""}`);
   controlRevert = (commit: string) => this.send<{ ok: boolean; commit: string; files: string[] }>("POST", `/control/revert/${commit}`);
   controlLint = () => this.send<{ blocks: ControlNotice[]; flags: ControlNotice[] }>("POST", "/control/lint");
+  // 2.6 the / palette: room commands, then each agent's skills, commands and prompts
+  commands = () => this.req<CommandsResponse>("/commands");
   // 1.3 agent discovery
   discovery = () => this.req<DiscoveryState>("/discovery");
   runDiscovery = () => this.send<DiscoveryState>("POST", "/discovery/run");

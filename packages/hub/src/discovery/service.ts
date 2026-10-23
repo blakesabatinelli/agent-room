@@ -3,6 +3,7 @@ import type { DiscoveryResult, DiscoverySettings, DiscoveryState } from "@agent-
 import type { ControlFolder } from "../control/folder.js";
 import type { Store } from "../db/store.js";
 import { applyDiscovery } from "./apply.js";
+import { refreshCommandIndex } from "../commands/index.js"; // 2.6
 import { connectHermes, hermesConfiguredKey, installHermesSkill, type HermesConnect } from "./connect.js";
 import { defaultEnv, discover, type DiscoveryEnv } from "./index.js";
 import { McpTokens } from "../mcp/tokens.js";
@@ -64,6 +65,7 @@ export class DiscoveryService {
     const hermes = this.settings().connectAutomatically ? this.autoConnect(env, found) : undefined;
     const result: DiscoveryResult = { ...found, applied: { ...applied, ...(hermes ? { hermes: hermesSummary(hermes) } : {}) } };
     this.store.setKV("discovery_last", result);
+    try { refreshCommandIndex(this.store, result, env); } catch { /* 2.6: the command index is a convenience; discovery never fails over it */ }
     this.store.audit("hub", "discovery.ran", `${result.summary}${applied.created.length ? `; added ${applied.created.join(", ")}` : ""}`);
     return result;
   }
