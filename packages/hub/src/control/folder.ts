@@ -31,6 +31,8 @@ export interface ControlOptions {
   watch?: boolean;
   /** Today as YYYY-MM-DD (for expiry checks). */
   today?: () => string;
+  /** 4.2: the time, in epoch ms, that a permission lease's expiry is judged against. Tests swap it for a fake clock. */
+  now?: () => number;
   log?: (message: string) => void;
 }
 
@@ -71,6 +73,7 @@ export class ControlFolder {
   }
 
   private today() { return this.opts.today?.() ?? todayString(); }
+  private nowMs() { return this.opts.now?.() ?? Date.now(); } // 4.2
   private log(m: string) { (this.opts.log ?? ((x: string) => console.warn(`[control] ${x}`)))(m); }
 
   /** Run jobs one at a time so file writes, commits and loads never interleave. */
@@ -179,7 +182,7 @@ export class ControlFolder {
 
   /** Lint what is on disk right now. */
   lint() {
-    const a = analyzeFolder(this.root, { today: this.today() });
+    const a = analyzeFolder(this.root, { today: this.today(), now: this.nowMs() });
     return { blocks: a.blocks, flags: a.flags };
   }
 
@@ -334,7 +337,7 @@ export class ControlFolder {
   // ---------------------------------------------------------------- loading (file -> app)
 
   private async loadNow(o: { initial?: boolean; emit?: boolean; changed?: string[]; analysis?: Analysis } = {}) {
-    const analysis = o.analysis ?? analyzeFolder(this.root, { today: this.today() });
+    const analysis = o.analysis ?? analyzeFolder(this.root, { today: this.today(), now: this.nowMs() });
     for (const [rel, r] of analysis.files) if (r.fm) this.good.set(rel, r);
     for (const rel of [...this.good.keys()]) if (!analysis.files.has(rel)) this.good.delete(rel);
 
@@ -441,7 +444,7 @@ export class ControlFolder {
     const now = this.hashAll();
     const changed = [...new Set([...now.keys(), ...this.seen.keys()])].filter((p) => now.get(p) !== this.seen.get(p)).sort();
     if (!changed.length) return;
-    const analysis = analyzeFolder(this.root, { today: this.today() });
+    const analysis = analyzeFolder(this.root, { today: this.today(), now: this.nowMs() });
     for (const rel of changed) {
       const op = !this.seen.has(rel) ? "Add" : !now.has(rel) ? "Delete" : "Edit";
       const problem = analysis.files.get(rel)?.blocks[0];

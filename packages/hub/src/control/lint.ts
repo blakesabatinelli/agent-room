@@ -4,7 +4,8 @@ import type { ControlNotice } from "@agent-room/shared";
 import { contradicts, expired, parseFacts } from "./facts.js";
 import { checkFrontMatter, parseDoc, type ParsedDoc } from "./parse.js";
 import { agentLevel, looser, platformLevel, policyLevel, scopesOverlap } from "./permissions.js";
-import { CAPS, KNOWN_NAMES, classify, todayString, type Fm, type FileMeta, type Kind } from "./schema.js";
+import { CAPS, KNOWN_NAMES, classify, expiryMs, isRealInstant, todayString, type Fm, type FileMeta, type Kind } from "./schema.js";
+import { parseMatch } from "../policy/match.js"; // 4.2
 import { parseCron } from "../rooms/cron.js"; // 4.3
 import { validZone } from "../rooms/zone.js"; // 4.3
 
@@ -36,7 +37,7 @@ export interface Analysis {
   flags: Issue[];
 }
 
-export interface LintOptions { today?: string }
+export interface LintOptions { today?: string; /** 4.2: the moment a lease is judged against (epoch ms). Default: the clock. */ now?: number }
 
 export function walk(root: string, dir = ""): string[] {
   let names: import("node:fs").Dirent[] = [];
@@ -75,6 +76,7 @@ export function checkFile(rel: string, meta: FileMeta, text: string): FileResult
 /** Read every file in the folder and report what is wrong with each. Never throws on bad content. */
 export function analyzeFolder(root: string, opts: LintOptions = {}): Analysis {
   const today = opts.today ?? todayString();
+  const nowMs = opts.now ?? Date.now();
   const files = new Map<string, FileResult>();
   const agentIds = new Set<string>();
   const loose: Issue[] = []; // issues for files that are not control files
@@ -119,7 +121,13 @@ export function analyzeFolder(root: string, opts: LintOptions = {}): Analysis {
   if (policyFile && policy) {
     const rules = policy.rules;
     rules.forEach((r, i) => {
-      if (r.expires && r.expires < today) policyFile.flags.push(flag("POLICY.md", `rule "${r.id}" expired on ${r.expires}; it no longer applies`, policyFile.parsed?.lineOf(["rules", i, "expires"])));
+      // 4.2: a lease (a rule with a UTC moment) is past its time when that moment has gone; a dated rule is good through its day.
+      const lease = !!r.expires && isRealInstant(r.expires);
+      if (r.expires && (lease ? nowMs >= expiryMs(r.expires) : r.expires < today)) {
+        const what = r.id.startsWith("lease-") || lease ? "lease" : "rule";
+        policyFile.flags.push(flag("POLICY.md", `${what} "${r.id}" expired ${lease ? `at ${r.expires.replace("T", " ").replace(/(:\d\d)?(\.\d+)?Z$/, " UTC")}` : `on ${r.expires}`}; it no longer applies`, policyFile.parsed?.lineOf(["rules", i, "expires"])));
+      }
+      if (r.match !== "*" && !parseMatch(r.match).ok) policyFile.flags.push(flag("POLICY.md", `rule "${r.id}" has a match the hub can't read ("${r.match}"), so it never applies. Use * or words like action:read path:/Board`, policyFile.parsed?.lineOf(["rules", i, "match"])));
     });
     for (let i = 0; i < rules.length; i++) for (let j = i + 1; j < rules.length; j++) {
       const a = rules[i], b = rules[j];

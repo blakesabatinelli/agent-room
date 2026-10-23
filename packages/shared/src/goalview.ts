@@ -136,6 +136,7 @@ export const PALETTE_SCREENS: { id: string; title: string; mac?: string; phone?:
   { id: "resumes", title: "Résumés", mac: "resumes", phone: "resumes", keywords: "resume probation strengths" },
   { id: "office", title: "Office", mac: "office", keywords: "3d desks live agents" },
   { id: "memory", title: "Memory", mac: "memory", keywords: "remember proposals" },
+  { id: "policy", title: "Approval rules", mac: "policy", phone: "policy", keywords: "policy rules lease allow learned permission expire" },
   { id: "agents", title: "Agents and connections", mac: "agents", phone: "personas", keywords: "connect personas people" },
 ];
 

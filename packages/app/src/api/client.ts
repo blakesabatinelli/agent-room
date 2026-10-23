@@ -1,8 +1,8 @@
 import type {
   AgentConfig, AgentScore, VersionScoreRow, ModelShift, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
   Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task,
-  WriteProposal, JuryCalibration, CommandsResponse, FirstPassMetrics, MemoryExportInfo, PersonaInput, PersonaTemplate, PersonaView, AgentResume,
-  ProbationStatus, Scorecard, ReturnLedger, AttentionState, RoomDefinition, RoomDefinitionInput, ForkView, ForkSideId, NightShiftState,
+  WriteProposal, JuryCalibration, CommandsResponse, FirstPassMetrics, MemoryExportInfo, PersonaInput, PersonaTemplate, PersonaView, AgentResume, ProbationStatus, Scorecard,
+  ReturnLedger, AttentionState, RoomDefinition, RoomDefinitionInput, ForkView, ForkSideId, NightShiftState, PolicyState, PolicyRulePatch, LeaseRequest, LeaseView,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -128,6 +128,17 @@ export class Hub {
   controlHistory = (path?: string) => this.req<ControlCommit[]>(`/control/history${path ? `?path=${encodeURIComponent(path)}` : ""}`);
   controlRevert = (commit: string) => this.send<{ ok: boolean; commit: string; files: string[] }>("POST", `/control/revert/${commit}`);
   controlLint = () => this.send<{ blocks: ControlNotice[]; flags: ControlNotice[] }>("POST", "/control/lint");
+  // 4.2 learned approval policy and leases: POLICY.md as plain rules, accept or edit or delete a proposal, and permissions that end by themselves
+  policy = () => this.req<PolicyState>("/policy");
+  acceptRule = (id: string) => this.send("POST", `/policy/rules/${encodeURIComponent(id)}/accept`, {});
+  editRule = (id: string, patch: PolicyRulePatch) => this.send("PATCH", `/policy/rules/${encodeURIComponent(id)}`, patch);
+  deleteRule = (id: string) => this.send("DELETE", `/policy/rules/${encodeURIComponent(id)}`);
+  openPolicyFile = () => this.send<{ ok: boolean; path: string }>("POST", "/policy/open", {});
+  leases = () => this.req<LeaseView[]>("/leases");
+  grantLease = (l: LeaseRequest) => this.send<{ lease: LeaseView; notes: string[] }>("POST", "/leases", l);
+  revokeLease = (id: string) => this.send("DELETE", `/leases/${encodeURIComponent(id)}`);
+  /** "Allow for 30 minutes" / "Allow for this goal" on an approval card: approves this request and grants the lease. */
+  leaseApproval = (id: string, how: { minutes: number } | { forGoal: true }) => this.send<{ lease: LeaseView; notes: string[] }>("POST", `/approvals/${id}/lease`, how);
   // 3.2 personas: SOUL.md per agent (or the agent's record without a control folder), and the starters. A refused save throws the linter's message.
   persona = (agentId: string) => this.req<PersonaView>(`/agents/${agentId}/persona`);
   savePersona = (agentId: string, input: PersonaInput) => this.send<PersonaView>("PUT", `/agents/${agentId}/persona`, input);

@@ -40,6 +40,7 @@ import { attentionFor, type Attention } from "../attention/index.js"; // 2.7
 import { Subagents, subagentSettings, type SubagentHost } from "../subagents/index.js"; // 3.3
 import { RoomRules, StandingRooms } from "../rooms/index.js"; // 4.3
 import { Forks, type ForkHost } from "../fork/index.js"; // 4.4
+import { PolicyEngine } from "../policy/index.js"; // 4.2
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -130,6 +131,8 @@ export class Orchestrator {
   standing: StandingRooms;
   /** 4.4: forks: two rosters on one goal in two lanes, compared blind, one merged. */
   forks: Forks;
+  /** 4.2: the owner's learned and written approval rules (POLICY.md) and permission leases. requestApproval asks it once. */
+  policy: PolicyEngine;
 
   /** 1.2: the hub's data folder (the API server keeps local-pair.secret there). */
   get dataDir(): string { return this.opts.dataDir; }
@@ -165,6 +168,8 @@ export class Orchestrator {
     this.nightshift = new NightShift({ store, shadows: this.shadows, host: this.nightHost() }); // 4.5
     this.subagents = new Subagents(this.subagentHost()); // 3.3
     this.forks = new Forks(this.forkHost()); // 4.4
+    // 4.2: started by main.ts with orch.policy.start() (the lease sweep and the daily learning).
+    this.policy = new PolicyEngine({ store, approvals, control: () => this.control, rooms: this.rooms, attention: this.attention });
     // 4.3: the calendar trigger for standing rooms (started by main.ts with orch.standing.start()).
     this.standing = new StandingRooms({
       store, control: () => this.control, attention: this.attention,
@@ -1847,6 +1852,9 @@ export class Orchestrator {
       this.store.audit(grant.agentId, "room.denied", `${tool}: ${action}`.slice(0, 200));
       return Promise.resolve({ id: id("apr"), ...p, detail: "", status: "rejected", createdAt: now(), decidedAt: now() });
     }
+    // 4.2: the owner's accepted rules and leases (policy/): deny refuses, allow auto-approves, ask always shows the card. Never wider than the layers above.
+    const viaPolicy = this.policy.gate(grant, a, p);
+    if (viaPolicy) return viaPolicy;
     // "Run without asking" only counts while the tool itself is switched on.
     if (level !== "ask" && a?.tools[tool] && a.autoApprove?.[tool]) return Promise.resolve(this.approvals.auto(p));
     return this.approvals.request(p);

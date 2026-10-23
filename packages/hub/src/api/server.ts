@@ -34,6 +34,7 @@ import { SignInManager } from "../install/signin.js";
 import { registerInstallRoutes } from "../install/routes.js";
 import { registerJuryRoutes } from "../jury/routes.js"; // 2.2
 import { registerRoomRoutes } from "../rooms/routes.js"; // 4.3
+import { registerPolicyRoutes } from "../policy/routes.js"; // 4.2
 import { registerPersonaRoutes } from "../persona/routes.js"; // 3.2
 import { registerResumeRoutes } from "../resume/routes.js"; // 2.3
 import { registerReportRoutes } from "../report/routes.js"; // 2.7
@@ -694,6 +695,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   registerOfficeRoutes(app, store); // 3.4: GET /office?roomId=
   registerDistributionRoutes(app, store, { dataDir: orch.dataDir, ...distribution }); // 4.7: GET /version, /privacy, /telemetry/preview, /crashes
   registerForkRoutes(app, store, () => orch.forks); // 4.4: POST /goals/fork, GET /forks, GET /forks/:id, POST /forks/:id/merge
+  registerPolicyRoutes(app, { policy: () => orch.policy, store, approvals }); // 4.2: GET /policy, rules accept/edit/delete, GET and POST /leases, POST /approvals/:id/lease
   app.put("/settings", async (req) => {
     const s = z.object({
       orchestratorAgentId: z.string(), judgeRotation: z.array(z.string()),
