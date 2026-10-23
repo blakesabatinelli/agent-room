@@ -14,6 +14,7 @@ Tests: 67 to 123 in the hub, plus 12 in the new relay package. `pnpm test` now r
 - **0.4:** document standard. Markdown with front matter in `~/Agent Room/Library/<room>/<goal>/YYYY-MM-DD-slug.md`, indexed by the hub; `save_document` and `list_documents` MCP tools; `GET /documents`. Spec: `docs/DOCUMENTS.md`.
 - **0.5:** failure tags. Every failed or sent-back attempt is tagged spec, misalignment, verification or other: on the task, in the audit log (`task.failure`) and in the routing export.
 - **0.6:** `CONTROL.md` specification drafted for owner approval.
+- **Plan changes:** Tailscale is a product requirement (D9, owner). K5 withdrawn; 1.2 is now "remote access over Tailscale" with Funnel for `/mcp` only; the relay package is shelved. Hermes and Muse now have acceptance criteria in 1.3 (discovery, MCP usage reporting into the routing log) and 1.6 (Hermes's MiniMax fallback, local models as the free tier).
 
 ## 2026-10-22.16 (baseline)
 

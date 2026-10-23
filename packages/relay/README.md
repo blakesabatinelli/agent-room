@@ -1,5 +1,7 @@
 # Agent Room relay (spike 0.3 prototype)
 
+> **Shelved (Oct 23, 2026, decision D9).** Tailscale is a product requirement, so the hub does not need a hosted relay. This package is kept as a tested fallback; it is not on the roadmap.
+
 An outbound-only relay so a cloud agent can reach a hub's MCP endpoint without anything on the Mac listening on the internet.
 
 ```

@@ -9,7 +9,7 @@ A local-first room where agents from different providers work together. You give
 | `packages/hub` | Node/TypeScript daemon for your Mac: orchestrator, room, SQLite store, CLI agent runners, REST + WebSocket API, MCP server |
 | `packages/app` | React Native app (macOS + iOS) for the room, approvals, agents, permissions, memory and settings |
 | `packages/shared` | Types shared by both |
-| `packages/relay` | Outbound-only relay (spike 0.3): lets cloud agents reach the hub's MCP endpoint with no inbound port on the Mac |
+| `packages/relay` | Shelved (decision D9): an outbound-only relay built in spike 0.3. Tailscale is required instead |
 
 ## Get started
 
@@ -19,7 +19,7 @@ A local-first room where agents from different providers work together. You give
 
 The app starts the hub on your Mac by itself and connects to it with no codes. A short welcome screen then lets you sign in Claude and Codex with your subscriptions (it opens their own sign-in in Terminal), switch on practice agents if you'd rather try it first, show the code for your phone, and keep the hub running when the app is closed.
 
-**Phone:** no install needed. With Tailscale on the phone, open the Tailscale address from the Mac (Settings > Pair your phone) in Safari, tap Share > Add to Home Screen, open Agent Room from the home screen, and enter the pairing code. Pair from the home-screen icon, not Safari: iOS keeps their logins separate. The native iPhone app in `packages/app/ios` still works if you'd rather build it in Xcode.
+**Phone:** Tailscale is required on the Mac and the phone. With Tailscale on both, open the Tailscale address from the Mac (Settings > Pair your phone) in Safari, tap Share > Add to Home Screen, open Agent Room from the home screen, and enter the pairing code. Pair from the home-screen icon, not Safari: iOS keeps their logins separate. The native iPhone app in `packages/app/ios` still works if you'd rather build it in Xcode.
 
 **Without the app:** `pnpm install && pnpm hub` runs the hub on its own and prints a pairing code; `AGENT_ROOM_DEMO=1 pnpm hub` uses mock agents. If something goes wrong, the hub's log is at `~/.agent-room/hub.log`.
 
@@ -47,7 +47,7 @@ The app starts the hub on your Mac by itself and connects to it with no codes. A
 
 **Documents.** Agents save documents with the `save_document` MCP tool. Each lands as Markdown with front matter in `~/Agent Room/Library/<room>/<goal>/YYYY-MM-DD-slug.md` and is indexed (`GET /documents`). See `docs/DOCUMENTS.md`.
 
-**Local files (spike).** The owner grants folders per room and per agent (`/folder-grants`); agents read through `read_file` and write only by proposing a diff (`propose_file_write`) that the owner approves. Cloud agents reach the same tools through the relay. See `docs/spikes/0.3-file-access.md`.
+**Local files (spike).** The owner grants folders per room and per agent (`/folder-grants`); agents read through `read_file` and write only by proposing a diff (`propose_file_write`) that the owner approves. Agents on other tailnet devices (Muse) reach the same tools over Tailscale; vendor-cloud agents can reach `/mcp` only through Tailscale Funnel (planned in 1.2). See `docs/spikes/0.3-file-access.md`.
 
 **MCP.** The hub serves the room at `POST /mcp` (Streamable HTTP). Tools: `read_room`, `post_message`, `read_memory`, `propose_memory`, `list_tasks`, `update_task`, `request_approval`. CLI agents get a short-lived token per run. For Claude Desktop or another MCP app, use Settings > Let MCP apps join the room on the Mac.
 

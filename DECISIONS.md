@@ -1,11 +1,11 @@
 # Decisions
 
 One entry per decision: date, options considered, the choice, and why. Newest first.
-IDs D1-D8 match the decisions register in `PLAN.md` section 10. Status is **Open**, **Proposed** (build agent's recommendation, waiting on the owner) or **Decided**.
+IDs D1-D9 match the decisions register in `PLAN.md` section 10. Status is **Open**, **Proposed** (build agent's recommendation, waiting on the owner) or **Decided**.
 
 | ID | Decision | Due | Status |
 |---|---|---|---|
-| D1 | How agents get local file access | End of phase 0 | Proposed (see below and `docs/spikes/0.3-file-access.md`) |
+| D1 | How agents get local file access | End of phase 0 | Proposed, revised for D9 (see below) |
 | D2 | Document source of truth and format | Phase 0 | Proposed |
 | D3 | Where control files live | Phase 0 | Proposed |
 | D4 | Distribution channel | Start of phase 1 | Open |
@@ -13,16 +13,25 @@ IDs D1-D8 match the decisions register in `PLAN.md` section 10. Status is **Open
 | D6 | Business model | End of phase 2 | Open |
 | D7 | 3D technology | Start of phase 3 | Open |
 | D8 | Subagent limits | Start of phase 3 | Open |
-| K5 | Relay prototype hosting | Week of Oct 26 | Proposed |
+| D9 | Remote access: Tailscale required | Phase 0 | **Decided** (owner, Oct 23) |
+| K5 | Relay prototype hosting | Week of Oct 26 | Withdrawn (D9) |
 | B1 | Version control host and CI | Week of Oct 26 | Decided (build), remote pending owner |
 
 ---
 
+## D9: Remote access (Decided by owner, 2026-10-23)
+
+- **Options:** a hosted outbound relay (the spike's `packages/relay`, on Fly.io or similar); Tailscale as a requirement.
+- **Decision:** Tailscale is a product requirement. The phone web app, agents on other devices (Muse joins this way today) and the hub all sit on the user's tailnet. Vendor-cloud agents that can only call a public HTTPS URL (claude.ai or ChatGPT connectors) reach the hub's `/mcp` path, and nothing else, through Tailscale Funnel (`--set-path`), which the owner switches on.
+- **Why:** it's how the owner's setup already works, the web app depends on it, nothing on the Mac is exposed to the internet, and there is no relay service to host, pay for or secure. The spike's open end-to-end-encryption problem (TLS ending at a third-party relay) goes away.
+- **Consequences:** K5 is withdrawn. Item 1.2 becomes "remote access over Tailscale" (detect, onboard, pair, Funnel for `/mcp` only). The relay code stays in the repo, shelved, as a fallback if Tailscale ever stops fitting. 1.7's 10-minute install test includes Tailscale sign-in. A relay subscription is off the table for D6.
+- **Watch:** Funnel requests are proxied to the hub from localhost, so they pass the hub's interface check; only `/mcp` may be funneled, and `/mcp` must keep authenticating every call itself.
+
 ## D1: How agents get local file access (Proposed, 2026-10-23)
 
 - **Options:** (A) relayed MCP file tools through the hub; (B) worktree sync to each vendor's cloud sandbox; (C) each vendor's own remote features.
-- **Proposal:** A as the default for every agent; B only for heavy coding in a vendor cloud sandbox (push the task worktree as a branch, merge the result after approval); C not used as a foundation.
-- **Why:** A is the only option that covers every vendor and every kind of folder while keeping the Room's own grants, approvals and audit. Cloud vendors (claude.ai and ChatGPT connectors, the Responses API) all need a public HTTPS MCP URL, which the relay provides with no inbound port on the Mac. No vendor bridges to other vendors. The prototype works end to end and passed an independent security review as a spike.
+- **Proposal (revised for D9):** A as the default for every agent, reached over Tailscale (Funnel for vendor-cloud agents) instead of a hosted relay; B only for heavy coding in a vendor cloud sandbox (push the task worktree as a branch, merge the result after approval); C not used as a foundation.
+- **Why:** A is the only option that covers every vendor and every kind of folder while keeping the Room's own grants, approvals and audit. Cloud vendors (claude.ai and ChatGPT connectors, the Responses API) all need a public HTTPS MCP URL, which Funnel provides for `/mcp` only. No vendor bridges to other vendors. The prototype works end to end and passed an independent security review as a spike.
 - **Evidence:** `docs/spikes/0.3-file-access.md`; test "I1: an agent that reaches the hub only through the relay ..." in `packages/hub/test/relay.test.ts`.
 - **Owner to confirm.** Cross-vendor review of the file-access code still owed before 1.1 merges.
 
@@ -40,12 +49,12 @@ IDs D1-D8 match the decisions register in `PLAN.md` section 10. Status is **Open
 - **Why:** the owner can open, edit, diff and back up the rules in any editor, and Finder shows them; "the user owns the record" (`PRODUCT.md` 11). Spec: `CONTROL.md`.
 - **Owner to confirm,** together with the `CONTROL.md` review (item 0.6).
 
-## K5: Relay prototype hosting (Proposed, 2026-10-23)
+## K5: Relay prototype hosting (Withdrawn 2026-10-23, superseded by D9)
 
 - **Options:** Fly.io; Cloudflare Workers + Durable Objects; Railway; Render; Google Cloud Run.
 - **Proposal:** Fly.io, one Machine in `ord` or `dfw`, auto-stop off, 512 MB (about $4/month list). Fallback Railway.
 - **Why:** cheapest always-on option that keeps a long-lived hub WebSocket; Render Free sleeps, Cloud Run caps sockets at 60 minutes and costs about $43/month always-on; Durable Objects is the right answer at scale but a rewrite. Soak-test SSE and idle WebSockets first.
-- **Owner to approve** the account and spend.
+- **Withdrawn:** Tailscale is required (D9), so no relay host is needed. Kept here for the record if the shelved relay is ever revived.
 
 ## B1: Version control and CI (Decided by build, 2026-10-23; remote pending owner)
 

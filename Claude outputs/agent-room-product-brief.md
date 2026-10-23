@@ -53,7 +53,7 @@ So Agent Room can't win as "a crowd of agents." It wins on things no single vend
 |---|---|---|
 | **Operators and executives** | Goal-shaped work (plans, decks, analyses, inbox) that spans email, chat, CRM and documents, so trust and approvals matter | **Strongest and first.** Every multi-vendor tool is built for coders; nobody serves this group |
 | **Builder power users with 2+ subscriptions** | Being the router, hitting rate limits, guessing which agent fits which job | **Strong**, but crowded with free tools (Conductor, Happy, Claude Squad) |
-| **Small teams of 5 to 50** | Everyone has their own agents and context; nothing is shared | **Later.** Needs multiple people per room and a hosted relay |
+| **Small teams of 5 to 50** | Everyone has their own agents and context; nothing is shared | **Later.** Needs multiple people per room and a shared tailnet |
 | **Enterprise** | Governance, identity, audit | **Avoid.** Microsoft Agent 365, OpenAI Frontier and Gemini Enterprise own it. Publish an A2A agent card so their agents can join instead |
 
 ---
@@ -93,9 +93,9 @@ Without reading and writing the user's files, the Room is a chat window. This is
 
 - **The hub is the only thing that touches the disk.** Agents get file access through the hub, scoped to folders the user grants per room and per agent, with read and write granted separately.
 - **Local agents** run inside a per-task worktree within the granted folders, with their own CLI sandbox limited to that path.
-- **Cloud agents** reach the hub's file tools over MCP through an outbound-only secure relay, so nothing on the Mac is exposed to the internet. Writes arrive as diffs that the hub applies under the user's approval rules. Every operation goes to the audit log.
+- **Agents on other devices or in a vendor's cloud** reach the hub's file tools over MCP through Tailscale. Agents on the user's tailnet (Muse, the phone) connect directly. Vendor-cloud agents that need a public HTTPS URL (claude.ai or ChatGPT connectors) reach only the hub's `/mcp` path through Tailscale Funnel, which the owner switches on. Writes arrive as diffs that the hub applies under the user's approval rules. Every operation goes to the audit log.
 - **For heavy cloud coding**, the alternative is to sync a worktree to the agent's cloud sandbox and apply the result back as a diff.
-- **One relay does two jobs.** The same relay that gives cloud agents file access also gives the phone access from anywhere, replacing the Tailscale requirement for general users.
+- **Tailscale is required.** The same tailnet gives the phone web app access from anywhere and lets agents on other devices join, with no port opened to the internet and no hosted relay to run. The app checks for Tailscale and walks the user through installing and signing in.
 
 The spike compares relayed MCP file tools, worktree sync, and each vendor's own remote-connect features on security, latency, vendor coverage and offline behavior.
 
@@ -277,7 +277,7 @@ What makes it its own:
 
 - **Hardware:** every Apple silicon Mac, from 8 GB machines to Studios. The hub detects its machine's memory and concurrency, schedules within them, and sends overflow work to cloud agents.
 - **Agents:** local and cloud agents from any provider, on subscriptions, API keys or local models.
-- **Access:** a native Mac app, plus phone access from anywhere.
+- **Access:** a native Mac app, plus the phone web app from anywhere. **Tailscale is required** on the Mac and the phone.
 
 **Out of scope for now**
 
@@ -319,7 +319,7 @@ Each phase is ordered by dependency. **[New]** marks items from the latest round
 |---|---|---|---|
 | 0.1 | Fix the indented "Run shell commands" setting **[New]** | Visible polish bug; a two-line fix | XS |
 | 0.2 | Log every routing decision with pick probability, model version, cost and outcome **[R]** | Unlocks replay, scorecards and any future index. History you don't log is gone | S |
-| 0.3 | **Spike: local file access for local and cloud agents [New]** | Without it the product doesn't work. Decides the relay design | M |
+| 0.3 | **Spike: local file access for local and cloud agents [New]** | Without it the product doesn't work. Decides how remote agents reach files | M |
 | 0.4 | Decide and implement the document standard (section 7.2) **[New]** | Every later feature writes documents; settle the format once | S |
 | 0.6 | Define the control file layout, layers and ownership (section 7.1) **[New]** | Personas, permissions, memory, lessons and scope all live in these files; settle the shape before building on it | S |
 | 0.5 | Tag every failure by category (spec, misalignment, verification) **[R]** | Shows which failure modes still bite | S |
@@ -329,7 +329,7 @@ Each phase is ordered by dependency. **[New]** marks items from the latest round
 | # | Item | Why | Size |
 |---|---|---|---|
 | 1.1 | Local file access, built from the spike: folder grants, hub file tools, diffs for writes, audit **[New]** | The core requirement | L |
-| 1.2 | Outbound relay for cloud agents and phone access from anywhere **[New]** | One piece of infrastructure, two jobs; removes Tailscale for general users | M |
+| 1.2 | Remote access over Tailscale: phone web app, agents on other devices, Funnel for vendor-cloud agents **[New]** | Tailscale is a requirement; no hosted relay to run | M |
 | 1.3 | Agent discovery and capability map, with routing by capability **[New]** | Delivers the tagline on first launch; agents bring their own access | M |
 | 1.4 | A worktree per task **[R]** | Table stakes elsewhere. Stops agents overwriting each other; needed for subagents and forks | M |
 | 1.5 | Scheduling that adapts to the hardware, with overflow to cloud agents | 8 GB to Studio on one build | M |
@@ -379,12 +379,13 @@ Each phase is ordered by dependency. **[New]** marks items from the latest round
 
 | Decision | Options | Leaning |
 |---|---|---|
-| How agents get local file access | Relayed MCP file tools; worktree sync to cloud sandboxes; each vendor's own remote features | Relayed MCP as the default, worktree sync for heavy cloud coding. Decided by spike 0.3 |
+| How agents get local file access | Hub MCP file tools; worktree sync to cloud sandboxes; each vendor's own remote features | Hub MCP file tools over Tailscale (Funnel for vendor clouds) as the default, worktree sync for heavy cloud coding. Spike 0.3 done; owner to confirm |
+| Remote access | Hosted relay; Tailscale | **Decided: Tailscale is required** (Oct 23, 2026) |
 | Where control files live | A visible `~/Agent Room/` folder; the hidden `~/.agent-room` folder | Visible. Users are meant to read and edit them |
 | Document source of truth | Local Markdown; Google Drive | Local Markdown, with Drive as a synced location |
 | Distribution channel | Mac App Store; Developer ID outside the store | Developer ID. The App Store sandbox blocks spawning the user's CLIs and broad file access |
 | Provider terms posture | Subscriptions only; API keys only; both | Both. Each CLI signs itself in and the Room never touches credentials. API keys are the clean default for distribution |
-| Business model | Open-source hub with a paid relay; paid app; Agent Index | Open. A relay subscription fits naturally once 1.2 exists |
+| Business model | Open-source hub; paid app; Agent Index | Open |
 | 3D technology | react-three-fiber in a web view; SceneKit or RealityKit | Open. Decide when 3.4 starts |
 | Subagent limits | Spawn budget, depth, write rules | Start strict (depth 2, writers need their own worktree), then loosen with data |
 
@@ -398,7 +399,7 @@ Each phase is ordered by dependency. **[New]** marks items from the latest round
 | **Token burn** | Multi-agent runs use about 15x the tokens of chat. Read-only helpers work; parallel writers still fail (Cognition, Apr 2026) | One agent per task by default; subagent budgets; writers isolated |
 | **Coordination failure** | 42% spec, 37% misalignment, 21% verification (MAST) | The existing "Done means" list, decision passing and verify rounds; tag failures to track them |
 | **Hardware range** | 8 GB machines can't run local models alongside the hub and several CLIs | Adaptive scheduling, cloud overflow, 2D fallback for the office |
-| **Security of file access** | Cloud agents touching local files is the largest attack surface in the product | Outbound-only relay, granted folders, diffs for writes, approvals, full audit |
+| **Security of file access** | Cloud agents touching local files is the largest attack surface in the product | Tailscale only (Funnel limited to `/mcp` and off by default), granted folders, diffs for writes, approvals, full audit |
 | **Vendor churn** | Multiple tools in this space shut down in 2026 | Every record exportable as plain files the user owns |
 
 **Kill criteria** (proposed thresholds):

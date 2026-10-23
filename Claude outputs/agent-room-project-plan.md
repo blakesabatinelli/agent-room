@@ -24,7 +24,7 @@
 |---|---|---|
 | **Owner** | Blake | Approves phase gates and decisions; writes and locks the acceptance criteria for each item; rates a sample of outputs; tests every release on his own Macs |
 | **Build agents** | Claude Code and Codex, run through the Room from phase 0 onward where possible | Implement items against their contracts, write tests, report decisions |
-| **Reviewer** | An independent agent from a different vendor than the builder | Required on security-sensitive items: file access, the relay, signing, two-key actions, permissions |
+| **Reviewer** | An independent agent from a different vendor than the builder | Required on security-sensitive items: file access, remote access (Tailscale and Funnel), signing, two-key actions, permissions |
 ---
 
 ## 3. How the work runs
@@ -48,7 +48,7 @@
 | K2 | **Continuous integration:** run `pnpm test` and `pnpm typecheck` on every push | The merge rule in section 3 needs automated checks to enforce it | Build agent |
 | K3 | Add `DECISIONS.md` and `CHANGELOG.md` | The decision log and weekly release notes | Build agent |
 | K4 | Line up test hardware: one 8 GB Apple silicon Mac and one 32 GB or larger, plus a clean macOS user account for install tests | Item 1.5 has to be tested on both ends of the range, and 1.7 on a clean account | Owner |
-| K5 | Pick a hosting provider for the relay prototype | Spike 0.3 needs somewhere to run | Build agent proposes, owner approves |
+| K5 | ~~Pick a hosting provider for the relay prototype~~ **Dropped Oct 23:** Tailscale is a product requirement (D9), so no hosted relay is needed | - | - |
 
 ---
 
@@ -62,7 +62,7 @@
 |---|---|---|---|---|
 | 0.1 | Fix the indented "Run shell commands without asking" setting | Rendered as a proper nested setting under Shell, in an indented container with a left rule, in both the Mac app and the phone web app. No leading spaces in any label. Before and after screenshots attached | None | XS |
 | 0.2 | Routing decision log | Every routing pick records the goal, task, task type, each candidate's pick probability, the chosen agent, the model version, epsilon, tokens, cost, seconds, the outcome and the judgment score. Exportable as JSONL. Tests cover the write path | None | S |
-| 0.3 | **Spike: local file access** | A decision memo comparing relayed MCP file tools, worktree sync, and vendor remote features on security, latency, vendor coverage and offline behaviour. A working prototype of the leading option: a cloud agent reads a file in a granted folder and proposes a write, and the hub applies it as a diff after approval. Reviewer sign-off on the memo | K5 | M |
+| 0.3 | **Spike: local file access** | A decision memo comparing relayed MCP file tools, worktree sync, and vendor remote features on security, latency, vendor coverage and offline behaviour. A working prototype of the leading option: a cloud agent reads a file in a granted folder and proposes a write, and the hub applies it as a diff after approval. Reviewer sign-off on the memo | None | M |
 | 0.4 | Document standard | Front matter schema implemented. A hub `save_document` tool writes to the Library with front matter and indexes the result. An agent-produced document lands correctly in a test | D2 | S |
 | 0.5 | Failure tags | Every failed or sent-back task is tagged as spec, misalignment, verification or other. The tags are visible in the audit log and the JSONL export | 0.2 | S |
 | 0.6 | Control file specification | `CONTROL.md` defines the folder layout, the front matter schema for each file, the order layers apply in, the ownership table and the size caps. Owner approved | D3 | S |
@@ -82,16 +82,16 @@
 | # | Item | Acceptance criteria | Depends on | Size |
 |---|---|---|---|---|
 | 1.4 | Worktree per task | Every task runs in its own git worktree, or a folder copy for non-git folders. Accepted work merges back; rejected work is discarded. Two agents editing the same repository in parallel never collide (test). Worktrees are cleaned up | None | M |
-| 1.1 | Local file access | Folder grants per room and per agent, with read and write set separately, managed in the app. Local agents are confined to their task worktree. Cloud agents reach files only through the hub. Writes arrive as diffs and follow the approval rules. Every file operation is audited. Reviewer passes a security checklist covering path traversal, symlinks and access outside granted folders | 0.3, 1.4, 1.2 | L |
-| 1.2 | Relay | Outbound-only connection from the hub, so no inbound ports are opened. Authenticated, encrypted end to end. The phone works away from the local network without Tailscale. A cloud agent can reach the hub's MCP endpoint through it. Reviewer sign-off | 0.3, K5 | M |
-| 1.3 | Agent discovery and capability map | On a fresh Mac with Claude Code and Codex installed and signed in, both appear in the room with no manual setup. Local model servers are detected. Each agent's `TOOLS.md` lists what it can reach. A task that needs a data source is only routed to agents that have it (test) | 1.9 | M |
+| 1.1 | Local file access | Folder grants per room and per agent, with read and write set separately, managed in the app. Local agents are confined to their task worktree. Agents on other devices or in the cloud (Muse, connectors) reach files only through the hub's MCP tools over Tailscale or Funnel. Writes arrive as diffs and follow the approval rules. Every file operation is audited. Reviewer passes a security checklist covering path traversal, symlinks and access outside granted folders | 0.3, 1.4, 1.2 | L |
+| 1.2 | Remote access over Tailscale | Tailscale is required (D9). The hub detects whether Tailscale is installed, signed in and connected, and shows its tailnet address. Onboarding walks the user through installing and signing in when it isn't. The phone web app pairs and works from anywhere over the tailnet. An agent on another tailnet device (Muse today) joins over MCP with no extra setup. For vendor-cloud agents that need a public HTTPS URL (claude.ai or ChatGPT connectors), the owner can switch on Tailscale Funnel for the hub's `/mcp` path only: off by default, nothing else reachable, every call authenticated by the hub and audited. Reviewer sign-off | 0.3 | M |
+| 1.3 | Agent discovery and capability map | On a fresh Mac with Claude Code and Codex installed and signed in, both appear in the room with no manual setup. Hermes and its local model server (llama.cpp) are detected and Hermes joins over MCP with no manual setup; Muse joins over MCP from its tailnet device with one pairing step. Agents that join over MCP report the model and tokens of each piece of work they hand back, so the routing log covers them (runs on local models log $0). Local model servers are detected. Each agent's `TOOLS.md` lists what it can reach. A task that needs a data source is only routed to agents that have it (test) | 1.9 | M |
 | 1.9 | Control files as the source of truth | The hub reads its rules, personas, permissions and scope from the control folder. Edits in the app and edits in a text editor stay in sync in both directions. Each task's context file is built in its worktree from the layers that apply, under a size cap. The folder is a git repository with one commit per change. The linter blocks malformed files and flags contradictions | 0.6, 1.4 | M |
 | 1.5 | Scheduling that adapts to the hardware | The hub detects memory and core count and sets concurrency and whether local models run. Tested on both an 8 GB machine and a 32 GB or larger one. Overflow work goes to cloud agents when the machine is at its limit | 1.3 | M |
-| 1.6 | Quota awareness | Usage is tracked per subscription against its 5-hour and weekly windows. The router prefers capacity that's about to expire and treats local models as a free tier. Zero tasks fail on a rate limit that the hub could have predicted, measured over a week of dogfooding | 0.2, 1.3 | M |
+| 1.6 | Quota awareness | Usage is tracked per subscription against its 5-hour and weekly windows, including Hermes's MiniMax fallback. The router prefers capacity that's about to expire and treats local models (Hermes on Bonsai) as a free tier. Zero tasks fail on a rate limit that the hub could have predicted, measured over a week of dogfooding | 0.2, 1.3 | M |
 | 1.8 | App icon | Concept A delivered as a 1024 px master, the macOS iconset, a menu bar glyph and the web app icons. Legible at 16 px on light and dark backgrounds | None | S |
-| 1.7 | Installable app | The hub's runtime is bundled inside the app, shipped as a drag-to-install DMG with a local signature. Developer ID signing and notarization wait for 4.7. CLI sign-in happens inside the app. On a clean macOS user account, going from the DMG to a first finished goal takes under 10 minutes without Terminal or Xcode, timed | K4, 1.3, 1.8 | M |
+| 1.7 | Installable app | The hub's runtime is bundled inside the app, shipped as a drag-to-install DMG with a local signature. Developer ID signing and notarization wait for 4.7. CLI sign-in happens inside the app, and so does the Tailscale check (install and sign-in prompts if it's missing). On a clean macOS user account, going from the DMG to a first finished goal takes under 10 minutes without Terminal or Xcode, Tailscale sign-in included, timed | K4, 1.3, 1.8 | M |
 
-**Suggested order:** weeks 1 and 2 cover 1.4, 1.9, 1.2 and 1.8. Weeks 3 and 4 cover 1.1, 1.3 and 1.5. Weeks 5 and 6 cover 1.6 and 1.7, plus the clean-install test.
+**Suggested order:** weeks 1 and 2 cover 1.4, 1.9, 1.2 (Tailscale) and 1.8. Weeks 3 and 4 cover 1.1, 1.3 and 1.5. Weeks 5 and 6 cover 1.6 and 1.7, plus the clean-install test.
 
 **Decisions due:** D4 (distribution channel, by the start of the phase, because it shapes how 1.7 is packaged).
 
@@ -170,14 +170,15 @@
 
 | ID | Decision | Due | Leaning (from `PRODUCT.md`) |
 |---|---|---|---|
-| D1 | How agents get local file access | End of phase 0 (spike 0.3) | Relayed MCP by default; worktree sync for heavy cloud coding |
+| D1 | How agents get local file access | End of phase 0 (spike 0.3) | Hub MCP file tools by default, reached over Tailscale (Funnel for vendor clouds); worktree sync for heavy cloud coding |
 | D2 | Document source of truth and format | Phase 0 | Local Markdown; Google Drive as a synced location |
 | D3 | Where control files live | Phase 0 | A visible `~/Agent Room/` folder |
 | D4 | Distribution channel | Start of phase 1 | Developer ID, outside the Mac App Store |
 | D5 | Provider terms posture | Before 1.0 (phase 4) | Support subscriptions and API keys; each CLI signs itself in |
-| D6 | Business model | End of phase 2 | Open; a relay subscription is the natural fit |
+| D6 | Business model | End of phase 2 | Open (a hosted relay is no longer planned, so a relay subscription is off the table) |
 | D7 | 3D technology | Start of phase 3 | Open |
 | D8 | Subagent limits | Start of phase 3 | Depth 2; anything that writes gets its own worktree |
+| D9 | Remote access | **Decided Oct 23, 2026 (owner)** | Tailscale is a product requirement: the phone web app, agents on other devices and (through Funnel) vendor-cloud agents all reach the hub over it. No hosted relay |
 
 ---
 
@@ -185,8 +186,8 @@
 
 | Milestone | Target date | Status |
 |---|---|---|
-| Kickoff checklist complete | Oct 30, 2026 | Not started |
-| M0: Foundations | Nov 6, 2026 | Not started |
+| Kickoff checklist complete | Oct 30, 2026 | In progress (Oct 23): K1-K3 done except the remote (owner runs `scripts/setup-remote.sh`); K5 dropped (D9: Tailscale required); K4 is the owner's |
+| M0: Foundations | Nov 6, 2026 | In progress (Oct 23): 0.1-0.6 built and tested; D1-D3 proposed in `DECISIONS.md`; waiting on owner sign-off (D1-D3, `CONTROL.md`) and the Mac app screenshot for 0.1 |
 | M1: Runs on any Mac | Dec 18, 2026 | Not started |
 | M2: Learning loop live | Feb 5, 2027 | Not started |
 | M3: Identity and presence | Mar 19, 2027 | Not started |
@@ -205,6 +206,7 @@
 | Learned routing doesn't beat the single best agent | Medium | High for the thesis | Kill-criteria review #1 | Keep the Room as a launcher with cross-checking; double down on juries and file access |
 | Subagents blow up token cost | High | Medium | Tokens per goal up more than 50% after 3.3 | Tighter budgets; read-only fan-out only |
 | 3D office eats time or performance | Medium | Low | Frame drops on 8 GB; schedule slip in phase 3 | It's the first item to cut or defer; the 2D view stays |
+| Tailscale dependency | Low | Medium: onboarding friction, one more vendor | Clean-install test (1.7) over 10 minutes because of Tailscale sign-in; a Tailscale plan or terms change | Onboarding does the Tailscale steps inside the app; the spike's relay code stays in the repo as a shelved fallback |
 | Part-time capacity | High | Medium | Two straight weeks without a shipped item | Cut scope at the next gate rather than stretching dates |
 
 ---
@@ -230,6 +232,6 @@
 |---|---|
 | Mon Oct 26 | K1 to K3: git, remote, CI, `DECISIONS.md` and `CHANGELOG.md`. Owner starts K4 |
 | Tue Oct 27 | 0.1 (the shell setting fix) and 0.2 (routing log) contracts written and started |
-| Wed Oct 28 | 0.2 lands. Spike 0.3 starts; relay hosting picked (K5) |
+| Wed Oct 28 | 0.2 lands. Spike 0.3 starts |
 | Thu Oct 29 | 0.6 control file specification drafted; 0.4 document standard drafted |
 | Fri Oct 30 | Demo: shell setting fix, routing log recording live goals. D2 and D3 put to the owner |
