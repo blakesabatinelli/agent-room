@@ -6,6 +6,7 @@ import type { SetupInfo } from "../api/client";
 import { presence, useRoom } from "../state/store";
 import { Avatar, Button, CodeBlock, Field, Pill, Screen, Toggle } from "../components/ui";
 import { Profiles } from "../components/Profiles";
+import { Discovery } from "../components/Discovery";
 import { radius, space, type as t, usePalette } from "../theme";
 
 const isMac = Platform.OS === ("macos" as string);
@@ -42,6 +43,7 @@ export function AgentsScreen({ onBack }: { onBack?: () => void }) {
             <Button small kind="plain" label="Use real agents" onPress={async () => { await hub?.saveSetup({ practiceMode: false }); setSetup(await hub?.setup()); void useRoom.getState().refreshStatus(true); }} />
           </View>
         ) : null}
+        <Discovery />
         {adding ? <AddAgent existing={agents} onDone={() => setAdding(false)} /> : null}
         {agents.map((a) => <AgentCard key={a.id} a={a} scores={scores.filter((s) => s.agentId === a.id && s.runs > 0)} />)}
       </ScrollView>

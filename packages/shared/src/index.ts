@@ -847,3 +847,84 @@ export interface McpTokenCreated extends McpTokenInfo { token: string; url: stri
 
 /** The key is shown once, when it is made or rotated. Later reads of a connection leave `token` empty and set this. */
 export interface McpConnection { tokenHidden?: boolean }
+
+// ---- 1.3 Agent discovery and capability map
+
+/** What an agent's own platform lets it reach. Written by discovery (and the owner's declarations), copied into TOOLS.md `platform`. */
+export interface AgentCapabilities {
+  /** Connectors the agent has, as ids: gmail, slack, drive, salesforce when they are one of the Room's tools, else a short name. */
+  connectors: string[];
+  /** Business data it can read: a subset of the connectors (salesforce, snowflake, gmail, drive, slack, ...) plus anything the owner declared. */
+  dataSources: string[];
+  /** Skill (or custom prompt) names, names only. */
+  skills: string[];
+  /** Native tool families it brings (web, filesystem, shell). */
+  tools: string[];
+  /** Data sources the owner says this agent has. Discovery never overwrites these. */
+  declared?: string[];
+  discoveredAt?: number;
+}
+export interface AgentConfig { capabilities?: AgentCapabilities }
+/** Data sources or connectors a task needs ("salesforce", "gmail", "snowflake"). Only agents that have them are routed the task. */
+export interface Task { needs?: string[] }
+/** Why the pool was narrowed for a task that has needs. */
+export interface RoutingRecord { needs?: string[]; needsFilteredOut?: { agentId: string; missing: string[] }[] }
+
+export type LocalServerKind = "llama.cpp" | "ollama" | "lm-studio" | "openai-compatible";
+/** A model server answering on this Mac. */
+export interface LocalModelServer {
+  id: LocalServerKind;
+  label: string;
+  /** OpenAI-compatible base URL, ending in /v1. */
+  baseUrl: string;
+  port: number;
+  models: string[];
+  /** The agent that is configured to use it (Hermes), when there is one. */
+  usedBy?: string;
+}
+
+export interface DiscoveredAgent {
+  id: string;
+  name: string;
+  provider: string;
+  adapter: AdapterKind;
+  installed: boolean;
+  /** null: installed but sign-in couldn't be confirmed. */
+  signedIn: boolean | null;
+  detail: string;
+  /** Settings to create the agent with (and facts to refresh on an existing one). */
+  settings: Record<string, unknown>;
+  capabilities: AgentCapabilities;
+  /** False when the agent's own config couldn't be read, so an empty list means "unknown", not "none". */
+  capabilitiesKnown: boolean;
+  /** A new agent is switched on when true. Local model servers start off until the owner turns them on. */
+  defaultEnabled: boolean;
+}
+
+export interface DiscoveryResult {
+  at: number;
+  agents: DiscoveredAgent[];
+  servers: LocalModelServer[];
+  /** One line for the apps: "Found: Claude Code (signed in), Codex (signed in), Hermes, llama.cpp with qwen". */
+  summary: string;
+  /** What happened when the hub applied it: agents created, capability changes, Hermes connection. */
+  applied?: { created: string[]; updated: string[]; hermes?: { status: string; detail: string; configPath?: string; backupPath?: string } };
+}
+export interface DiscoverySettings {
+  /** Write the hub's MCP entry into Hermes's config on its own. On by default. */
+  connectAutomatically: boolean;
+}
+export interface DiscoveryState { last: DiscoveryResult | null; settings: DiscoverySettings; running: boolean }
+
+/** What POST /agents/:id/invite returns: everything a device needs to join over MCP, in one call. */
+export interface McpInvite {
+  agentId: string;
+  name: string;
+  /** MCP URL on the tailnet (MagicDNS name when there is one). */
+  url: string;
+  token: string;
+  /** Copy-paste text for the agent's owner: URL, header, and what to tell the agent. */
+  block: string;
+  /** The same standing instructions as the MCP connection screen. */
+  instructions: string;
+}

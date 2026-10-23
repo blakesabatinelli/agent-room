@@ -6,6 +6,7 @@ import { launcher } from "../native/hub";
 import { useRoom } from "../state/store";
 import { Avatar, Button, CodeBlock, Section, Toggle } from "../components/ui";
 import { RemoteAccess } from "../components/RemoteAccess";
+import { Discovery } from "../components/Discovery";
 import { space, type as t, usePalette } from "../theme";
 
 export function OnboardingScreen() {
@@ -51,6 +52,7 @@ export function OnboardingScreen() {
       </Text>
 
       <Section title="1. Sign in your agents">
+        <View style={{ padding: space(4) }}><Discovery invite={false} /></View>
         {cli.map((a) => (
           <View key={a.id} style={{ flexDirection: "row", gap: space(3), padding: space(4), borderBottomWidth: 1, borderColor: p.line, alignItems: "center" }}>
             <Avatar name={a.name} color={a.color} size={36} presence={a.ready ? "ready" : "off"} />
@@ -70,7 +72,7 @@ export function OnboardingScreen() {
         </View>
         {log !== undefined ? <View style={{ paddingHorizontal: space(4), paddingBottom: space(4) }}><CodeBlock label="Setup log" text={log} /></View> : null}
         <View style={{ paddingHorizontal: space(4), paddingBottom: space(4) }}>
-          <Text style={[t.small, { color: p.muted }]}>Hermes, Muse and other MCP agents connect after setup, from Agents & connections in the sidebar. You can come back to any of this later.</Text>
+          <Text style={[t.small, { color: p.muted }]}>Muse and other agents on another device join later, from Agents & connections in the sidebar. You can come back to any of this later.</Text>
         </View>
         <Toggle label="Use practice agents for now" value={info.practiceMode} onChange={practice}
           hint="Stand-in agents that answer instantly, so you can try the room before signing in. Turn off in Settings." />

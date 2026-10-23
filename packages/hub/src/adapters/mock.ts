@@ -25,7 +25,7 @@ function readContext(cwd: string): string | undefined {
  * and when the file holds git conflict markers it keeps both sides and drops the markers, like a careful agent would;
  * the file is not written again by the usual scope-file loop).
  * Every call also records the cwd it ran in (MockAdapter.calls[].cwd), so tests can see which worktree a task used.
- * wide (the plan is N independent tasks).
+ * wide (the plan is N independent tasks), needs (1.3: every planned task lists these data sources in its `needs`).
  */
 export class MockAdapter implements Adapter {
   /** Every run, for tests: which profile reached the agent. */
@@ -62,6 +62,9 @@ export class MockAdapter implements Adapter {
           files: [], criteria: ["A few lines"], taskType: "writing", dependsOn: [] });
       }
       if ((st as { noOwner?: boolean }).noOwner) for (const t of tasks as { owner?: string }[]) delete t.owner;
+      // needs (1.3): every planned task names these data sources, like a planner that saw they need them.
+      const needs = (st as { needs?: string[] }).needs;
+      if (needs) for (const t of tasks as { needs?: string[] }[]) t.needs = needs;
       const bad = !!(st as { badPlan?: boolean }).badPlan && !p.includes("can't run as written");
       for (const t of tasks as { key: string; output?: string; covers?: string[]; dependsOn?: string[] }[]) {
         if (bad) { if (t.key === "b") t.dependsOn = ["zz"]; continue; }

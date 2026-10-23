@@ -1,4 +1,4 @@
-import type { AgentConfig } from "@agent-room/shared";
+import type { AgentConfig, RunUsage } from "@agent-room/shared";
 import { id } from "../util.js";
 import type { Adapter, AdapterStatus, RunRequest, RunResult } from "./types.js";
 
@@ -13,7 +13,9 @@ export interface Assignment {
   claimedAt?: number;
 }
 
-type Pending = Assignment & { done: (r: { ok: boolean; text: string; error?: string }) => void };
+/** What an MCP agent hands back. 1.3: the model that did the work and what it used, when the agent says. */
+export interface McpOutcome { ok: boolean; text: string; error?: string; model?: string; usage?: RunUsage }
+type Pending = Assignment & { done: (r: McpOutcome) => void };
 
 /**
  * Mailbox between the orchestrator and external MCP agents (Hermes, Muse...).
@@ -37,13 +39,13 @@ export class McpInbox {
   }
   lastSeenAt(agentId: string) { return this.lastSeen.get(agentId); }
 
-  enqueue(agentId: string, a: Omit<Assignment, "id" | "agentId" | "createdAt">, signal?: AbortSignal, timeoutMs = 30 * 60_000, claimMs = 0): Promise<{ ok: boolean; text: string; error?: string }> {
+  enqueue(agentId: string, a: Omit<Assignment, "id" | "agentId" | "createdAt">, signal?: AbortSignal, timeoutMs = 30 * 60_000, claimMs = 0): Promise<McpOutcome> {
     return new Promise((resolve) => {
       let settled = false;
       const item: Pending = { ...a, id: id("asg"), agentId, createdAt: Date.now(), done: (r) => finish(r) };
       const list = this.queue.get(agentId) ?? [];
       list.push(item); this.queue.set(agentId, list);
-      const finish = (r: { ok: boolean; text: string; error?: string }) => {
+      const finish = (r: McpOutcome) => {
         if (settled) return; settled = true;
         clearTimeout(timer); clearTimeout(claimTimer); signal?.removeEventListener("abort", onAbort);
         this.queue.set(agentId, (this.queue.get(agentId) ?? []).filter((x) => x.id !== item.id));
@@ -78,11 +80,12 @@ export class McpInbox {
     });
   }
 
-  submit(agentId: string, assignmentId: string, text: string, failed = false): boolean {
+  submit(agentId: string, assignmentId: string, text: string, failed = false, report: { model?: string; usage?: RunUsage } = {}): boolean {
     this.seen(agentId);
     const item = (this.queue.get(agentId) ?? []).find((x) => x.id === assignmentId);
     if (!item) return false;
-    item.done(failed ? { ok: false, text: "", error: text } : { ok: true, text });
+    const meta = { ...(report.model ? { model: report.model } : {}), ...(report.usage ? { usage: report.usage } : {}) };
+    item.done(failed ? { ok: false, text: "", error: text, ...meta } : { ok: true, text, ...meta });
     return true;
   }
 
@@ -108,6 +111,7 @@ export class ExternalMcpAdapter implements Adapter {
     const instructions = req.systemPrompt ? `${req.systemPrompt}\n\n---\n\n${req.prompt}` : req.prompt;
     const timeout = Number(req.agent.settings.timeoutMinutes ?? 30) * 60_000;
     const r = await inbox.enqueue(req.agent.id, { instructions, roomId: req.roomId, taskId: req.taskId }, req.signal, timeout, req.claimTimeoutMs ?? 0);
-    return { ok: r.ok && !!r.text, text: r.text, durationMs: Date.now() - t0, error: r.ok ? undefined : r.error ?? r.text };
+    // 1.3: the model and usage the agent reported go on the run, so the routing log and the quota ledger cover MCP agents too.
+    return { ok: r.ok && !!r.text, text: r.text, durationMs: Date.now() - t0, error: r.ok ? undefined : r.error ?? r.text, ...(r.model ? { model: r.model } : {}), ...(r.usage ? { usage: r.usage } : {}) };
   }
 }
