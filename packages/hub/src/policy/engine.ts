@@ -178,7 +178,7 @@ export class PolicyEngine {
       // A request cut short (and no whole input to read) may hide what a rule talks about: never allow it, and let a rule that would hold it back ask.
       if (r.effect === "allow" && shape.truncated) continue;
       if (!matches(pm, shape, action, r.effect === "allow")) { if (shape.truncated && r.effect !== "allow" && couldHideBehindCut(pm, shape, action)) maybe ??= r; continue; }
-      if (r.effect === "deny") deny ??= r; else if (r.effect === "ask") ask ??= r; else allow ??= r;
+      if (r.effect === "deny") deny ??= r; else if (r.effect === "ask") ask ??= r; else if (!allow || (r.id.startsWith("lease-") && !allow.id.startsWith("lease-"))) allow = r; // a lease reaches further than a rule (see gate)
     }
     if (deny) return { effect: "deny", rule: deny };
     if (ask) return { effect: "ask", rule: ask };
@@ -213,8 +213,10 @@ export class PolicyEngine {
     // allow: never wider than the layers above it
     const roomSays = this.host.rooms.says(grant.roomId, p.tool);
     if (agent?.tools?.[p.tool] !== true || (roomSays !== undefined && roomSays !== "on") || this.host.rooms.level(grant.agentId, grant.roomId, p.tool) === "off") return undefined;
-    // An "ask" the owner wrote (ROOM.md tools, TOOLS.md room_allows) is never carved out by a rule or a lease: ask beats on (CONTROL.md section 3). Only the catalog's own default ask can be.
-    if (this.ownerAsks(grant.agentId, grant.roomId, p.tool, agent)) return undefined;
+    // An "ask" the owner wrote is never carved out by a rule: ask beats on (CONTROL.md section 3). Only the catalog's own default ask can be.
+    // A lease is the owner saying "don't ask me for this, for a while": it may skip the agent's "asks first" (TOOLS.md room_allows, synced
+    // from the app), the same way it may switch the tool on. A room's ROOM.md "ask" still wins over a lease.
+    if (this.ownerAsks(grant.agentId, grant.roomId, p.tool, agent, d.rule!.id.startsWith("lease-"))) return undefined;
     if (d.twoKey && !o.twoKeyPassed) return undefined;
     const a = this.host.approvals.auto(p);
     this.store.audit(p.agentId, "policy.allowed", `${why} (rule ${d.rule!.id})`);
@@ -222,10 +224,11 @@ export class PolicyEngine {
   }
 
   /** Does ROOM.md or the agent's TOOLS.md (or, with no TOOLS.md yet, the owner's "asks first" in the app) say "ask" for this tool? */
-  private ownerAsks(agentId: string, roomId: string | undefined, tool: string, agent: AgentConfig | undefined): boolean {
+  private ownerAsks(agentId: string, roomId: string | undefined, tool: string, agent: AgentConfig | undefined, roomOnly = false): boolean {
     const c = this.control(), snap = c?.snapshot();
     const slug = roomId ? c?.slugFor(roomId) : undefined;
     if (slug && snap?.rooms[slug]?.room?.fm.tools?.[tool] === "ask") return true;
+    if (roomOnly) return false;
     const allows = snap?.agents[agentId]?.tools?.fm.room_allows?.[tool] ?? (agent ? desiredLevel(agent, tool) : undefined);
     return allows === "ask";
   }
@@ -480,7 +483,7 @@ export class PolicyEngine {
       if (twoKeyClass(lease.tool, action === "*" ? "delete" : action, "") || ["shell", "gmail", "salesforce"].includes(lease.tool)) notes.push("Sends, CRM writes and deletes still need the two-key check.");
       // An "ask first" the owner's files wrote (TOOLS.md, ROOM.md) is stronger than a lease: say so, so a lease that will not skip the card is not a surprise.
       const latest = this.store.getAgent(agent.id);
-      if (this.ownerAsks(agent.id, roomId, lease.tool, latest)) notes.push(`${agent.name} asks first about ${lease.tool} (TOOLS.md or ROOM.md), and a lease can't change that. The card will still come.`);
+      if (this.ownerAsks(agent.id, roomId, lease.tool, latest, true)) notes.push(`This room's ROOM.md says to ask about ${lease.tool}, and a lease can't change that. The card will still come.`);
       return { ok: true, lease: this.view(lease), notes };
     });
   }

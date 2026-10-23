@@ -650,11 +650,8 @@ test("AC2: an email-send lease is granted, but the two-key check still owns send
   await declineAll(c, [p]);
   const draft = await c.policy.grant({ agentId: "claude", tool: "gmail", minutes: 30, action: "draft" });
   assert.ok(draft.ok);
-  // Claude asks first about Gmail (TOOLS.md says ask), and a lease can't carve out an ask the owner's files wrote: the grant says so, and the card still comes
-  if (draft.ok) assert.match(draft.notes.join(" "), /asks first/);
-  const dp = ask(c, {}, "gmail", "draft", JSON.stringify({ to: ["a@b.com"] }));
-  assert.equal(await pending(c, dp), true);
-  await declineAll(c, [dp]);
+  // A draft is not a send: the owner's lease skips Claude's asks-first for it (a ROOM.md ask would still win; see M5)
+  assert.equal((await ask(c, {}, "gmail", "draft", JSON.stringify({ to: ["a@b.com"] }))).auto, true);
 });
 
 // ---------------------------------------------------------------- HTTP
@@ -782,7 +779,7 @@ test("M2: a rule is read against the tool's whole input, not the cut-short text:
   assert.equal(fine.auto, true);
 });
 
-test("M5: an allow rule or lease never overrides an `ask` the owner's files wrote (TOOLS.md or ROOM.md); only the catalog default ask can be carved out", async (t) => {
+test("M5: an allow rule never overrides an `ask` the owner's files wrote (TOOLS.md or ROOM.md); a lease skips the agent's asks-first but never a ROOM.md ask", async (t) => {
   const c = await mk(t);
   // Claude asks first about Gmail: TOOLS.md says ask. An allow rule or a lease for a draft doesn't skip the card.
   assert.match(read(c.root, "agents/claude/TOOLS.md"), /gmail: ask/);
@@ -793,12 +790,21 @@ test("M5: an allow rule or lease never overrides an `ask` the owner's files wrot
   assert.equal(await pending(c, p), true, "an allow rule does not skip the card");
   await declineAll(c, [p]);
 
+  // A lease is the owner's own "don't ask me for this for a while": it skips the agent's asks-first (TOOLS.md), like it may switch a tool on.
   const lease = await c.policy.grant({ agentId: "claude", tool: "gmail", minutes: 30, action: "draft" });
   assert.ok(lease.ok);
-  if (lease.ok) assert.match(lease.notes.join(" "), /asks first/, "the grant says so");
-  const q = ask(c, {}, "gmail", "draft", detail);
-  assert.equal(await pending(c, q), true, "nor does a lease");
+  if (lease.ok) assert.doesNotMatch(lease.notes.join(" "), /card will still come/);
+  assert.equal((await ask(c, {}, "gmail", "draft", detail)).auto, true, "a lease skips the agent's asks-first");
+  // ...but a room whose ROOM.md says ask keeps asking, lease or not
+  write(c.root, "rooms/board/ROOM.md", read(c.root, "rooms/board/ROOM.md").replace("tools: {}", "tools:\n  gmail: ask"));
+  await c.control.load();
+  const boardLease = await c.policy.grant({ agentId: "claude", tool: "gmail", minutes: 30, action: "draft", roomId: c.board.id });
+  if (boardLease.ok) assert.match(boardLease.notes.join(" "), /ROOM\.md says to ask/, "the grant says so");
+  const q = ask(c, { roomId: c.board.id }, "gmail", "draft", detail);
+  assert.equal(await pending(c, q), true, "a ROOM.md ask beats a lease");
   await declineAll(c, [q]);
+  write(c.root, "rooms/board/ROOM.md", read(c.root, "rooms/board/ROOM.md").replace("tools:\n  gmail: ask", "tools: {}"));
+  await c.control.load();
 
   // ROOM.md ask in one room: the allow doesn't reach it, and the other room keeps its own rules
   await ownerRules(c, [{ tool: "drive", match: "action:read", scope: "*" }]);
