@@ -11,13 +11,25 @@ IDs D1-D9 match the decisions register in `PLAN.md` section 10. Status is **Open
 | D4 | Distribution channel | Start of phase 1 | Open |
 | D5 | Provider terms posture | Before 1.0 | Open |
 | D6 | Business model | End of phase 2 | Open |
-| D7 | 3D technology | Start of phase 3 | Open |
-| D8 | Subagent limits | Start of phase 3 | Open |
+| D7 | 3D technology | Start of phase 3 | Proposed (built on it; see below) |
+| D8 | Subagent limits | Start of phase 3 | Proposed (built on it; see below) |
 | D9 | Remote access: Tailscale required | Phase 0 | **Decided** (owner, Oct 23) |
 | K5 | Relay prototype hosting | Week of Oct 26 | Withdrawn (D9) |
 | B1 | Version control host and CI | Week of Oct 26 | Decided (build), remote pending owner |
 
 ---
+
+## D7: 3D technology for the office (Proposed, 2026-10-23; built on it)
+
+- **Options:** react-three-fiber or plain three.js in a web view; native SceneKit or RealityKit.
+- **Proposal:** three.js, rendered by the hub's web app and shown in the Mac app inside a web view, with a 2D fallback.
+- **Why:** one implementation serves the phone web app and the Mac app; it can be tested headless in CI (Chromium); SceneKit would mean a second, Mac-only renderer that can't be built or tested without Xcode. Revisit if the Mac web view can't hold frame rate.
+- **Owner to confirm.** Built this way so the work isn't blocked; switching later means replacing one view.
+
+## D8: Subagent limits (Proposed, 2026-10-23; built on it)
+
+- **Proposal (the brief's leaning):** depth 2; a spawn budget per goal (default 6 subagents, owner-adjustable); read-only fan-out is free of the per-task write rule; any subagent that writes gets its own worktree; the parent stays accountable and its subagents' output is judged as part of the parent's task.
+- **Owner to confirm.** Start strict, loosen with data (watch tokens per goal: the risk register's early warning is +50%).
 
 ## D9: Remote access (Decided by owner, 2026-10-23)
 
