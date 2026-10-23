@@ -238,6 +238,37 @@ export class ControlFolder {
     });
   }
 
+  // ---------------------------------------------------------------- 2.1 retros
+
+  /**
+   * 2.1: change control files the orchestrator owns (LESSONS.md, playbooks) as ONE commit. `build` runs inside the
+   * queue and sees the files as they are now (so an owner's edit made a moment ago is never overwritten); it returns the
+   * files to write and, optionally, `done`, which runs once they are on disk (the retro saves its database rows there).
+   * Returns the paths written. Nothing is written or committed when `build` returns no files.
+   */
+  update(
+    build: (read: (rel: string) => string | undefined) => { files: { rel: string; text: string }[]; done?: () => void } | Promise<{ files: { rel: string; text: string }[]; done?: () => void }>,
+    message: string, writer = "orchestrator",
+  ): Promise<string[]> {
+    return this.enqueue(async () => {
+      const plan = await build((rel) => (this.exists(rel) ? this.read(rel) : undefined));
+      const rels = plan.files.map((f) => f.rel);
+      for (const rel of rels) {
+        // An owner's edit that the watcher hasn't committed yet is theirs: commit it first so the history says who wrote what.
+        if (this.exists(rel) && this.seen.get(rel) !== sha(this.read(rel))) {
+          this.seen.set(rel, sha(this.read(rel)));
+          await this.commit([rel], `Edit ${rel} in an editor`, "owner");
+        }
+      }
+      for (const f of plan.files) this.write(f.rel, f.text);
+      plan.done?.();
+      if (!rels.length) return [];
+      await this.commit(rels, message, writer);
+      await this.loadNow({ emit: true, changed: rels });
+      return rels;
+    });
+  }
+
   // ---------------------------------------------------------------- files
 
   private abs(rel: string) {

@@ -1,6 +1,6 @@
 import type {
   AgentConfig, AgentScore, VersionScoreRow, ModelShift, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry,
-  MemoryProposal, Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal, JuryCalibration, CommandsResponse,
+  MemoryProposal, Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task, WriteProposal, JuryCalibration, CommandsResponse, FirstPassMetrics,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -87,6 +87,7 @@ export class Hub {
   scores = () => this.req<AgentScore[]>("/scores");
   versionScores = (agentId?: string) => this.req<VersionScoreRow[]>(`/scores/versions${agentId ? `?agentId=${encodeURIComponent(agentId)}` : ""}`); // 2.4
   modelShifts = () => this.req<ModelShift[]>("/model-shifts"); // 2.4, newest first
+  firstPass = (weeks = 12) => this.req<FirstPassMetrics>(`/metrics/first-pass?weeks=${weeks}`); // 2.1
   tools = () => this.req<{ id: string; label: string; sensitive: boolean }[]>("/tools");
 
   settings = () => this.req<OrchestratorSettings & { calibration: { n: number; absErr: number } }>("/settings");

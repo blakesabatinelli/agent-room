@@ -104,7 +104,7 @@ email, posting to Slack, changing CRM records, deleting files) call request_appr
 const reqList = (reqs: Requirement[] | undefined, mine?: string[]) => reqs?.length
   ? reqs.map((r) => `- ${r.id}${mine?.includes(r.id) ? " (yours)" : ""}: ${r.text}`).join("\n") : "- (none)";
 
-export const taskPrompt = (task: Task, goal: string, contract: Contract | undefined, deps: Task[], shared: MemoryEntry[], priv: MemoryEntry[], ownerNotes: string[], agents: AgentConfig[], self: string, feedback?: string, folder?: { path: string; files: string[]; ledger?: string; /** 1.1: what the owner's granted folder is (label, read/write) */ note?: string }, ledger?: string, decisions: string[] = []) => `You are one agent in a room of AI agents. The orchestrator assigned you ONE task under a written work contract.
+export const taskPrompt = (task: Task, goal: string, contract: Contract | undefined, deps: Task[], shared: MemoryEntry[], priv: MemoryEntry[], ownerNotes: string[], agents: AgentConfig[], self: string, feedback?: string, folder?: { path: string; files: string[]; ledger?: string; /** 1.1: what the owner's granted folder is (label, read/write) */ note?: string }, ledger?: string, decisions: string[] = [], /** 2.1: playbook and lessons from earlier goals (retro/learned.ts), capped at ~2 KB */ learned?: string) => `You are one agent in a room of AI agents. The orchestrator assigned you ONE task under a written work contract.
 Do your task and nothing else.
 
 # Work contract (v${contract?.version ?? 1})
@@ -129,7 +129,7 @@ Shared memory:
 ${mem(shared)}
 Your private notes:
 ${mem(priv)}
-${task.history?.length ? `\n# Earlier attempts at this task (don't repeat what failed)\n${task.history.slice(-6).map((h) => `- ${h.outcome.toUpperCase()} (${h.agentId}): ${h.note.slice(0, 300)}`).join("\n")}\n` : ""}${feedback ? `\n# Sent back\nYour previous attempt was returned. Fix exactly this: ${feedback}\n${task.result ? `What you handed back last time (start from it; don't throw good work away):\n"""\n${task.result.slice(0, 2500)}\n"""\n` : ""}` : ""}
+${learned ? `\n${learned}\n` : ""}${task.history?.length ? `\n# Earlier attempts at this task (don't repeat what failed)\n${task.history.slice(-6).map((h) => `- ${h.outcome.toUpperCase()} (${h.agentId}): ${h.note.slice(0, 300)}`).join("\n")}\n` : ""}${feedback ? `\n# Sent back\nYour previous attempt was returned. Fix exactly this: ${feedback}\n${task.result ? `What you handed back last time (start from it; don't throw good work away):\n"""\n${task.result.slice(0, 2500)}\n"""\n` : ""}` : ""}
 # Rules
 - Stay inside your scope. If the right answer needs work outside it, say so in REASON; don't do it.
 - ${TAG_RULES(agents, self).replace(/\n/g, " ")}
