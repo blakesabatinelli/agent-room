@@ -13,6 +13,7 @@ import { ControlFolder, defaultControlRoot } from "./control/folder.js";
 import { DiscoveryService } from "./discovery/service.js"; // 1.3
 import { ensurePhaseStart } from "./retro/index.js"; // 2.1
 import { startScheduled } from "./report/schedule.js"; // 2.7
+import { joinOpenRosters } from "./rooms/index.js"; // 4.3
 
 // Apps launched from Finder get a thin PATH; make sure the agent CLIs are findable.
 const home = homedir();
@@ -57,6 +58,10 @@ if (!demo) {
 await orch.pruneWorktrees().catch(() => undefined);
 const resumed = orch.recover();
 orch.resumes.sweep(); // 2.3: close practice runs the last stop cut short, graduate agents that have the runs, write missing RESUME.md files
+// 4.3: standing rooms. New agents join the rooms that include everyone; scheduled goals start from ROOM.md (a sleeping hub catches up once, within its window).
+joinOpenRosters(store, () => orch.control, (m) => console.warn(`[rooms] ${m}`));
+orch.standing.tick();
+orch.standing.start();
 if (resumed.length) console.log(`Resumed ${resumed.length} goal${resumed.length > 1 ? "s" : ""} after restart.`);
 const tsStatus = await tailscale.status(true, port);
 const ts = remoteHost(tsStatus);

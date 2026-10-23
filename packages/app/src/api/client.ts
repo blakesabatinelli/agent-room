@@ -1,7 +1,7 @@
 import type {
   AgentConfig, AgentScore, VersionScoreRow, ModelShift, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
   Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task,
-  WriteProposal, JuryCalibration, CommandsResponse, FirstPassMetrics, MemoryExportInfo, PersonaInput, PersonaTemplate, PersonaView, AgentResume, ProbationStatus, Scorecard, ReturnLedger, AttentionState,
+  WriteProposal, JuryCalibration, CommandsResponse, FirstPassMetrics, MemoryExportInfo, PersonaInput, PersonaTemplate, PersonaView, AgentResume, ProbationStatus, Scorecard, ReturnLedger, AttentionState, RoomDefinition, RoomDefinitionInput,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -130,6 +130,10 @@ export class Hub {
   persona = (agentId: string) => this.req<PersonaView>(`/agents/${agentId}/persona`);
   savePersona = (agentId: string, input: PersonaInput) => this.send<PersonaView>("PUT", `/agents/${agentId}/persona`, input);
   personaTemplates = () => this.req<PersonaTemplate[]>("/personas/templates");
+  // 4.3 standing rooms: what ROOM.md says about a room (roster, narrowed tools, folders, schedule), the simple editors, and "Edit ROOM.md". A refused save throws the linter's message.
+  roomDefinition = (id: string) => this.req<RoomDefinition>(`/rooms/${id}/definition`);
+  saveRoomDefinition = (id: string, input: RoomDefinitionInput) => this.send<RoomDefinition>("PUT", `/rooms/${id}/definition`, input);
+  openRoomFile = (id: string) => this.send<{ ok: boolean; path: string }>("POST", `/rooms/${id}/definition/open`);
   // 2.6 the / palette: room commands, then each agent's skills, commands and prompts
   commands = () => this.req<CommandsResponse>("/commands");
   // 1.3 agent discovery

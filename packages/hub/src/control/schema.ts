@@ -89,6 +89,8 @@ export const schemas = {
   room: base("room").extend({
     name: str, roster: strList, tools: levelMap, folders: strList,
     schedule: z.string().optional(), in_scope: strList, out_of_scope: strList,
+    // 4.3 standing rooms: the calendar trigger runs `standing_goal` on `schedule` (5-field cron) in `timezone` (default: USER.md's).
+    standing_goal: z.string().max(2000).optional(), timezone: z.string().optional(), catch_up_hours: z.number().min(0).max(168).optional(),
   }),
   "room-memory": base("room-memory"),
   goal: base("goal").extend({

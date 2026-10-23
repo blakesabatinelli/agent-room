@@ -9,6 +9,7 @@ import type { McpGrant, Orchestrator } from "../orchestrator/orchestrator.js";
 import { checkFileToolRequest } from "../files/confine.js";
 import { localModelsFor, mcpReportShape, normalizeMcpReport } from "../discovery/usage.js"; // 1.3
 import { annotate } from "../memory/model.js"; // 2.5
+import { RoomRules } from "../rooms/rules.js"; // 4.3
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
@@ -53,7 +54,7 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
     inputSchema: { roomId: z.string().optional() },
   }, async ({ roomId: r }) => {
     const shared = store.listShared(roomId(r)).map((m) => `- ${annotate(m)}`).join("\n") || "- (none)"; // 2.5: source and expiry
-    const priv = store.listPrivate(grant.agentId).map((m) => `- ${annotate(m)}`).join("\n") || "- (none)";
+    const priv = orch.rooms.privateFor(grant.agentId, roomId(r)).map((m) => `- ${annotate(m)}`).join("\n") || "- (none)"; // 4.3: notes made in another room stay in that room
     return text(`Shared memory:\n${shared}\n\nYour private notes:\n${priv}`);
   });
 
@@ -127,6 +128,8 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
   }, async ({ tool, action, detail }) => {
     const a = agent();
     if (!a?.tools[tool]) return text(`DENIED: the "${tool}" tool is switched off for you.`);
+    const roomWhy = orch.roomDenied(grant, tool); // 4.3
+    if (roomWhy) return text(`DENIED: ${roomWhy}`);
     const res = await orch.requestApproval(grant, tool, action, detail);
     return text(res.status === "approved" ? "APPROVED: go ahead." : `DENIED (${res.status}). Do not perform the action.`);
   });
@@ -162,6 +165,9 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
       store.audit(grant.agentId, "subagent.write.denied", `${tool_name} refused: read-only helper`);
       return text(JSON.stringify({ behavior: "deny", message: "You are a read-only helper. Report what should change instead of changing it." }));
     }
+    // 4.3: Claude Code's own tools (Read, Write, Bash...) stand for the filesystem and shell switches; a room that turned one off refuses it here.
+    const roomWhy = orch.roomDenied(grant, TOOLS.some((t) => t.id === toolId) ? toolId : RoomRules.toolForClaudeName(tool_name) ?? toolId);
+    if (roomWhy) return text(JSON.stringify({ behavior: "deny", message: roomWhy }));
     // 1.1: defense in depth behind Claude Code's own permission rules: a file tool aimed outside the task's worktree is refused here, and audited.
     if (grant.cwd) {
       const c = checkFileToolRequest(tool_name, input, grant.cwd);
@@ -191,6 +197,8 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
   }, async () => {
     const a = agent();
     if (!a || a.tools.filesystem !== true) return deniedAudited("list_granted_folders", "the filesystem tool is switched off for you.");
+    const roomWhy = orch.rooms.denial(grant.agentId, grant.roomId, "filesystem"); // 4.3
+    if (roomWhy) return deniedAudited("list_granted_folders", roomWhy);
     const gs = orch.files.grantsFor(grant.agentId, grant.roomId);
     store.audit(grant.agentId, "file.grants.listed", `${gs.length} grant(s) visible${grant.roomId ? ` from room ${grant.roomId}` : ""}`);
     return text(gs.map((g) => `${g.id} | ${g.label ?? basename(g.path)} | ${g.read ? "read" : "no-read"} ${g.write ? "write" : "no-write"}`).join("\n") || "(no folders granted to you here)");
@@ -233,6 +241,8 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
   }, async ({ proposalId }) => {
     const a = agent();
     if (!a || a.tools.filesystem !== true) return deniedAudited("file_write_status", "the filesystem tool is switched off for you.", quoted(proposalId));
+    const roomWhy = orch.rooms.denial(grant.agentId, grant.roomId, "filesystem"); // 4.3
+    if (roomWhy) return deniedAudited("file_write_status", roomWhy, quoted(proposalId));
     const p = orch.files.proposalFor(grant.agentId, proposalId);
     if (!p) return deniedAudited("file_write_status", "unknown proposal.", quoted(proposalId));
     store.audit(grant.agentId, "file.write.status", `${p.id} ${p.grantId} ${quoted(p.relPath)} ${p.status}`);

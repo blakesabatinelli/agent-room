@@ -25,13 +25,13 @@ export const CLAUDE_TOOL_MAP: Record<string, string[]> = {
   salesforce: ["mcp__salesforce"],
 };
 
-export function claudePermissionArgs(tools: Record<string, boolean>, map = CLAUDE_TOOL_MAP, autoApprove: Record<string, boolean> = {}) {
+export function claudePermissionArgs(tools: Record<string, boolean>, map = CLAUDE_TOOL_MAP, autoApprove: Record<string, boolean> = {}, ask: string[] = []) {
   const allowed = ["mcp__agent-room"];
   const disallowed: string[] = [];
   for (const t of TOOLS) {
     const names = map[t.id] ?? [];
     if (!tools[t.id]) disallowed.push(...names);
-    else if (!t.sensitive || autoApprove[t.id]) allowed.push(...names);
+    else if ((!t.sensitive || autoApprove[t.id]) && !ask.includes(t.id)) allowed.push(...names); // 4.3: a room that says "ask" is never pre-allowed
     // enabled + sensitive, not auto-approved: routed to the approval prompt tool
   }
   return { allowed, disallowed };
@@ -77,7 +77,7 @@ export class ClaudeCodeAdapter implements Adapter {
       }));
       args.push("--permission-prompt-tool", "mcp__agent-room__approval_prompt");
     }
-    const { allowed, disallowed } = req.readOnly ? claudeReadOnly(claudePermissionArgs(req.agent.tools, s.toolMap, req.agent.autoApprove)) : claudePermissionArgs(req.agent.tools, s.toolMap, req.agent.autoApprove); // 3.3
+    const { allowed, disallowed } = req.readOnly ? claudeReadOnly(claudePermissionArgs(req.agent.tools, s.toolMap, req.agent.autoApprove, req.ask)) : claudePermissionArgs(req.agent.tools, s.toolMap, req.agent.autoApprove, req.ask); // 3.3, 4.3
     // 1.1: file tools reach the task folder only (cwd), never a bare `Read`/`Write` that would allow any path. See files/confine.ts.
     args.push("--allowedTools", ...scopeAllowedTools(allowed, req.cwd));
     if (disallowed.length) args.push("--disallowedTools", disallowed.join(","));

@@ -36,6 +36,7 @@ import { withPersona } from "../persona/index.js"; // 3.2
 import { Resumes, ShadowRunner, barredSet, planNotes, realAgents, type ShadowHost } from "../resume/index.js"; // 2.3
 import { attentionFor, type Attention } from "../attention/index.js"; // 2.7
 import { Subagents, subagentSettings, type SubagentHost } from "../subagents/index.js"; // 3.3
+import { RoomRules, StandingRooms } from "../rooms/index.js"; // 4.3
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -118,14 +119,19 @@ export class Orchestrator {
   attention: Attention;
   /** 3.3: helpers (room subagents from spawn_agent, native ones seen in an agent's own stream). */
   subagents: Subagents;
+  /** 4.3: what ROOM.md decides at run time (roster, tools, folders, memory scope), asked the same way everywhere. */
+  rooms: RoomRules;
+  /** 4.3: scheduled goals for standing rooms. */
+  standing: StandingRooms;
 
   /** 1.2: the hub's data folder (the API server keeps local-pair.secret there). */
   get dataDir(): string { return this.opts.dataDir; }
 
   constructor(private store: Store, private approvals: Approvals, private opts: OrchestratorOptions) {
     this.library = new Library(store, opts.libraryDir ?? defaultLibraryRoot());
+    this.rooms = new RoomRules({ store, control: () => this.control }); // 4.3
     // 1.1: the control folder's version history can never be granted to agents (it is read lazily: the control folder may be attached after this).
-    this.files = new FileBroker(store, approvals, { extraProtected: () => (this.control ? [{ path: join(this.control.root, ".git"), because: "the Agent Room control folder's version history can't be shared with agents" }] : []) });
+    this.files = new FileBroker(store, approvals, { rooms: this.rooms /* 4.3 */, extraProtected: () => (this.control ? [{ path: join(this.control.root, ".git"), because: "the Agent Room control folder's version history can't be shared with agents" }] : []) });
     this.goalSources = new GoalSources(this.files, store); // 1.1
     this.workspaces = new TaskWorkspaces({ dataDir: opts.dataDir, git: opts.gitBin, onSecurity: (action, detail) => store.audit("hub", action, detail) }); // 1.1: git config restored, hard links left out
     this.control = opts.control; // 1.9
@@ -150,6 +156,13 @@ export class Orchestrator {
     this.resumes = new Resumes({ store, control: () => this.control, say: (roomId, text) => { if (roomId) this.post(roomId, SYS, text, "system"); } });
     this.shadows = new ShadowRunner(this.shadowHost());
     this.subagents = new Subagents(this.subagentHost()); // 3.3
+    // 4.3: the calendar trigger for standing rooms (started by main.ts with orch.standing.start()).
+    this.standing = new StandingRooms({
+      store, control: () => this.control, attention: this.attention,
+      runGoal: (r, t, o) => this.runGoal(r, t, o), note: (r, t) => { this.log(r, t); },
+      fallbackZone: () => this.attention.settings().timezone,
+      ownerName: () => this.control?.snapshot().user?.fm.name ?? "Owner",
+    });
   }
 
   /** 3.3: what the subagent service may use of the orchestrator. Helpers run through call() like everything else (quota, capacity and the routing log apply). */
@@ -317,13 +330,14 @@ export class Orchestrator {
     return next;
   }
   forgetStatus(agentId: string) { this.statusCache.delete(agentId); }
-  async readyAgents(): Promise<AgentConfig[]> {
-    const enabled = this.enabledAgents();
+  /** Agents that are switched on and signed in. With a room, only that room's roster (4.3). */
+  async readyAgents(roomId?: string): Promise<AgentConfig[]> {
+    const enabled = this.enabledAgents(roomId);
     const st = await Promise.all(enabled.map((a) => this.agentStatus(a)));
     return enabled.filter((_, i) => st[i].ready);
   }
   private agentAuthor(a: AgentConfig): Author { return { kind: "agent", id: a.id, name: a.name }; }
-  private enabledAgents() { return this.store.listAgents().filter((a) => a.enabled); }
+  private enabledAgents(roomId?: string) { return this.rooms.limit(roomId, this.store.listAgents().filter((a) => a.enabled)); } // 4.3: a room's ROOM.md roster limits who works there
   private orchestratorAgent(): AgentConfig | undefined {
     const s = this.store.getSettings();
     return this.store.getAgent(s.orchestratorAgentId) ?? this.enabledAgents()[0];
@@ -344,8 +358,9 @@ export class Orchestrator {
     const cwd = o.cwd ?? this.workspace(agent.id, o.roomId ?? "_orchestrator");
     const grant = url && !o.jsonOnly ? { url, token: this.grantFor(agent.id, o.roomId, o.taskId, o.hop, cwd, o.shadow, o.readOnly) } : undefined;
     const adapter = this.store.getKV("practice_mode", false) ? adapters.mock : adapters[agent.adapter];
+    const rp = o.jsonOnly ? { agent, ask: [] as string[] } : this.rooms.narrow(agent, o.roomId); // 4.3: this room's ROOM.md narrows what the agent may use in this run
     const res = await adapter.run({
-      agent, prompt, jsonOnly: o.jsonOnly, signal: o.signal, systemPrompt: o.systemPrompt,
+      agent: rp.agent, ask: rp.ask, prompt, jsonOnly: o.jsonOnly, signal: o.signal, systemPrompt: o.systemPrompt,
       cwd, dataDir: this.opts.dataDir, mcp: grant, roomId: o.roomId, taskId: o.taskId, // 1.1: dataDir keeps the hub's own files off limits to a confined run
       model: o.profile?.model, effort: o.profile?.effort,
       claimTimeoutMs: this.cfg().claimTimeoutMinutes * 60_000,
@@ -390,7 +405,11 @@ export class Orchestrator {
     const dm = room?.dmAgentId ? this.store.getAgent(room.dmAgentId) : undefined;
     if (dm) { void this.lane(dm.id, () => this.reply(roomId, dm, { from: "owner", text, hop: 0 })); return msg; }
 
-    const tagged = resolveMentions(text, this.enabledAgents());
+    // 4.3: an agent outside the room's roster gets a short "not in this room" reply and does nothing.
+    const mentioned = resolveMentions(text, this.enabledAgents());
+    const tagged = mentioned.filter((a) => this.rooms.allows(roomId, a.id));
+    for (const a of mentioned.filter((m) => !tagged.includes(m))) this.post(roomId, SYS, this.rooms.notInRoom(roomId, a, this.enabledAgents()), "system");
+    if (mentioned.length && !tagged.length) return msg;
     const active = this.activeGoal(roomId);
     // Explicit steering commands: /redirect [@agent] text, /replan text
     const forced = /^\/redirect\b/i.test(text) ? "redirect" : /^\/replan\b/i.test(text) ? "replan" : undefined;
@@ -444,10 +463,11 @@ export class Orchestrator {
   }
 
   private async runCommand(roomId: string, text: string, agentId: string, inv: Invocation) {
-    const ready = await this.readyAgents();
+    const ready = await this.readyAgents(roomId); // 4.3
     const agent = ready.find((a) => a.id === agentId);
     if (!agent) {
       const a = this.store.getAgent(agentId);
+      if (a?.enabled && !this.rooms.allows(roomId, a.id)) { this.post(roomId, SYS, this.rooms.notInRoom(roomId, a, this.enabledAgents()), "system"); return; } // 4.3
       this.post(roomId, SYS, a?.enabled ? `${a.name} isn't connected right now, so /${inv.command.name} didn't run.` : `${a?.name ?? agentId} is switched off. Turn it on from the sidebar to use /${inv.command.name}.`, "system");
       return;
     }
@@ -490,8 +510,9 @@ export class Orchestrator {
       case "stop": this.stopRoom(goal.roomId); break;
       case "aside": {
         const busyIds = new Set([...this.busy, ...this.chatting]);
-        const pick = tagged[0] ?? this.enabledAgents().find((a) => !busyIds.has(a.id) && a.id === this.store.getSettings().orchestratorAgentId)
-          ?? this.enabledAgents().find((a) => !busyIds.has(a.id)) ?? this.orchestratorAgent();
+        const here = this.enabledAgents(goal.roomId); // 4.3
+        const pick = tagged[0] ?? here.find((a) => !busyIds.has(a.id) && a.id === this.store.getSettings().orchestratorAgentId)
+          ?? here.find((a) => !busyIds.has(a.id)) ?? here[0] ?? (this.rooms.rosterIds(goal.roomId) ? undefined : this.orchestratorAgent());
         if (pick) void this.lane(pick.id, () => this.reply(goal.roomId, pick, { from: "owner", text, hop: 0, inProgress: this.progressBrief(goal.id) }));
         break;
       }
@@ -616,11 +637,12 @@ export class Orchestrator {
     this.chatting.add(agent.id);
     this.floor.give(agent.id, roomId);
     this.working(roomId, agent, true, "replying");
-    const agents = this.enabledAgents();
-    const asker = agents.find((a) => a.id === o.from);
+    const agents = this.enabledAgents(roomId); // 4.3: who this room's agent can tag is the roster
+    const asker = this.enabledAgents().find((a) => a.id === o.from);
+    const mine = this.rooms.privateFor(agent.id, roomId); // 4.3: private notes made in another room stay there
     const prompt = withPersona(asker // 3.2: the agent's persona rides at the end of every chat reply (voice only)
-      ? tagPrompt(asker.name, o.text, this.conversation(roomId), this.store.listShared(roomId), this.store.listPrivate(agent.id), agents, agent.id, hops - o.hop - 1)
-      : directPrompt(this.conversation(roomId), this.store.listShared(roomId), this.store.listPrivate(agent.id), [], agents, agent.id, o.inProgress), this.store, this.control, agent, "chat");
+      ? tagPrompt(asker.name, o.text, this.conversation(roomId), this.store.listShared(roomId), mine, agents, agent.id, hops - o.hop - 1)
+      : directPrompt(this.conversation(roomId), this.store.listShared(roomId), mine, [], agents, agent.id, o.inProgress), this.store, this.control, agent, "chat");
     const res = await this.call(agent, prompt, { roomId, hop: o.hop + (asker ? 1 : 0) });
     this.working(roomId, agent, false);
     this.chatting.delete(agent.id);
@@ -639,7 +661,9 @@ export class Orchestrator {
   /** An agent's message tagged other agents: each tagged agent gets a turn to answer. */
   private routeTags(m: Message, hop: number, skip: string[] = []) {
     if (m.author.kind !== "agent") return;
-    const targets = resolveMentions(m.text, this.enabledAgents()).filter((a) => a.id !== m.author.id && !skip.includes(a.id));
+    const tagged = resolveMentions(m.text, this.enabledAgents()).filter((a) => a.id !== m.author.id && !skip.includes(a.id));
+    const targets = tagged.filter((a) => this.rooms.allows(m.roomId, a.id)); // 4.3: a tag to someone outside the roster goes nowhere
+    for (const a of tagged.filter((t) => !targets.includes(t))) this.log(m.roomId, `${m.author.name} tagged ${a.name}, who isn't in this room. Nothing sent.`);
     if (!targets.length) return;
     if (hop >= this.cfg().maxAgentHops) {
       this.post(m.roomId, SYS, `The agents have gone back and forth ${hop} times on this. Over to you: reply here or tag one of them.`, "system");
@@ -656,6 +680,7 @@ export class Orchestrator {
     const room = this.store.getRoom(roomId);
     if (!room) return { ok: false, why: "Room not found." };
     if (room.dmAgentId === agentId) return { ok: true };
+    if (!this.rooms.allows(roomId, agentId)) return { ok: false, why: "You aren't in this room's roster, so you can't post here." }; // 4.3
     if (this.floor.has(agentId, roomId)) return { ok: true };
     if (this.store.listTasks({ roomId }).some((t) => t.assignee === agentId && ["running", "review"].includes(t.status))) return { ok: true };
     return { ok: false, why: "Not your turn: you can post here only while you hold an assignment in this room or after someone tags you. Work comes from wait_for_assignment; don't pick up work from the room yourself." };
@@ -685,10 +710,11 @@ export class Orchestrator {
   async askAgent(grant: McpGrant, target: string, question: string, roomId?: string): Promise<string> {
     if (grant.shadow) return "Nobody can answer right now. Continue without it, or report STATUS: needs_input."; // 2.3
     const asker = this.store.getAgent(grant.agentId);
-    const agent = resolveMentions(`@${target.replace(/^@/, "")}`, this.enabledAgents())[0];
+    const named = resolveMentions(`@${target.replace(/^@/, "")}`, this.enabledAgents())[0];
     const rid = this.roomFor(grant, roomId);
+    const agent = named && this.rooms.allows(rid, named.id) ? named : undefined; // 4.3
     if (!asker || !rid) return "Room not found. Pass the roomId from your assignment.";
-    if (!agent) return `No agent called "${target}". Agents here: ${this.enabledAgents().map((a) => "@" + a.id).join(", ")}.`;
+    if (!agent) return `${named ? `${named.name} isn't in this room.` : `No agent called "${target}".`} Agents here: ${this.enabledAgents(rid).map((a) => "@" + a.id).join(", ")}.`;
     if (agent.id === asker.id) return "You can't ask yourself.";
     const hop = grant.hop ?? 0;
     if (hop >= this.cfg().maxAgentHops) return "This thread has gone back and forth enough. Continue without it, or report STATUS: needs_input.";
@@ -734,8 +760,8 @@ export class Orchestrator {
   }
 
   // ---------- goals
-  async runGoal(roomId: string, text: string, opts: { folderGrantId?: string } = {}): Promise<Goal> {
-    const goal: Goal = { id: id("goal"), roomId, text, status: "planning", createdAt: now() };
+  async runGoal(roomId: string, text: string, opts: { folderGrantId?: string; scheduled?: Goal["scheduled"] /* 4.3 */ } = {}): Promise<Goal> {
+    const goal: Goal = { id: id("goal"), roomId, text, status: "planning", createdAt: now(), ...(opts.scheduled ? { scheduled: opts.scheduled } : {}) };
     // 1.1: a goal on a granted folder. The work lands on agent-room/<goal> (git) or comes back as an approval (anything else).
     const src = opts.folderGrantId ? this.goalSources.usable(opts.folderGrantId, roomId) : undefined;
     if (opts.folderGrantId && src?.ok) { goal.sourceGrantId = opts.folderGrantId; goal.sourceBranch = branchFor(goal.id); }
@@ -776,11 +802,14 @@ export class Orchestrator {
   /** Plan the goal: answer directly, or write a contract and tasks (then maybe ask for approval). */
   private async planStage(goal: Goal, signal: AbortSignal) {
     const roomId = goal.roomId, text = goal.text;
-    const ready = await this.readyAgents();
+    const ready = await this.readyAgents(roomId); // 4.3: only this room's roster is planned
     const agents = realAgents(this.store, ready); // 2.3: agents on probation get no real work (they practise on copies)
     if (!agents.length) {
       goal.status = "failed"; goal.summary = "No agents are connected."; this.store.saveGoal(goal);
-      this.post(roomId, SYS, this.enabledAgents().length
+      const anyone = this.enabledAgents().length, here = this.enabledAgents(roomId).length;
+      this.post(roomId, SYS, anyone && !here
+        ? "Nobody on this room's roster is switched on. Change who is here in ROOM.md (or under room settings), or switch an agent on from the sidebar." // 4.3
+        : anyone
         ? "None of your agents are connected right now. Open an agent in the sidebar to sign it in."
         : "No agents are switched on. Add or enable one from the sidebar.", "system");
       return;
@@ -960,7 +989,7 @@ export class Orchestrator {
     if (!convo.includes(goal.text)) convo += `${convo ? "\n" : ""}Owner: ${goal.text}`;
     const res = await this.call(agent,
       command ? command.prompt : // 2.6: the skill invocation itself (a Claude Code `/command` has to start the prompt)
-      withPersona(directPrompt(convo, this.store.listShared(goal.roomId), this.store.listPrivate(agent.id), this.ownerNotes.get(goal.id) ?? [], this.enabledAgents(), agent.id), this.store, this.control, agent, "chat"), // 3.2
+      withPersona(directPrompt(convo, this.store.listShared(goal.roomId), this.rooms.privateFor(agent.id, goal.roomId), this.ownerNotes.get(goal.id) ?? [], this.enabledAgents(goal.roomId), agent.id), this.store, this.control, agent, "chat"), // 3.2, 4.3
       { roomId: goal.roomId, taskId: task.id, signal });
     this.working(goal.roomId, agent, false);
     this.busy.delete(agent.id);
@@ -1042,7 +1071,7 @@ export class Orchestrator {
           this.waitForOwner(goal.id, `This goal has used its budget of ${budget} task runs and isn't finished.\n${this.ledgerText(g).split("## Tasks")[1]?.split("##")[0]?.trim() ?? ""}\nSay "keep going" to allow more runs, or tell me what to change.`);
           break;
         }
-        const live = ready.length ? new Set((await this.readyAgents()).map((a) => a.id)) : new Set<string>();
+        const live = ready.length ? new Set((await this.readyAgents(goal.roomId)).map((a) => a.id)) : new Set<string>(); // 4.3
         for (const t of ready) {
           if (this.progress(goal.id).runs + inflight.size >= budget) break;
           const agent = this.assign(t, live, g.text);
@@ -1082,7 +1111,7 @@ export class Orchestrator {
       this.waitForOwner(goal.id, `${why}${unmet()} I've already tried ${p.goalReplans} other approach${p.goalReplans === 1 ? "" : "es"}.\nLast problem: ${stuck[0]?.history?.at(-1)?.note?.slice(0, 300) ?? "unknown"}\nTell me how you'd like to proceed: a different approach, a narrower goal, or the missing information.`);
       return false;
     }
-    const agents = realAgents(this.store, await this.readyAgents()); // 2.3: not agents on probation
+    const agents = realAgents(this.store, await this.readyAgents(goal.roomId)); // 2.3: not agents on probation; 4.3: this room's roster
     if (!agents.length) { this.waitForOwner(goal.id, "No agents are connected, so the remaining work can't continue. Connect one and reply here."); return false; }
     this.store.emit("event", { type: "working", roomId: goal.roomId, agentId: "orchestrator", label: "replanning", active: true });
     const notes = this.ownerNotes.get(goal.id) ?? [];
@@ -1162,7 +1191,7 @@ export class Orchestrator {
     // One small task meeting one requirement has already been reviewed against exactly that.
     if (done.length < 2 && (g.contract.requirements?.length ?? 0) < 2) return false;
 
-    const agents = realAgents(this.store, await this.readyAgents()); // 2.3
+    const agents = realAgents(this.store, await this.readyAgents(goal.roomId)); // 2.3, 4.3
     if (!agents.length) return false;
     const files = folder ? readDeliverables(folder, listFiles(folder).filter((f) => f !== "LEDGER.md"), 24000) : "";
     const pool = this.store.getSettings().judgeRotation.map((j) => agents.find((a) => a.id === j)).filter(Boolean) as AgentConfig[];
@@ -1206,7 +1235,7 @@ export class Orchestrator {
   private assign(t: Task, live: Set<string>, goalText: string): AgentConfig | undefined {
     const s = this.store.getSettings();
     const free = (a: AgentConfig) => !this.busy.has(a.id) && !this.chatting.has(a.id) && live.has(a.id);
-    const enabled = this.enabledAgents();
+    const enabled = this.enabledAgents(t.roomId); // 4.3: only this room's roster takes its work
     // 1.3: a task that needs a data source goes only to agents that have it. If no agent can, it waits and the owner is told once.
     const gate = needsGate(t, enabled, this.control);
     if (gate && !gate.ok.size) { this.holdForNeeds(t, gate, enabled); return undefined; }
@@ -1403,7 +1432,7 @@ export class Orchestrator {
     const deps = this.store.listTasks({ goalId: goal.id }).filter((t) => task.dependsOn.includes(t.id));
     const notes = this.ownerNotes.get(goal.id) ?? [];
     const before = snapshot(work);
-    const prompt = withPersona(taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.store.listPrivate(agent.id), notes, this.enabledAgents(), agent.id, feedback, { path: work, files: [...before.keys()], ledger: join(folder, "LEDGER.md"), note: this.goalSources.note(fresh) /* 1.1 */ }, this.ledgerText(fresh), this.decisionsFor(fresh), learnedBlock(this.store, this.control, agent, task.taskType) /* 2.1 */), this.store, this.control, agent, "task"); // 3.2: persona last, voice only
+    const prompt = withPersona(taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.rooms.privateFor(agent.id, goal.roomId), notes, this.enabledAgents(goal.roomId), agent.id, feedback, /* 4.3 */ { path: work, files: [...before.keys()], ledger: join(folder, "LEDGER.md"), note: this.goalSources.note(fresh) /* 1.1 */ }, this.ledgerText(fresh), this.decisionsFor(fresh), learnedBlock(this.store, this.control, agent, task.taskType) /* 2.1 */), this.store, this.control, agent, "task"); // 3.2: persona last, voice only
     let res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: work });
     let usage: RunUsage | undefined = res.usage, ms = res.durationMs, ranModel = res.model;
     // A rate limit or timeout says nothing about the agent's work: wait and retry, without spending an attempt.
@@ -1424,7 +1453,7 @@ export class Orchestrator {
 
     if (!res.ok) {
       // 1.6: a rate limit isn't the agent's work: hand the task to another agent now rather than waiting on this one.
-      if (isRateLimit(res.error) && quotaFor(this.store).mayReroute(task.id, this.enabledAgents().length)) return this.rerouteRateLimited(goal, task, agent, res.error, route);
+      if (isRateLimit(res.error) && quotaFor(this.store).mayReroute(task.id, this.enabledAgents(goal.roomId).length)) return this.rerouteRateLimited(goal, task, agent, res.error, route);
       route("run_failed", this.tagFailure(task, agent.id, { kind: "run_error" }, firstLine(res.error)));
       recordOutcome(this.store, agent.id, task.taskType, { seconds: res.durationMs / 1000, failed: true, revision: isRevision }, ranModel ?? profile.model /* 2.4 */);
       this.addHistory(task, agent.id, "fail", firstLine(res.error));
@@ -1584,7 +1613,7 @@ export class Orchestrator {
   }
 
   private async replan(goal: Goal, task: Task, signal: AbortSignal): Promise<boolean> {
-    const agents = realAgents(this.store, await this.readyAgents()); // 2.3
+    const agents = realAgents(this.store, await this.readyAgents(goal.roomId)); // 2.3, 4.3
     const contract = this.store.getGoal(goal.id)?.contract;
     const r = await this.callJson<{ owner?: string; description?: string; scope?: string; criteria?: unknown; approach?: string }>(
       replanPrompt(task, contract, agents), undefined, signal);
@@ -1629,24 +1658,38 @@ export class Orchestrator {
    * with too few families ready (or the jury switched off) this is the single rotating judge it always was (judgeOne).
    */
   private async judge(task: Task, worker: AgentConfig, contract: Contract | undefined, notes: string[], signal: AbortSignal, changed: string[] = [], files = "", previousFeedback?: string, notJudge?: string): Promise<Judgment> {
-    const host: JuryHost = { store: this.store, readyAgents: () => this.readyAgents(), call: (a, p, o) => this.call(a, p, o), callJson: (p, a, sig, r) => this.callJson(p, a, sig, r), governor: this.governor, quotaLimited: (aid) => quotaLimited(this.store, aid) };
-    const r = await juryReview(host, { task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge });
-    if ("judgment" in r) return r.judgment;
-    if ("off" in r) return this.judgeOne(task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge);
-    return r.finish(await this.judgeOne(r.task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge?.split(",")[0]));
+    // 4.3: judges come from the room's roster. Only when a jury can't be formed inside it are others used, and then it is recorded (outsideRoster).
+    const host = (limit: boolean): JuryHost => ({ store: this.store, readyAgents: () => this.readyAgents(limit ? task.roomId : undefined), call: (a, p, o) => this.call(a, p, o), callJson: (p, a, sig, r) => this.callJson(p, a, sig, r), governor: this.governor, quotaLimited: (aid) => quotaLimited(this.store, aid) });
+    const input = { task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge };
+    const bounded = !!this.rooms.rosterIds(task.roomId);
+    let r = await juryReview(host(bounded), input);
+    if (bounded && "fallback" in r) { const wide = await juryReview(host(false), input); if ("judgment" in wide) r = wide; }
+    if ("judgment" in r) return this.markOutsideRoster(task, r.judgment);
+    if ("off" in r) return this.markOutsideRoster(task, await this.judgeOne(task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge));
+    return this.markOutsideRoster(task, r.finish(await this.judgeOne(r.task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge?.split(",")[0])));
+  }
+
+  /** 4.3: a judgment by someone outside the room's roster says so on the judgment, in the audit log and in the room's work log. */
+  private markOutsideRoster(task: Task, j: Judgment): Judgment {
+    const outside = j.judgeAgentId.split(",").filter((x) => this.store.getAgent(x) && !this.rooms.allows(task.roomId, x));
+    if (!outside.length) return j;
+    this.store.audit("hub", "judge.outside_roster", `"${task.title}": ${outside.join(", ")} judged outside the room's roster because the roster couldn't form the review`);
+    this.log(task.roomId, `Judged "${task.title}" with ${outside.map((x) => this.store.getAgent(x)?.name ?? x).join(", ")} from outside this room's roster: the roster couldn't form the review on its own.`, task.id, "task_update");
+    return { ...j, outsideRoster: outside };
   }
 
   private async judgeOne(task: Task, worker: AgentConfig, contract: Contract | undefined, notes: string[], signal: AbortSignal, changed: string[] = [], files = "", previousFeedback?: string, notJudge?: string): Promise<Judgment> {
     const s = this.store.getSettings();
     const ready = new Set((await this.readyAgents()).map((a) => a.id));
-    const pool = s.judgeRotation.map((j) => this.store.getAgent(j)).filter((a): a is AgentConfig => !!a && a.enabled && ready.has(a.id) && !quotaLimited(this.store, a.id)); // 1.6: not a judge that is out of quota
+    const wide = s.judgeRotation.map((j) => this.store.getAgent(j)).filter((a): a is AgentConfig => !!a && a.enabled && ready.has(a.id) && !quotaLimited(this.store, a.id)); // 1.6: not a judge that is out of quota
+    const pool = this.rooms.judgePool(task.roomId, wide, [worker.id, notJudge]).pool; // 4.3: the roster's judges first; others only when nobody inside can judge
     // rotate judges; avoid letting an agent grade its own work when possible
     let judge: AgentConfig | undefined;
     for (let i = 0; i < pool.length; i++) {
       const cand = pool[(this.judgeTurn + i) % pool.length];
       if (cand.id !== worker.id && cand.id !== notJudge) { judge = cand; this.judgeTurn += i + 1; break; }
     }
-    judge ??= pool[0] ?? this.orchestratorAgent();
+    judge ??= pool[0] ?? (this.rooms.rosterIds(task.roomId) ? this.enabledAgents(task.roomId)[0] : undefined) ?? this.orchestratorAgent();
     const j = await this.callJson<{ score: number; verdict: Judgment["verdict"]; feedback: string; criteria?: Record<string, { verdict?: string; evidence?: string }>; on_task?: boolean; drift?: string; failure_category?: string }>(
       judgePrompt(task, contract, notes, changed, files, previousFeedback), judge, signal, "reviewer");
     if (!j) return { score: 0.5, verdict: "revise", feedback: "The check couldn't be read; please resubmit with the STATUS block.", judgeAgentId: judge?.id ?? "none" };
@@ -1681,7 +1724,8 @@ export class Orchestrator {
       g.summary = tasks[0].result ?? (ok ? "Done." : "Failed.");
       this.store.saveGoal(g); this.ownerNotes.delete(goal.id); return;
     }
-    const orch = (await this.readyAgents()).find((a) => a.id === this.store.getSettings().orchestratorAgentId) ?? this.orchestratorAgent()!;
+    const here = await this.readyAgents(goal.roomId); // 4.3: the summary is posted by an agent of this room
+    const orch = here.find((a) => a.id === this.store.getSettings().orchestratorAgentId) ?? (this.rooms.rosterIds(goal.roomId) ? here[0] : undefined) ?? this.orchestratorAgent()!;
     this.writeLedger(g);
     const text = await this.call(orch, withPersona(summaryPrompt(g.text, g.contract, live, report), this.store, this.control, orch, "chat"), { jsonOnly: true }); // 3.2: the final report is the orchestrator speaking
     const checks = (report.passed ? `✓ ${gateText(report)}` : `⚠︎ ${gateText(report)}`) + jurySummary(this.store, g.id); // 2.2: how it was judged
@@ -1723,8 +1767,21 @@ export class Orchestrator {
       return Promise.resolve({ id: id("apr"), ...p, detail: "", status: "rejected", createdAt: now(), decidedAt: now() });
     }
     const a = this.store.getAgent(grant.agentId);
+    // 4.3: the room's ROOM.md decides first. "off" is a refusal (no card for the owner); "ask" is never skipped, whatever the agent auto-approves.
+    const level = this.rooms.level(grant.agentId, grant.roomId, tool);
+    if (this.rooms.forbids(a, grant.roomId, tool)) {
+      this.store.audit(grant.agentId, "room.denied", `${tool}: ${action}`.slice(0, 200));
+      return Promise.resolve({ id: id("apr"), ...p, detail: "", status: "rejected", createdAt: now(), decidedAt: now() });
+    }
     // "Run without asking" only counts while the tool itself is switched on.
-    if (a?.tools[tool] && a.autoApprove?.[tool]) return Promise.resolve(this.approvals.auto(p));
+    if (level !== "ask" && a?.tools[tool] && a.autoApprove?.[tool]) return Promise.resolve(this.approvals.auto(p));
     return this.approvals.request(p);
+  }
+
+  /** 4.3: why this room's ROOM.md stops this agent from using a tool (for MCP tools to say), or undefined. Audited. */
+  roomDenied(grant: McpGrant, tool: string): string | undefined {
+    const why = this.rooms.denial(grant.agentId, grant.roomId, tool);
+    if (why) this.store.audit(grant.agentId, "room.denied", `${tool}${grant.roomId ? ` in room ${grant.roomId}` : ""}`);
+    return why;
   }
 }

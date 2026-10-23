@@ -13,6 +13,7 @@ import {
   GrantRefused, MAX_REL_PATH, PathDenied, assertPlainPath, inspectGrantRoot, isInside, resolveInGrant, touchesGit, type GrantRootOptions,
 } from "./paths.js";
 import { NOT_TEXT, isBinaryOrInvalid, isWellFormedText, withoutPartialTail } from "./text.js";
+import type { RoomGate } from "../rooms/rules.js"; // 4.3
 
 const GRANTS_KEY = "folder_grants";
 const PROPOSALS_KEY = "write_proposals";
@@ -53,6 +54,8 @@ export interface BrokerOptions {
   systemRoots?: string[];
   /** Paths that may not be granted besides the usual ones, with the words shown to the owner (the control folder's version history). */
   extraProtected?: () => { path: string; because: string }[];
+  /** 4.3: what a room's ROOM.md limits (the folder grants its goals and file tools may use, and whether the filesystem tool is off there). */
+  rooms?: RoomGate;
 }
 
 /** What the hub holds in memory for a pending proposal: the exact bytes the owner is approving, and what they replace. */
@@ -169,7 +172,14 @@ export class FileBroker {
 
   /** Does this grant cover this agent in this room? (the same test grantsFor applies) */
   private covers(g: FolderGrant, agentId: string, roomId?: string): boolean {
+    if (roomId && !this.roomAllows(g.id, roomId)) return false; // 4.3
     return (g.agentId === "*" || g.agentId === agentId) && (g.roomId === undefined || g.roomId === roomId);
+  }
+
+  /** 4.3: ROOM.md `folders` names the only grants a room's goals and file tools may use. No list, no limit. */
+  roomAllows(grantId: string, roomId: string): boolean {
+    const only = this.opts.rooms?.folders(roomId);
+    return !only || only.includes(grantId);
   }
 
   /** Grants this agent may see from this room. Room grants narrow: no room, no room-scoped grant. */
@@ -600,6 +610,7 @@ export class FileBroker {
     const agent = this.store.getAgent(agentId);
     if (!agent || !agent.enabled) return this.deny(agentId, op, rel, "unknown or disabled agent");
     if (agent.tools.filesystem !== true) return this.deny(agentId, op, rel, "the filesystem tool is switched off for this agent");
+    if (this.opts.rooms?.level(agentId, roomId, "filesystem") === "off") return this.deny(agentId, op, rel, "the filesystem tool is switched off for this agent in this room"); // 4.3
     const visible = this.grantsFor(agentId, roomId);
     if (visible.length === 0) return this.deny(agentId, op, rel, "no folder has been granted to this agent here");
     const can = (g: FolderGrant) => (op === "write" ? g.write : g.read);

@@ -10,6 +10,7 @@ import { GoalCard } from "../components/GoalCard"; // 3.1
 import { TaskVerdict } from "../components/TaskVerdict"; // 3.1
 import { chipMessageIds } from "@agent-room/shared/src/goalview";
 import { HelperBadge, helperStatus, treeRows } from "../components/SubagentTree"; // 3.3
+import { RoomSettings } from "../components/RoomSettings"; // 4.3
 import { lift, radius, space, type as t, usePalette } from "../theme";
 
 type Row = { kind: "day"; id: string; at: number } | { kind: "new"; id: string } | { kind: "msg"; id: string; m: Message; grouped: boolean };
@@ -28,6 +29,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
   const dmAgent = room?.dmAgentId ? agents.find((a) => a.id === room.dmAgentId) : undefined;
   const [text, setText] = useState("");
   const [details, setDetails] = useState(false);
+  const [settings, setSettings] = useState(false); // 4.3: the room's ROOM.md, in the same right-hand pane
   const [height, setHeight] = useState(22);
   const list = useRef<FlatList<Row>>(null);
   const input = useRef<TextInput>(null);
@@ -88,7 +90,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
   // Seeing the room marks it read up to the newest message, on every paired device.
   const newest = messages.at(-1)?.createdAt ?? 0;
   useEffect(() => { if (ready && roomId && newest) void hub?.markRead(roomId, newest).catch(() => {}); }, [ready, roomId, newest]);
-  useEffect(() => { setText(""); setDetails(false); setFolderId(""); setPickOpen(false); }, [roomId]);
+  useEffect(() => { setText(""); setDetails(false); setSettings(false); setFolderId(""); setPickOpen(false); }, [roomId]);
   useEffect(() => { if (s.composerStamp) input.current?.focus(); }, [s.composerStamp]); // 3.1: "Start a goal" in the ⌘K palette
 
   // 1.1: a goal can work in a folder the owner granted. Only grants that can carry a goal are offered: open to every
@@ -188,7 +190,8 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
       {room && !dmAgent && room.paused ? <IconButton glyph="▶ Resume" label="Resume" onPress={() => hub?.pause(room.id, false)} /> : null}
       {room && !dmAgent && !room.paused ? <IconButton glyph="❚❚" label="Pause" onPress={() => hub?.pause(room.id, true)} /> : null}
       {busy.length && room ? <IconButton glyph="■ Stop" label="Stop all work" onPress={() => hub?.stop(room.id)} /> : null}
-      <IconButton glyph="ⓘ" label="Activity" active={details} onPress={() => setDetails(!details)} badge={log.length || undefined} />
+      {!dmAgent ? <IconButton glyph="⚙" label="Room settings" active={settings} onPress={() => { setSettings(!settings); setDetails(false); }} /> : null}
+      <IconButton glyph="ⓘ" label="Activity" active={details} onPress={() => { setDetails(!details); setSettings(false); }} badge={log.length || undefined} />
     </View>
   );
 
@@ -344,10 +347,15 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
     <View style={{ flex: 1, backgroundColor: p.canvas }}>
       {header}
       <View style={{ flex: 1, flexDirection: "row" }}>
-        {details && !wide && width < 700 ? null : <View style={{ flex: 1 }}>{chat}</View>}
+        {(details || settings) && !wide && width < 700 ? null : <View style={{ flex: 1 }}>{chat}</View>}
         {details ? (
           <View style={{ width: width < 700 ? "100%" : 340, borderLeftWidth: 1, borderColor: p.line, backgroundColor: p.canvas }}>
             <Activity log={log} onClose={() => setDetails(false)} />
+          </View>
+        ) : null}
+        {settings && roomId && !dmAgent ? (
+          <View style={{ width: width < 700 ? "100%" : 340, borderLeftWidth: 1, borderColor: p.line, backgroundColor: p.canvas }}>
+            <RoomSettings roomId={roomId} onClose={() => setSettings(false)} />
           </View>
         ) : null}
       </View>

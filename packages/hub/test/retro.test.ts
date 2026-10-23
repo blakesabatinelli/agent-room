@@ -34,7 +34,7 @@ async function mk(t: TestContext, o: { control?: boolean } = {}) {
 }
 
 const git = (root: string, ...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" });
-const commits = (root: string) => git(root, "log", "--format=%an|%s").trim().split("\n").filter(Boolean).filter((l) => !l.includes("|Résumé: ")); // 2.3: the résumé writer's commits are its own
+const commits = (root: string) => git(root, "log", "--format=%an|%s").trim().split("\n").filter(Boolean).filter((l) => !l.includes("|Résumé: ") && !l.includes("|Memory: ")); // 2.3, 2.5: the résumé writer's and the memory keeper's commits are their own (they land a moment after a goal, so they race the count)
 /** The commit count once it has stopped moving: the memory keeper writes "Did <task>" notes on its own clock after a goal is done, and on a busy machine they land late. */
 const settledCommits = async (root: string) => { let n = -1; for (let i = 0; i < 40; i++) { const now = commits(root).length; if (now === n) return now; n = now; await new Promise((r) => setTimeout(r, 400)); } return n; };
 const read = (root: string, rel: string) => readFileSync(join(root, rel), "utf8");

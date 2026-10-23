@@ -11,6 +11,7 @@ import { MemoryExporter, type ExportEnv, type ExportResult } from "./export.js";
 import { bodyHash, buildMemoryFile, normText, oneLine, parseSourceLabel, sameSource, sha } from "./format.js";
 import { DAY_MS, PRUNE_AFTER_DAYS, dateOf, describeSource, endOfDate, ensureProvenance, expiryFrom, isExpired, isLive, isMemoryKind, shortDate, ttlSetting, validDays } from "./model.js";
 import { parseFacts } from "../control/facts.js";
+import { isStandingRoom } from "../rooms/standing.js"; // 4.3
 
 /**
  * 2.5: the keeper. Only the orchestrator writes shared memory; this is the code it does that with.
@@ -389,7 +390,8 @@ export class MemoryKeeper {
   private roomFor(c: ControlFolder, slug: string) { return this.d.store.listRooms().find((r) => !r.dmAgentId && c.slugFor(r.id) === slug); }
   private rowsFor(c: ControlFolder, key: string): MemoryEntry[] {
     const [type, name] = [key.slice(0, key.indexOf(":")), key.slice(key.indexOf(":") + 1)];
-    if (type === "agent") return this.d.store.allMemory().filter((e) => e.scope === "private" && e.ownerAgentId === name);
+    // 4.3: what an agent noted in a standing room stays in that room; it isn't copied into the agent's own MEMORY.md, which every room's context carries.
+    if (type === "agent") return this.d.store.allMemory().filter((e) => e.scope === "private" && e.ownerAgentId === name && !(e.roomId && isStandingRoom(this.d.store, c, e.roomId)));
     const room = this.roomFor(c, name);
     return room ? this.d.store.allMemory().filter((e) => e.scope === "shared" && e.roomId === room.id) : [];
   }
@@ -470,6 +472,7 @@ export class MemoryKeeper {
     const c = this.d.control(); const out = new Set<string>();
     for (const r of this.d.store.listRooms()) {
       if (r.dmAgentId) { if (r.dmAgentId === agentId) out.add(r.id); continue; }
+      if (isStandingRoom(this.d.store, c, r.id)) continue; // 4.3: a standing room's facts are not exported into the agent's own context files
       const roster = c?.rosterFor(r.id);
       if (!roster || !roster.length || roster.includes(agentId)) out.add(r.id);
     }

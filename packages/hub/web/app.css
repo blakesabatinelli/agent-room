@@ -52,6 +52,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .icon { font-size: 30px; line-height: 1; padding: 0 6px 4px 0; color: var(--ink-strong); }
 .tool { width: 34px; height: 34px; border-radius: 8px; color: var(--muted); font-size: 18px; line-height: 1; }
 .tool:active { background: var(--raised); }
+.icon.info { font-size: 22px; padding: 0 4px; }
 .pill { font-size: 13px; font-weight: 600; padding: 5px 10px; border-radius: 99px; background: var(--accent); color: var(--on-accent); }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--warn); flex: none; }
 .dot.on { background: var(--ok); }
@@ -225,7 +226,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
 
 /* permissions */
-.section .av.mini { display: inline-flex; width: 20px; height: 20px; border-radius: 50%; font-size: 11px; vertical-align: -4px; margin-right: 8px; }
+.section .av.mini, .card .av.mini { display: inline-flex; width: 20px; height: 20px; border-radius: 50%; font-size: 11px; vertical-align: -4px; margin-right: 8px; }
 .kv { display: flex; gap: 10px; margin-top: 6px; font-size: 14px; }
 .kv .k { flex: none; width: 70px; color: var(--muted); }
 .kv .v { color: var(--ink-strong); overflow-wrap: anywhere; user-select: text; }
@@ -333,12 +334,12 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .rline.warn { color: var(--warn); }
 .rbtn { margin-top: 10px; }
 /* 3.3 tasks: the room's tasks as a tree, helpers indented under the task that started them */
-.pill.quiet { background: var(--bg); color: var(--accent); border: 1px solid var(--line-strong); }
+.pill.quiet { background: var(--canvas); color: var(--accent); border: 1px solid var(--line-strong); }
 .trow { display: flex; align-items: flex-start; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
 .trow .av { width: 24px; height: 24px; border-radius: 6px; font-size: 12px; }
 .trow.d1 { padding-left: 34px; } .trow.d2 { padding-left: 52px; } .trow.d3 { padding-left: 70px; } .trow.d4 { padding-left: 88px; }
 .trow .tbody { flex: 1; min-width: 0; }
-.ttitle { font-size: 15px; color: var(--strong); overflow-wrap: anywhere; }
+.ttitle { font-size: 15px; color: var(--ink-strong); overflow-wrap: anywhere; }
 .tsub { margin-top: 2px; font-size: 13px; color: var(--muted); }
 .tsub.s-done { color: var(--ok); } .tsub.s-failed { color: var(--danger); } .tsub.s-waiting { color: var(--warn); }
 .tag { display: inline-block; margin-left: 4px; padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: 99px; font-size: 11px; font-weight: 600; color: var(--muted); vertical-align: 1px; }
