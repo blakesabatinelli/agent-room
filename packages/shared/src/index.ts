@@ -423,6 +423,7 @@ export interface LibraryDoc {
   frontMatter: DocFrontMatter;
   bytes: number;
   indexedAt: number;
+}
 
 // ---- 0.3 File access (spike)
 
