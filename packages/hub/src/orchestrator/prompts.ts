@@ -1,5 +1,6 @@
 import type { AgentConfig, AgentScore, Contract, GateReport, MemoryEntry, Requirement, Task } from "@agent-room/shared";
 import { REPORT_FORMAT, gateText, handle, profileText, profilesOf, roster } from "./contract.js";
+import { capabilityText } from "../discovery/routing.js"; // 1.3
 
 const TYPES = "writing | research | coding | analysis | data | other";
 const mem = (m: MemoryEntry[]) => m.map((x) => `- ${x.text}`).join("\n") || "- (none)";
@@ -15,7 +16,7 @@ function track(agents: AgentConfig[], scores: AgentScore[]) {
     const s = scores.filter((x) => x.agentId === a.id && x.runs > 0)
       .map((x) => `${x.taskType} ${Math.round(x.quality * 100)}/100 over ${x.runs}`).join(", ");
     const ps = profilesOf(a).map((p) => `${p.role} tier ${p.tier} (${profileText(p)})`).join("; ");
-    return `- ${handle(a)}: ${a.name} — profiles: ${ps}${s ? ` — track record: ${s}` : " — no track record yet"}`;
+    return `- ${handle(a)}: ${a.name} — profiles: ${ps}${capabilityText(a)}${s ? ` — track record: ${s}` : " — no track record yet"}`; // 1.3: capabilityText says what data sources it can reach
   }).join("\n");
 }
 
@@ -26,6 +27,7 @@ const PLAN_TASK_SCHEMA = `{"key":"t1","owner":"<agent id>","title":"...","role":
   "scope":"what this task may touch","outOfScope":["what belongs to other tasks"],
   "files":["files this task alone may create or change, e.g. research.md"],
   "criteria":["checkable statement", {"text":"statement a command can decide","check":"shell command"}],
+  "needs":["data sources or connectors this task must read, e.g. salesforce, gmail, drive, slack, snowflake; [] when none"],
   "taskType":"research","dependsOn":[]}`;
 
 export const planPrompt = (goal: string, agents: AgentConfig[], memory: MemoryEntry[], ownerNotes: string[], conversation = "", scores: AgentScore[] = [], lead?: string, problems: string[] = [], previous?: string) => `[[PLAN]]
@@ -70,6 +72,9 @@ How to plan:
 - Each criterion is one statement a reviewer can mark PASS or FAIL from the files alone.
 - When a script can decide a criterion, give it a "check": a read-only shell command run in the shared
   folder, exit 0 = pass (e.g. test -s summary.md, [ $(wc -w < summary.md) -le 200 ], npm test).
+- A task that must read a data source (CRM, email, files in Drive, Slack, a warehouse) lists it in "needs" and goes to an
+  agent whose line above says it can reach that source. Never give it to one that can't; if none can, still list the need.
+  Use "needs": [] for work that needs no outside source.
 - Prefer the agent with the best track record for the task type; spread work only when it helps.
 ${lead ? `- ${lead} coordinates; don't give it every task.\n` : ""}- Roles: explorer to sweep many files for one answer, researcher for outside facts, worker to build,
   reviewer only for an independent check of hard-to-undo work. Don't use the strongest profile for routine work.

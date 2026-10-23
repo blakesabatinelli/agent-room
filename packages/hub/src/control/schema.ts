@@ -76,7 +76,7 @@ export const schemas = {
       provider: str, enabled: z.boolean(),
       binary: z.string().optional(), model: z.string().optional(), profiles: z.array(profile).max(8).optional(),
     }),
-    platform: z.object({ connectors: strList, data_sources: strList, skills: strList }).default({}),
+    platform: z.object({ connectors: strList, data_sources: strList, skills: strList, tools: strList }).default({}),
     room_allows: levelMap,
     discovered: date.optional(),
   }),

@@ -10,6 +10,7 @@ import { defaultTailscale } from "./remote/tailscale.js";
 import { remoteHost } from "./remote/status.js";
 import { connectTunnel } from "./relay/tunnel.js";
 import { ControlFolder, defaultControlRoot } from "./control/folder.js";
+import { DiscoveryService } from "./discovery/service.js"; // 1.3
 
 // Apps launched from Finder get a thin PATH; make sure the agent CLIs are findable.
 const home = homedir();
@@ -30,13 +31,20 @@ let control: ControlFolder | undefined = new ControlFolder(process.env.AGENT_ROO
 try { await control.init(); control.start(); } catch (e) { console.error(`Control folder unavailable (${(e as Error).message}); running without it.`); control = undefined; }
 const orch = new Orchestrator(store, approvals, { dataDir, mcpUrl: () => `http://127.0.0.1:${port}/mcp`, control });
 const tailscale = defaultTailscale();
-const app = await buildServer({ store, orch, approvals, ownerName, tailscale });
+// 1.3: finds the agents, tools and local model servers on this Mac and joins Hermes to the hub.
+const discovery = new DiscoveryService(store, { control: () => orch.control, mcpUrl: () => `http://127.0.0.1:${port}/mcp` });
+const app = await buildServer({ store, orch, approvals, ownerName, tailscale, discovery });
 // 1.5: record what the hub found, so a surprising schedule can be explained later.
 const cap = orch.governor.snapshot();
 store.audit("hub", "capacity.detected", `${cap.summary}. ${cap.plan.reason}`);
 console.log(`Capacity: ${cap.summary}`);
 
 await app.listen({ host: "0.0.0.0", port });
+// 1.3: look around in the background (it can take a few seconds) and again every half hour. Not in demo mode, which uses practice agents.
+if (!demo) {
+  void discovery.run().then((r) => console.log(`Discovery: ${r.summary}`)).catch((e) => console.error(`Discovery failed: ${(e as Error).message}`));
+  discovery.startTimer();
+}
 // 1.4: drop worktrees left behind by tasks that are no longer open, then pick up any work that was running when the hub last stopped.
 await orch.pruneWorktrees().catch(() => undefined);
 const resumed = orch.recover();

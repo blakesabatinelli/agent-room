@@ -17,6 +17,8 @@ export interface RawPlanTask {
   key: string; owner?: string; title: string; description: string; taskType?: string; acceptance?: string;
   criteria?: unknown; scope?: string; outOfScope?: string[]; role?: string; files?: string[]; dependsOn?: string[];
   output?: string; covers?: string[];
+  /** 1.3: data sources or connectors this task needs ("salesforce", "gmail"). Cleaned in buildTasks. */
+  needs?: unknown;
 }
 
 export function newProgress(): GoalProgress { return { runs: 0, stall: 0, goalReplans: 0, verifyRounds: 0 }; }

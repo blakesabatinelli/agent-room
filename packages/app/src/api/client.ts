@@ -1,5 +1,5 @@
 import type {
-  AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, McpConnection, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
+  AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
   Message, OrchestratorSettings, RemoteStatus, Room, ServerEvent, Subscription, SubscriptionStatus, Task,
 } from "@agent-room/shared";
 
@@ -9,6 +9,9 @@ export interface SetupInfo {
   onboarded: boolean;
   phone: { url: string | null; code: string };
 }
+
+/** What POST /discovery/hermes/connect says. `snippet` is what to paste by hand when it couldn't write the file itself. */
+export interface HermesConnectResult { status: "connected" | "updated" | "unchanged" | "skipped" | "failed"; detail: string; snippet: string }
 
 export class Hub {
   constructor(public baseUrl: string, public token?: string) {}
@@ -92,6 +95,12 @@ export class Hub {
   controlHistory = (path?: string) => this.req<ControlCommit[]>(`/control/history${path ? `?path=${encodeURIComponent(path)}` : ""}`);
   controlRevert = (commit: string) => this.send<{ ok: boolean; commit: string; files: string[] }>("POST", `/control/revert/${commit}`);
   controlLint = () => this.send<{ blocks: ControlNotice[]; flags: ControlNotice[] }>("POST", "/control/lint");
+  // 1.3 agent discovery
+  discovery = () => this.req<DiscoveryState>("/discovery");
+  runDiscovery = () => this.send<DiscoveryState>("POST", "/discovery/run");
+  saveDiscoverySettings = (connectAutomatically: boolean) => this.send<DiscoveryState>("PUT", "/discovery/settings", { connectAutomatically });
+  connectHermes = () => this.send<HermesConnectResult>("POST", "/discovery/hermes/connect");
+  invite = (id: string) => this.send<McpInvite>("POST", `/agents/${id}/invite`);
   mcpToken = (agentId: string, name: string) => this.send<{ token: string; url: string }>("POST", "/mcp-tokens", { agentId, name });
 
   /** Live events with automatic reconnect. Returns a stop function. */

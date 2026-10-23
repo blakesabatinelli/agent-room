@@ -7,6 +7,7 @@ import type { Store } from "../db/store.js";
 import { buildTaskContext, type TaskContextInput } from "./context.js";
 import { ControlGit } from "./git.js";
 import { analyzeFolder, checkFile, walk, type Analysis, type FileResult } from "./lint.js";
+import { editFrontMatter, seqNode } from "./parse.js";
 import { agentLevel } from "./permissions.js";
 import { SENSITIVE, classify, todayString, type FileMeta, type Level } from "./schema.js";
 import { buildSnapshot, effectivePermissions, emptySnapshot, type ControlSnapshot } from "./snapshot.js";
@@ -200,6 +201,42 @@ export class ControlFolder {
 
   /** Re-read the folder now (also what the watcher does after its debounce). */
   load(): Promise<void> { return this.enqueue(() => this.loadNow({ emit: true })); }
+
+  // ---------------------------------------------------------------- 1.3 discovery
+
+  /**
+   * 1.3: write what an agent's platform can reach into its TOOLS.md `platform` block (and the `discovered` date).
+   * Only that block changes: the owner's `room_allows` and `runtime` and the notes stay. One commit by the hub, and only
+   * when the lists changed. A TOOLS.md that has a problem is left alone (the owner is told by the linter, not twice).
+   */
+  setPlatform(agentId: string, platform: { connectors: string[]; data_sources: string[]; skills: string[]; tools: string[] }): Promise<"written" | "unchanged" | "skipped"> {
+    return this.enqueue(async () => {
+      if (!AGENT_ID.test(agentId)) return "skipped";
+      const rel = `agents/${agentId}/TOOLS.md`;
+      if (!this.exists(rel)) {
+        if (!this.store.getAgent(agentId)) return "skipped";
+        this.bump(`agent:${agentId}`, 1);
+        await this.syncAgent(agentId); // writes SOUL.md, TOOLS.md and the policy lines for an agent that is new to the folder
+        if (!this.exists(rel)) return "skipped";
+      }
+      const f = checkFile(rel, { kind: "tools", agent: agentId }, this.read(rel));
+      if (f.blocks.length) return "skipped";
+      const today = this.today();
+      const next = editFrontMatter(f.text, (doc) => {
+        let changed = false;
+        for (const [k, v] of Object.entries(platform)) {
+          const cur = (doc.getIn(["platform", k]) as { toJSON?: () => unknown } | undefined)?.toJSON?.() ?? [];
+          if (JSON.stringify(cur) !== JSON.stringify(v)) { doc.setIn(["platform", k], seqNode(doc, v)); changed = true; }
+        }
+        if (changed) { doc.set("discovered", today); doc.set("updated", today); doc.set("updated_by", "hub"); }
+      });
+      if (next === f.text) return "unchanged";
+      this.write(rel, next);
+      await this.commit([rel], `Discovery: what ${agentId} can reach`, "hub");
+      await this.loadNow({ emit: true, changed: [rel] });
+      return "written";
+    });
+  }
 
   // ---------------------------------------------------------------- files
 

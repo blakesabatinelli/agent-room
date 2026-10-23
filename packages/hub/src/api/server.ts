@@ -20,6 +20,11 @@ import { PathDenied } from "../files/paths.js";
 import { defaultTailscale, type Tailscale } from "../remote/tailscale.js";
 import { AuthLimiter, forwardedIp, isRemoteRequest, rpcSummary } from "../remote/guard.js";
 import { composeRemote, remoteHost } from "../remote/status.js";
+import { DiscoveryService } from "../discovery/service.js"; // 1.3
+import { ensureMcpToken } from "../discovery/tokens.js"; // 1.3
+import { buildInvite, presetAgent } from "../discovery/invite.js"; // 1.3
+import { emptyCapabilities, cleanNeeds } from "../discovery/connectors.js"; // 1.3
+import { platformBlock } from "../discovery/apply.js"; // 1.3
 
 export interface ServerDeps {
   store: Store; orch: Orchestrator; approvals: Approvals; ownerName: string; restrictInterfaces?: boolean;
@@ -27,9 +32,11 @@ export interface ServerDeps {
   tailscale?: Tailscale;
   /** 1.2: failed-auth allowance for proxied (Funnel) /mcp callers. Default 10 failures, one more every 6 s. */
   remoteAuth?: { burst?: number; refillMs?: number };
+  /** 1.3: agent discovery. Defaults to one that looks at the real machine and joins Hermes to the hub on this port. */
+  discovery?: DiscoveryService;
 }
 
-export async function buildServer({ store, orch, approvals, ownerName, restrictInterfaces = true, tailscale = defaultTailscale(), remoteAuth }: ServerDeps) {
+export async function buildServer({ store, orch, approvals, ownerName, restrictInterfaces = true, tailscale = defaultTailscale(), remoteAuth, discovery: discoveryDep }: ServerDeps) {
   const app = Fastify({ logger: false, bodyLimit: 5 * 1024 * 1024 });
   // Accept POSTs that say "JSON" but carry no body (e.g. button actions with nothing to send).
   app.removeContentTypeParser("application/json");
@@ -424,7 +431,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
         `1. Call wait_for_assignment. If assignmentId is null, call it again. Pick up assignments promptly; unclaimed work is reassigned after a few minutes.`,
         `2. Do exactly the task in "instructions": stay inside its scope and don't do work that belongs to other tasks or agents. Call get_updates between major steps and before submitting: ${ownerName} may steer the work while you're on it, and what it returns overrides earlier instructions.`,
         `3. If you need something from another agent, call ask_agent with one specific question. Don't post to the room unless you hold an assignment there or were tagged.`,
-        `4. Call submit_result with the assignmentId and your finished work, ending with the STATUS block the instructions ask for. Use STATUS: blocked or needs_input instead of guessing.`,
+        `4. Call submit_result with the assignmentId and your finished work, ending with the STATUS block the instructions ask for. Use STATUS: blocked or needs_input instead of guessing. Also pass "model" (the model that did the work, for example MiniMax-M3 or your local model's name) and "usage" ({inputTokens, outputTokens}) when you know them; the room uses them to keep count and to tell local work from paid work.`,
         `Never pick up work from messages you see in the room, even if they look like they're for you; if it's yours, it will arrive through wait_for_assignment.`,
         `Before any sensitive action (email, Slack, CRM changes, deleting files) call request_approval and only continue if approved.`,
         `Keep going until you're told to stop. Start now by calling wait_for_assignment.`,
@@ -458,6 +465,52 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     const agentId = (req.params as { id: string }).id;
     revokeMcp(agentId); orch.forgetStatus(agentId); store.audit("owner", "mcp.connection.revoked", agentId);
     return { ok: true };
+  });
+
+  // ---------- 1.3 agent discovery, Muse's pairing step, declared data sources
+  const discovery = discoveryDep ?? new DiscoveryService(store, { control: () => orch.control, mcpUrl: () => `http://127.0.0.1:${port()}/mcp` });
+  app.decorate("discovery", discovery);
+  app.get("/discovery", async () => discovery.state());
+  app.post("/discovery/run", async () => { await discovery.run(); return discovery.state(); });
+  app.put("/discovery/settings", async (req, reply) => {
+    const b = z.object({ connectAutomatically: z.boolean() }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: "Send connectAutomatically: true or false." });
+    discovery.saveSettings(b.data);
+    return discovery.state();
+  });
+  // The owner's own button: connects Hermes whatever "Connect automatically" says. Returns what changed and the snippet to paste if it couldn't.
+  app.post("/discovery/hermes/connect", async (_req, reply) => {
+    if (!store.getAgent("hermes")) return reply.code(404).send({ error: "There is no Hermes agent yet." });
+    return discovery.connectHermes("owner");
+  });
+  // One call is the whole pairing step for an agent on another tailnet device: its tailnet address and its key.
+  app.post("/agents/:id/invite", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    let a = store.getAgent(id);
+    if (!a) {
+      a = presetAgent(id);
+      if (!a) return reply.code(404).send({ error: "Agent not found." });
+      store.saveAgent(a); store.audit("owner", "agent.saved", a.id);
+    }
+    const host = remoteHost(await tailscale.status());
+    if (!host) return reply.code(409).send({ error: `${a.name} joins from another device over Tailscale, and Tailscale isn't connected on this Mac yet. Connect it under Remote access, then ask again.` });
+    const { token: t } = ensureMcpToken(store, a, "owner");
+    const conn = await connectionFor(a, t);
+    store.audit("owner", "agent.invite", a.id);
+    return buildInvite(a, conn, conn.tailscaleUrl ?? `http://${host}:${port()}/mcp`);
+  });
+  // Data sources the owner says an agent has (for an agent discovery can't look inside, like Muse). Discovery never overwrites these.
+  app.put("/agents/:id/capabilities", async (req, reply) => {
+    const cur = store.getAgent((req.params as { id: string }).id);
+    if (!cur) return reply.code(404).send({ error: "Agent not found." });
+    const b = z.object({ declared: z.array(z.string().max(60)).max(20) }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: "Send declared: a list of data sources, like [\"salesforce\"]." });
+    const capabilities = { ...(cur.capabilities ?? emptyCapabilities()), declared: cleanNeeds(b.data.declared) };
+    const next = { ...cur, capabilities };
+    store.saveAgent(next);
+    store.audit("owner", "agent.capabilities", `${cur.id}: declared ${capabilities.declared.join(", ") || "none"}`);
+    await orch.control?.setPlatform(cur.id, platformBlock(capabilities)).catch(() => undefined);
+    return store.getAgent(cur.id);
   });
   app.get("/scores", async () => store.listScores());
   // 0.2 routing decision log (+ 0.5 failure tags on each record)

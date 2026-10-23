@@ -6,6 +6,7 @@ import { TOOLS } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import { inbox } from "../adapters/mcp.js";
 import type { McpGrant, Orchestrator } from "../orchestrator/orchestrator.js";
+import { localModelsFor, mcpReportShape, normalizeMcpReport } from "../discovery/usage.js"; // 1.3
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
@@ -128,10 +129,12 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
   });
 
   server.registerTool("submit_result", {
-    description: "Hand back your finished work for an assignment. The orchestrator posts it to the room and judges it. Set failed=true with a reason if you can't do it.",
-    inputSchema: { assignmentId: z.string(), text: z.string().min(1).max(100000), failed: z.boolean().optional() },
-  }, async ({ assignmentId, text: body, failed }) => {
-    const ok = inbox.submit(grant.agentId, assignmentId, body, failed ?? false);
+    description: "Hand back your finished work for an assignment. The orchestrator posts it to the room and judges it. Set failed=true with a reason if you can't do it. Also say which model did the work (model) and what it used (usage), so the room can keep count; leave them out if you don't know.",
+    inputSchema: { assignmentId: z.string(), text: z.string().min(1).max(100000), failed: z.boolean().optional(), ...mcpReportShape }, // 1.3: model + usage
+  }, async ({ assignmentId, text: body, failed, model, usage }) => {
+    // 1.3: what the agent reports is cleaned and capped; a model that is one of this Mac's local models costs $0.
+    const report = normalizeMcpReport(model, usage, localModelsFor(store));
+    const ok = inbox.submit(grant.agentId, assignmentId, body, failed ?? false, report);
     return text(ok ? "Received. Call wait_for_assignment for the next one." : "Unknown or expired assignmentId.");
   });
 

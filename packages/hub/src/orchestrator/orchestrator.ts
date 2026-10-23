@@ -24,6 +24,8 @@ import type { ControlFolder } from "../control/folder.js"; // 1.9
 import { restoreTaskContext, writeTaskContext } from "../control/context.js"; // 1.9 x 1.4
 import { CapacityGovernor } from "../capacity/governor.js";
 import { detectHardware } from "../capacity/hardware.js";
+import { cleanNeeds } from "../discovery/connectors.js"; // 1.3
+import { needsGate, needsMessage, type NeedsGate } from "../discovery/routing.js"; // 1.3
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -206,6 +208,7 @@ export class Orchestrator {
         role: (r.role && roles.has(r.role) ? r.role : "worker") as Role,
         files: (r.files ?? []).filter((f) => typeof f === "string" && f.trim()).map((f) => f.trim()),
         output: r.output?.trim() || undefined,
+        needs: cleanNeeds(r.needs), // 1.3: data sources this task needs; routing only considers agents that have them
         covers: (r.covers ?? []).filter((c) => reqIds.has(c)),
         origin,
         dependsOn: deps.length ? deps : extraDeps,
@@ -1065,8 +1068,11 @@ export class Orchestrator {
     const s = this.store.getSettings();
     const free = (a: AgentConfig) => !this.busy.has(a.id) && !this.chatting.has(a.id) && live.has(a.id);
     const enabled = this.enabledAgents();
+    // 1.3: a task that needs a data source goes only to agents that have it. If no agent can, it waits and the owner is told once.
+    const gate = needsGate(t, enabled, this.control);
+    if (gate && !gate.ok.size) { this.holdForNeeds(t, gate, enabled); return undefined; }
     // 1.5: only agents this machine can take right now; cloud agents are the overflow when local work is at its limit.
-    const idle = this.governor.preferForOverflow(enabled.filter(free));
+    const idle = this.governor.preferForOverflow(enabled.filter(free).filter((a) => !gate || gate.ok.has(a.id)));
     const tried = t.triedBy ?? [];
     let agent: AgentConfig | undefined;
     let route: RouteDecision | undefined;
@@ -1077,7 +1083,7 @@ export class Orchestrator {
       if (same && live.has(same.id) && !quotaLimited(this.store, same.id)) { if (!free(same) || !this.governor.admit(same)) return undefined; agent = same; route = fixedDecision(this.store, same, idle, t.taskType, "revision", s.explorationRate); }
       else { t.triedBy = [...tried, t.assignee]; t.assignee = undefined; t.status = "pending"; this.store.saveTask(t); }
     }
-    if (!agent && t.owner && !tried.includes(t.owner) && live.has(t.owner) && !quotaLimited(this.store, t.owner)) { // 1.6: a planned owner out of quota is skipped
+    if (!agent && t.owner && !tried.includes(t.owner) && live.has(t.owner) && (!gate || gate.ok.has(t.owner)) && !quotaLimited(this.store, t.owner)) { // 1.6: a planned owner out of quota is skipped
       const owner = enabled.find((a) => a.id === t.owner)!;
       if (free(owner) && this.governor.admit(owner)) { agent = owner; route = fixedDecision(this.store, owner, idle, t.taskType, "planned_owner", s.explorationRate); }
       else if (!free(owner) && now() - t.updatedAt < 10 * 60_000) return undefined; // wait for the planned owner (an owner the machine can't take right now is overflowed instead)
@@ -1090,9 +1096,19 @@ export class Orchestrator {
     agent = route.agent;
     // 0.2: every pick is logged with each candidate's probability, before the work starts.
     t.routingId = openRecord(this.store, route, t, goalText).id;
+    if (gate) closeRecord(this.store, t.routingId, { needs: gate.needs, needsFilteredOut: gate.filteredOut }); // 1.3: who was left out for lacking the source
     this.busy.add(agent.id);
     this.governor.start(t.id, agent); // 1.5: released in drive() when the task ends
     return agent;
+  }
+
+  /** 1.3: no agent can reach what this task needs. Tell the owner once (kept in the task's history, so a restart doesn't repeat it) and leave the task waiting; it starts by itself once an agent has the source. */
+  private holdForNeeds(t: Task, gate: NeedsGate, agents: AgentConfig[]) {
+    const note = `Needs ${gate.needs.join(", ")}; no agent can reach it${gate.switchedOff.length ? " (switched off for some)" : ""}.`;
+    if ((t.history ?? []).some((h) => h.outcome === "blocked" && h.agentId === "hub" && h.note === note.slice(0, 300))) return;
+    this.addHistory(t, "hub", "blocked", note);
+    this.store.saveTask(t);
+    this.post(t.roomId, SYS, needsMessage(gate, t.title, agents), "system", t.id);
   }
 
   private async runTask(goal: Goal, task: Task, agent: AgentConfig, goalSignal: AbortSignal) {
