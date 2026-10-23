@@ -11,7 +11,7 @@ export function setup(opts: { rand?: () => number; retryDelayMs?: number } = {})
   const store = new Store(join(dir, "t.db"));
   seed(store, true);
   const approvals = new Approvals(store, 2000);
-  const orch = new Orchestrator(store, approvals, { dataDir: dir, mcpUrl: () => undefined, rand: opts.rand ?? (() => 0.99), retryDelayMs: opts.retryDelayMs ?? 1 });
+  const orch = new Orchestrator(store, approvals, { dataDir: dir, mcpUrl: () => undefined, rand: opts.rand ?? (() => 0.99), retryDelayMs: opts.retryDelayMs ?? 1, libraryDir: join(dir, "Library") });
   const room = store.listRooms()[0];
   return { dir, store, approvals, orch, room };
 }

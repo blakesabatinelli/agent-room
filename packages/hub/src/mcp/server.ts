@@ -65,6 +65,37 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
     return text(store.listTasks({ roomId: rid }).map((t) => `${t.id} | ${t.status} | ${t.assignee ?? "-"} | ${t.title}`).join("\n") || "(no tasks)");
   });
 
+  server.registerTool("save_document", {
+    description: "Save any document deliverable (report, brief, plan, analysis, notes meant to be kept) to the room's Library. Always use this instead of writing a document to an arbitrary path: the hub adds the standard front matter (title, room, goal, status, authors, dates, sources), files it under the room and goal, and indexes it. Write the body as Markdown without front matter. Saving the same title again in the same goal updates the document and keeps its history of authors and sources. Returns JSON {id, path, relPath, created}.",
+    inputSchema: {
+      title: z.string().min(1).max(200),
+      body: z.string().min(1).max(500_000),
+      status: z.enum(["draft", "review", "final"]).optional(),
+      sources: z.array(z.string().max(500)).max(100).optional().describe("URLs, file paths or document ids this draws on"),
+      tags: z.array(z.string().max(100)).max(20).optional(),
+      goalId: z.string().optional().describe("Defaults to the goal of your current task"),
+    },
+  }, async ({ title, body, status, sources, tags, goalId }) => {
+    const rid = roomId();
+    if (!rid) return text("NOT SAVED. No room exists yet.");
+    const gid = goalId ?? (grant.taskId ? store.getTask(grant.taskId)?.goalId : undefined);
+    if (goalId && !store.getGoal(goalId)) return text("NOT SAVED. Unknown goalId.");
+    try {
+      const { doc, created } = orch.library.save({ title, body, roomId: rid, goalId: gid, status, author: grant.agentId, sources, tags });
+      return text(JSON.stringify({ id: doc.id, path: doc.path, relPath: doc.relPath, created }));
+    } catch (e) {
+      return text(`NOT SAVED. ${(e as Error).message}`);
+    }
+  });
+
+  server.registerTool("list_documents", {
+    description: "List documents saved in this room's Library, one per line: relPath | title | status.",
+    inputSchema: { roomId: z.string().optional(), goalId: z.string().optional() },
+  }, async ({ roomId: r, goalId }) => {
+    const rid = roomId(r); if (!rid) return text("No room.");
+    return text(orch.library.list({ roomId: rid, goalId }).map((d) => `${d.relPath} | ${d.frontMatter.title} | ${d.frontMatter.status}`).join("\n") || "(no documents)");
+  });
+
   server.registerTool("update_task", {
     description: "Post a progress note on a task. Only the assigned agent may update it.",
     inputSchema: { taskId: z.string(), note: z.string().min(1).max(4000) },

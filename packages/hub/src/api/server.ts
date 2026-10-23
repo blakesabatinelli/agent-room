@@ -241,6 +241,11 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     await runProc("/usr/bin/open", [g.folder], { timeoutMs: 5000 });
     return { ok: true };
   });
+  // The Library index: documents agents saved with save_document.
+  app.get("/documents", async (req) => {
+    const q = req.query as { roomId?: string; goalId?: string };
+    return orch.library.list({ roomId: q.roomId || undefined, goalId: q.goalId || undefined });
+  });
   app.post("/tasks/:id/rate", async (req) => { orch.rateJudgment((req.params as { id: string }).id, z.object({ score: z.number().min(0).max(1) }).parse(req.body).score); return { ok: true }; });
 
   // ---------- agents & permissions

@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { EventEmitter } from "node:events";
 import type {
-  AgentConfig, AgentScore, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
+  AgentConfig, AgentScore, Approval, AuditEntry, Goal, LibraryDoc, MemoryEntry, MemoryProposal,
   Message, OrchestratorSettings, Room, ServerEvent, Task,
 } from "@agent-room/shared";
 import { SETTING_DEFAULTS } from "@agent-room/shared";
@@ -35,6 +35,9 @@ export class Store extends EventEmitter {
       CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, status TEXT, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, at INTEGER, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS devices (token TEXT PRIMARY KEY, name TEXT, created_at INTEGER);
+      CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY, room_id TEXT, goal_id TEXT, path TEXT, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS documents_room ON documents(room_id);
+      CREATE INDEX IF NOT EXISTS documents_path ON documents(path);
       CREATE INDEX IF NOT EXISTS tasks_goal ON tasks(goal_id);
       CREATE INDEX IF NOT EXISTS tasks_room ON tasks(room_id);
       CREATE INDEX IF NOT EXISTS goals_room ON goals(room_id);
@@ -183,6 +186,19 @@ export class Store extends EventEmitter {
       ? this.all<Approval>("SELECT data FROM approvals WHERE status=?", status)
       : this.all<Approval>("SELECT data FROM approvals");
   }
+
+  // ---- documents (the Library index; the files on disk are the source of truth)
+  saveDocument(d: LibraryDoc) {
+    this.put("documents", { id: d.id, room_id: d.roomId, goal_id: d.goalId ?? null, path: d.path, data: JSON.stringify(d) });
+  }
+  getDocument(docId: string) { return this.one<LibraryDoc>("SELECT data FROM documents WHERE id=?", docId); }
+  listDocuments(filter: { roomId?: string; goalId?: string } = {}) {
+    if (filter.goalId && filter.roomId) return this.all<LibraryDoc>("SELECT data FROM documents WHERE room_id=? AND goal_id=?", filter.roomId, filter.goalId);
+    if (filter.goalId) return this.all<LibraryDoc>("SELECT data FROM documents WHERE goal_id=?", filter.goalId);
+    if (filter.roomId) return this.all<LibraryDoc>("SELECT data FROM documents WHERE room_id=?", filter.roomId);
+    return this.all<LibraryDoc>("SELECT data FROM documents");
+  }
+  findDocumentByPath(path: string) { return this.one<LibraryDoc>("SELECT data FROM documents WHERE path=?", path); }
 
   // ---- audit
   audit(actor: string, action: string, detail: string) {

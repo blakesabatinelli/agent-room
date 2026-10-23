@@ -12,6 +12,7 @@ import { extractJson } from "./json.js";
 import { directPrompt, judgePrompt, memoryPrompt, planCard, planPrompt, recoverPrompt, replanPrompt, steerPrompt, summaryPrompt, tagPrompt, taskPrompt, verifyPrompt } from "./prompts.js";
 import { MAX_TASKS, coverLeftovers, isTransient, ledgerMarkdown, newProgress, normaliseRequirements, readDeliverables, repairDeps, sameFeedback, validatePlan, writeLedger, type RawPlanTask } from "./ledger.js";
 import { applyOwnerRating, pickAgent, recordOutcome } from "./scoring.js";
+import { Library, defaultLibraryRoot } from "../library/library.js";
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -34,6 +35,8 @@ export interface OrchestratorOptions {
   rand?: () => number;
   /** Wait before retrying a task after a transient CLI failure (rate limit, timeout). */
   retryDelayMs?: number;
+  /** Root of the document Library; defaults to ~/Agent Room/Library (or $AGENT_ROOM_LIBRARY). */
+  libraryDir?: string;
 }
 
 type PlanTask = RawPlanTask;
@@ -58,7 +61,11 @@ export class Orchestrator {
   floor = new Floor();
   grants = new Map<string, McpGrant>();                    // MCP bearer token -> grant
 
-  constructor(private store: Store, private approvals: Approvals, private opts: OrchestratorOptions) {}
+  library: Library;
+
+  constructor(private store: Store, private approvals: Approvals, private opts: OrchestratorOptions) {
+    this.library = new Library(store, opts.libraryDir ?? defaultLibraryRoot());
+  }
 
   private cfg(): Required<OrchestratorSettings> {
     return { ...SETTING_DEFAULTS, ...this.store.getSettings() } as Required<OrchestratorSettings>;

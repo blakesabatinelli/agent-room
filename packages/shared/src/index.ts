@@ -390,3 +390,37 @@ export type ServerEvent =
   | { type: "working"; roomId: string; agentId: string; label?: string; active: boolean }
   /** The owner has read a room up to this time (synced across the Mac and phone). */
   | { type: "read"; roomId: string; at: number };
+
+// ---- 0.4 Document standard
+export type DocStatus = "draft" | "review" | "final";
+
+/** YAML front matter at the top of every Library document (see docs/DOCUMENTS.md). */
+export interface DocFrontMatter {
+  id: string;
+  title: string;
+  /** Room slug (the folder name), not the room id. */
+  room: string;
+  goal?: string;
+  status: DocStatus;
+  authors: string[];
+  /** YYYY-MM-DD */
+  created: string;
+  /** YYYY-MM-DD */
+  updated: string;
+  sources: string[];
+  tags?: string[];
+}
+
+/** A document in the Library, as indexed by the hub. */
+export interface LibraryDoc {
+  id: string;
+  /** Absolute path on the hub's machine. */
+  path: string;
+  /** Path relative to the Library root. */
+  relPath: string;
+  roomId: string;
+  goalId?: string;
+  frontMatter: DocFrontMatter;
+  bytes: number;
+  indexedAt: number;
+}
