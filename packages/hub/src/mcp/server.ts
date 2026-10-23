@@ -10,6 +10,7 @@ import { checkFileToolRequest } from "../files/confine.js";
 import { localModelsFor, mcpReportShape, normalizeMcpReport } from "../discovery/usage.js"; // 1.3
 import { annotate } from "../memory/model.js"; // 2.5
 import { RoomRules } from "../rooms/rules.js"; // 4.3
+import { overlayDraft } from "../twokey/draft.js"; // 4.1
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
@@ -123,7 +124,7 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
   });
 
   server.registerTool("request_approval", {
-    description: "Ask the owner to approve a sensitive action (sending email, posting to Slack, CRM writes, deleting files). Waits for the decision.",
+    description: "Ask the owner to approve a sensitive action (sending email, posting to Slack, CRM writes, deleting files). Waits for the decision. Sending email, writing to a CRM and deleting anything are two-key: a second agent from another vendor drafts the same action on its own and it goes ahead only if the drafts match, so put the exact draft in detail as JSON: email {to:[], cc:[], subject, body}; CRM {object, op, id, fields}; delete {targets:[]}.",
     inputSchema: { tool: z.string(), action: z.string(), detail: z.string().max(8000) },
   }, async ({ tool, action, detail }) => {
     const a = agent();
@@ -131,6 +132,8 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
     const roomWhy = orch.roomDenied(grant, tool); // 4.3
     if (roomWhy) return text(`DENIED: ${roomWhy}`);
     const res = await orch.requestApproval(grant, tool, action, detail);
+    const other = res.status === "approved" && res.choice === "b" ? res.twoKey?.b?.draft : undefined; // 4.1: the owner picked the other agent's draft
+    if (other) return text(`APPROVED, WITH THE OTHER DRAFT: the owner chose a different version of this action. Do NOT do what you asked. Do exactly this instead:\n${JSON.stringify(other)}`);
     return text(res.status === "approved" ? "APPROVED: go ahead." : `DENIED (${res.status}). Do not perform the action.`);
   });
 
@@ -176,7 +179,15 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
         return text(JSON.stringify({ behavior: "deny", message: `Stay inside your task folder: ${c.reason}.` }));
       }
     }
-    const res = await orch.requestApproval(grant, toolId, tool_name, JSON.stringify(input ?? {}).slice(0, 4000));
+    const res = await orch.requestApproval(grant, toolId, tool_name, JSON.stringify(input ?? {}).slice(0, 4000), input);
+    // 4.1: the owner picked the other agent's draft of a two-key action. Run it through the tool's own input when it fits, else tell the agent to ask again with it.
+    const other = res.status === "approved" && res.choice === "b" ? res.twoKey?.b?.draft : undefined;
+    if (other) {
+      const next = input ? overlayDraft(input, other) : undefined;
+      if (next) return text(JSON.stringify({ behavior: "allow", updatedInput: next }));
+      orch.twoKey.permit(grant.agentId, other);
+      return text(JSON.stringify({ behavior: "deny", message: `The owner chose the other agent's version of this action. Do exactly this instead, and ask again: ${JSON.stringify(other)}` }));
+    }
     return text(JSON.stringify(res.status === "approved"
       ? { behavior: "allow", updatedInput: input ?? {} }
       : { behavior: "deny", message: `Owner ${res.status} this action.` }));

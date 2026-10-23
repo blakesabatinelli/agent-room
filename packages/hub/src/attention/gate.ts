@@ -151,6 +151,13 @@ export class Attention {
       if (e.type === "approval") {
         const a: Approval = e.approval;
         if (a.status !== "pending") return;
+        if (a.twoKey) { // 4.1: the two agents' drafts differ (or there is no second key): the owner decides. Blocking work, so it is always pushed.
+          this.notify(a.twoKey.verdict === "unavailable" ? "decision" : "disagreement", {
+            title: a.twoKey.verdict === "unavailable" ? "Approval needed: no second key" : "Two agents disagree",
+            body: `${a.agentId} wants to ${a.twoKey.kind === "email" ? "send an email" : a.twoKey.kind === "crm" ? "write to the CRM" : "delete something"}. ${a.twoKey.why}`, roomId: a.roomId, blocking: true, key: `approval:${a.id}`,
+          });
+          return;
+        }
         this.notify("decision", a.question
           ? { title: "A question for you", body: a.action, roomId: a.roomId, key: `approval:${a.id}` }
           : { title: "Approval needed", body: `${a.agentId} wants to use ${a.tool}: ${a.action}`, roomId: a.roomId, blocking: true, key: `approval:${a.id}` });

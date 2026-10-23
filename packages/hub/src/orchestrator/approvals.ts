@@ -8,7 +8,7 @@ export class Approvals {
   constructor(private store: Store, private timeoutMs = 30 * 60_000) {}
 
   /** `proposalId` (1.1) names the file-write proposal an approval card is about, so a UI can fetch the full diff. */
-  request(p: { agentId: string; roomId?: string; tool: string; action: string; detail: string; proposalId?: string }, o: { ttlMs?: number } = {}): Promise<Approval> {
+  request(p: { agentId: string; roomId?: string; tool: string; action: string; detail: string; proposalId?: string; /** 4.1: a two-key card (both agents' drafts) */ twoKey?: Approval["twoKey"] }, o: { ttlMs?: number } = {}): Promise<Approval> {
     const a: Approval = { id: id("apr"), ...p, status: "pending", createdAt: now() };
     this.store.saveApproval(a);
     this.store.audit(p.agentId, "approval.requested", `${p.tool}: ${p.action}`);

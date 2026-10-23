@@ -3,7 +3,7 @@ import {
   closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync,
   readdirSync, realpathSync, renameSync, unlinkSync, writeSync,
 } from "node:fs";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Approval, FolderGrant, FolderGrantUpdate, WriteProposal, WriteProposalFile } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import type { Approvals } from "../orchestrator/approvals.js";
@@ -14,6 +14,7 @@ import {
 } from "./paths.js";
 import { NOT_TEXT, isBinaryOrInvalid, isWellFormedText, withoutPartialTail } from "./text.js";
 import type { RoomGate } from "../rooms/rules.js"; // 4.3
+import type { DeleteOutcome } from "../twokey/service.js"; // 4.1
 
 const GRANTS_KEY = "folder_grants";
 const PROPOSALS_KEY = "write_proposals";
@@ -56,6 +57,8 @@ export interface BrokerOptions {
   extraProtected?: () => { path: string; because: string }[];
   /** 4.3: what a room's ROOM.md limits (the folder grants its goals and file tools may use, and whether the filesystem tool is off there). */
   rooms?: RoomGate;
+  /** 4.1: the two-key check on the files a proposal deletes (see twokey/service.ts `checkDeletes`). Absent: no check (a broker used on its own). */
+  twoKey?: (q: { agentId: string; roomId?: string; goalId?: string; taskId?: string; title: string; targets: string[]; base: string; proposalId: string; ttlMs?: number; onCard?: (approvalId: string) => void }) => Promise<DeleteOutcome>;
 }
 
 /** What the hub holds in memory for a pending proposal: the exact bytes the owner is approving, and what they replace. */
@@ -403,12 +406,77 @@ export class FileBroker {
       detail = warn + detail.slice(0, APPROVAL_DETAIL_MAX - warn.length - 20) + "\n... (truncated)";
     }
     const action = p.kind === "task" ? `write ${p.files!.length} file${p.files!.length === 1 ? "" : "s"} from "${short(p.title ?? "task", 60)}"` : `write ${p.relPath}`;
+    // 4.1 two-key: a proposal that deletes files first needs a second agent of another vendor to draft the same deletes. Agreement goes on to the owner's
+    // approval below; otherwise the owner gets one card with both drafts (and that card is the approval).
+    const deletes = this.opts.twoKey ? (p.files ?? []).filter((f) => f.op === "delete").map((f) => f.relPath) : [];
+    if (deletes.length) { this.twoKeyDeletes(p, deletes, detail, action); return { ok: true, proposal: p }; }
+    this.askOwner(p, detail, action);
+    return { ok: true, proposal: p };
+  }
+
+  /** Ask the owner (a card the agent's own "run without asking" setting can't skip) and wire the decision. */
+  private askOwner(p: WriteProposal, detail: string, action: string) {
     // A task's whole accepted work waits up to 12 hours: the agent can't redo it, so it must not lapse with an ordinary 30 minute approval.
     const decision = this.approvals.request({ agentId: p.agentId, roomId: p.roomId, tool: "filesystem", action, detail, proposalId: p.id }, p.kind === "task" ? { ttlMs: 12 * 3600_000 } : {});
     const apr = this.store.listApprovals("pending").find((a) => a.proposalId === p.id);
     if (apr) { p.approvalId = apr.id; this.saveProposal(p); }
     void decision.then((a) => this.finish(p.id, a)).catch((e) => this.settle(p.id, "expired", `approval failed: ${this.why(e)}`));
-    return { ok: true, proposal: p };
+  }
+
+  /** 4.1: the two-key check on the files a proposal deletes. Nothing is deleted unless the owner approves, whatever the second agent says. */
+  private twoKeyDeletes(p: WriteProposal, deletes: string[], detail: string, action: string) {
+    const grant = this.grant(p.grantId);
+    let base = grant?.path ?? "";
+    try { base = realpathSync.native(base); } catch { /* the grant check at apply time will refuse */ }
+    void this.opts.twoKey!({
+      agentId: p.agentId, roomId: p.roomId, goalId: p.goalId, taskId: p.taskId, title: p.title ?? p.relPath, targets: deletes, base, proposalId: p.id, ttlMs: 12 * 3600_000,
+      onCard: (aid) => { const cur = this.proposal(p.id); if (cur?.status === "pending") { cur.approvalId = aid; this.saveProposal(cur); } },
+    }).then((out) => {
+      const cur = this.proposal(p.id);
+      if (!cur || cur.status !== "pending") return; // settled meanwhile (the grant changed)
+      if (out.go === "proceed") return this.askOwner(cur, out.note ? detail + out.note : detail, action);
+      if (out.approval.status !== "approved" || out.choice === "neither") return this.settle(p.id, out.approval.status === "expired" ? "expired" : "rejected", out.approval.status === "expired" ? "no decision on the two-key card" : "owner chose neither draft", out.approval.status === "expired" ? "system" : "owner");
+      if (out.choice === "b") {
+        const why = this.applyDeleteDraft(cur, out.b ?? [], base);
+        if (why) { this.auditFiles(cur.agentId, "file.denied", cur, `: ${why} (draft B)`); return this.settle(p.id, "rejected", why, "system"); }
+      }
+      this.finish(p.id, out.approval);
+    }).catch((e) => this.settle(p.id, "expired", `two-key check failed: ${this.why(e)}`));
+  }
+
+  /** The owner picked the other agent's draft of the deletes: the proposal's other changes stay, and the files deleted become exactly draft B's. Returns why it can't, or undefined. */
+  private applyDeleteDraft(p: WriteProposal, targets: string[], base: string): string | undefined {
+    const grant = this.grant(p.grantId);
+    if (!grant) return "the folder grant was removed";
+    const items = this.pendingContent.get(p.id), files = p.files ?? [];
+    if (!items || items.length !== files.length) return "content no longer available";
+    const keep = files.map((f, i) => ({ f, it: items[i] })).filter((x) => x.f.op !== "delete");
+    for (const abs of targets) {
+      try {
+        const rel = relative(base, abs);
+        if (!rel || rel.startsWith("..") || isAbsolute(rel)) return `draft B names a path outside the folder (${short(abs, 120)})`;
+        assertPlainPath(rel);
+        const target = resolveInGrant(grant.path, rel);
+        const guard = this.writeGuard(grant.path, rel, target);
+        if (guard) return guard;
+        const shown = relative(realpathSync.native(grant.path), target);
+        const cur = this.readFile(target, MAX_EXISTING_BYTES, true);
+        if (cur.kind !== "file") return `draft B names ${q(shown)}, which is not a file in the folder`;
+        if (cur.size > MAX_EXISTING_BYTES || isBinaryOrInvalid(cur.buf)) return `draft B names ${q(shown)}, which can't be reviewed as text`;
+        keep.push({ f: { relPath: shown, op: "delete", baseSha256: sha256(cur.buf), newSha256: null, bytes: 0 }, it: { relPath: shown, content: null, old: cur.buf } });
+      } catch (e) { return this.why(e); }
+    }
+    if (!keep.length) return "nothing is left to write";
+    keep.sort((a, b) => a.f.relPath.localeCompare(b.f.relPath));
+    p.files = keep.map((x) => x.f);
+    p.diff = keep.map((x) => unifiedDiff(x.it.relPath, x.it.old ? x.it.old.toString("utf8") : null, x.it.content ? x.it.content.toString("utf8") : null)).join("\n");
+    p.relPath = p.files.length === 1 ? p.files[0].relPath : `${p.files.length} files`;
+    p.newSha256 = sha256(Buffer.from(p.files.map((f) => `${f.relPath}\0${f.newSha256 ?? "deleted"}`).join("\n")));
+    p.bytes = p.files.reduce((n, f) => n + f.bytes, 0);
+    this.pendingContent.set(p.id, keep.map((x) => x.it));
+    this.saveProposal(p);
+    this.auditFiles("owner", "file.write.redrafted", p, " (the owner picked the second agent's draft of the deletes)");
+    return undefined;
   }
 
   // ---------- proposals

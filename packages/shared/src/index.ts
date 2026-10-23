@@ -1953,3 +1953,79 @@ export interface PolicyState {
 export interface LeaseRequest { agentId: string; tool: string; minutes?: number; goalId?: string; roomId?: string; action?: string }
 /** PATCH /policy/rules/:id. */
 export interface PolicyRulePatch { effect?: "allow" | "ask" | "deny"; match?: string; scope?: string; expires?: string | null; accepted?: boolean }
+// ---- 4.1 Two-key actions
+/** What a two-key action is: an email that leaves the building, a write to a CRM, or a delete of anything. */
+export type TwoKeyKind = "email" | "crm" | "delete";
+/** The action as one agent drafted it. Email: who, what. CRM: which object, which record, which fields. Delete: what goes. */
+export type TwoKeyDraft =
+  | { kind: "email"; to: string[]; cc: string[]; bcc?: string[]; subject: string; body: string }
+  | { kind: "crm"; object: string; op: "create" | "update" | "upsert" | "delete"; id?: string; fields: Record<string, unknown> }
+  | { kind: "delete"; targets: string[]; /** the request named something that could not be listed as paths (git clean, find -delete, a computed command) */ unparsed?: string };
+/** OrchestratorSettings.twoKey. Default on, threshold 0.85 (how alike two email texts must be, 0 to 1). */
+export interface TwoKeySettings { enabled?: boolean; threshold?: number }
+export interface OrchestratorSettings { twoKey?: TwoKeySettings }
+/**
+ * match: the drafts agree; the action goes on to the usual approval rules. mismatch / no_action: the owner decides.
+ * unavailable: no second key could be turned (fewer than two model families ready, or the second agent didn't answer); the owner decides.
+ */
+export type TwoKeyVerdict = "match" | "mismatch" | "no_action" | "unavailable";
+/** One difference between the drafts. critical: recipients, object, record, fields, targets. text: the wording is not alike enough. entity: a number, date, amount, name or link in one and not the other. minor: wording that differs inside the threshold. */
+export interface TwoKeyDiff { field: string; a: string; b: string; level: "critical" | "text" | "entity" | "minor" }
+/** A word-level view of one text, for the card: d marks words that only this side has. */
+export interface TwoKeyWords { t: string; d?: boolean }
+/** One agent's key on the card. */
+export interface TwoKeySide {
+  agentId: string;
+  name: string;
+  family: string;
+  /** null: the agent's reply could not be read as a draft, or it said no action. */
+  draft: TwoKeyDraft | null;
+  /** The request as it came in (side A) or the reply (side B), for a draft that could not be read. Cut short. */
+  raw?: string;
+  /** Side B only: the agent said the action isn't called for. */
+  noAction?: string;
+}
+export interface TwoKeyCard {
+  recordId: string;
+  kind: TwoKeyKind;
+  verdict: TwoKeyVerdict;
+  /** One plain sentence: what differs, or why there is no second key. */
+  why: string;
+  similarity?: number;
+  a: TwoKeySide;
+  /** Absent when no second key could be turned. */
+  b?: TwoKeySide;
+  diffs: TwoKeyDiff[];
+  /** Email bodies word by word (only when both sides drafted one and the words differ). */
+  words?: { a: TwoKeyWords[]; b: TwoKeyWords[] };
+  /** The owner's answers. POST /approvals/:id { choice }. */
+  choices: { id: "a" | "b" | "neither"; label: string }[];
+}
+export interface Approval { twoKey?: TwoKeyCard }
+/** One row of the `twokey` table (GET /twokey): every two-key check, whatever came of it. Drafts have secrets removed and long bodies cut. */
+export interface TwoKeyRecord {
+  id: string;
+  at: number;
+  kind: TwoKeyKind;
+  tool: string;
+  action: string;
+  roomId?: string;
+  taskId?: string;
+  goalId?: string;
+  agentA: string;
+  familyA: string;
+  agentB?: string;
+  familyB?: string;
+  verdict: TwoKeyVerdict;
+  why: string;
+  similarity?: number;
+  threshold: number;
+  draftA: TwoKeyDraft | null;
+  draftB: TwoKeyDraft | null;
+  noActionB?: string;
+  diffs: TwoKeyDiff[];
+  /** What happened to the action: it went on to the usual approval rules, or the owner picked. */
+  outcome: "pending" | "proceeded" | "owner_a" | "owner_b" | "owner_neither" | "expired" | "permitted";
+  approvalId?: string;
+  decidedAt?: number;
+}

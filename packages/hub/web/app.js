@@ -543,7 +543,7 @@
   function renderApprovals() {
     // 1.1: a file write is never approved from the preview text. It opens the full diff (renderReview) instead.
     wantProposals();
-    $("#view").innerHTML = st.approvals.length ? st.approvals.map((a) => a.question ? questionCard(a) : ARDiff.isFileWriteApproval(a) ? fileApprovalCard(a) : `
+    $("#view").innerHTML = st.approvals.length ? st.approvals.map((a) => a.twoKey ? twoKeyCard(a) : a.question ? questionCard(a) : ARDiff.isFileWriteApproval(a) ? fileApprovalCard(a) : `
       <div class="card">
         <div class="what">${esc(st.agents[a.agentId]?.name || a.agentId)} wants to ${esc(a.action)}</div>
         <div class="detail">Using ${esc(a.tool)}${a.detail ? `\n\n${esc(a.detail)}` : ""}</div>
@@ -626,6 +626,45 @@
     if (st.view !== "policy") return;
     for (const el of document.querySelectorAll("[data-expires]")) el.textContent = leftWords(Number(el.dataset.expires) - Date.now());
   }, 1000);
+
+  // ---------- 4.1 two-key: two drafts side by side, what differs marked, and the owner picks one (or neither)
+  const TK_TITLE = { email: "send an email", crm: "write to the CRM", delete: "delete" };
+  function twoKeyLines(side, other, diffs, which) {
+    const d = side.draft; if (!d) return [];
+    const hit = (f) => diffs.some((x) => x.level !== "minor" && x.field.toLowerCase() === f.toLowerCase());
+    const has = (f, v) => diffs.some((x) => x.level !== "minor" && x.field.toLowerCase() === f.toLowerCase() && String(x[which]).includes(v));
+    if (d.kind === "email") {
+      const rows = [["To", (d.to || []).join(", ") || "(none)", hit("to")], ["Cc", (d.cc || []).join(", "), hit("cc")], ["Bcc", (d.bcc || []).join(", "), hit("bcc")], ["Subject", d.subject, hit("subject")]];
+      return rows.filter((r) => r[1] || r[2]).map(([k, v, m]) => ({ k, v, m }));
+    }
+    if (d.kind === "crm") {
+      const rows = [{ k: "Object", v: d.object, m: hit("object") }, { k: "Operation", v: d.op, m: hit("operation") }];
+      if (d.id || hit("record id")) rows.push({ k: "Record", v: d.id || "(none)", m: hit("record id") });
+      for (const [f, v] of Object.entries(d.fields || {})) rows.push({ k: f, v: typeof v === "string" ? v : JSON.stringify(v), m: diffs.some((x) => x.level !== "minor" && x.field.toLowerCase() === `field ${f}`.toLowerCase()) });
+      return rows;
+    }
+    return (d.targets || []).map((t) => ({ k: "", v: t, m: has("targets", t) })).concat(d.unparsed ? [{ k: "Also", v: `whatever ${d.unparsed} reaches`, m: true }] : []);
+  }
+  function twoKeyPane(card, which) {
+    const side = card[which], other = card[which === "a" ? "b" : "a"];
+    const head = `<div class="tk-who">${esc(which === "a" ? "A" : "B")}: ${esc(side.name)} <span class="tag">${esc(side.family)}</span></div>`;
+    if (side.noAction !== undefined) return `<div class="tk-pane">${head}<div class="tk-line tk-m">Says no action is called for: ${esc(side.noAction)}</div></div>`;
+    if (!side.draft) return `<div class="tk-pane">${head}<div class="tk-line tk-m">${esc(side.raw ? `No readable draft: ${side.raw}` : "No readable draft.")}</div></div>`;
+    const lines = twoKeyLines(side, other, card.diffs, which).map((r) => `<div class="tk-line${r.m ? " tk-m" : ""}">${r.k ? `<span class="tk-k">${esc(r.k)}</span> ` : ""}${esc(r.v)}</div>`).join("");
+    const words = card.words?.[which];
+    const body = side.draft.kind === "email" ? `<div class="tk-body${card.diffs.some((x) => x.field.startsWith("body") && x.level !== "minor") ? " tk-m" : ""}">${words ? words.map((w) => (w.d ? `<mark class="tk-w">${esc(w.t)}</mark>` : esc(w.t))).join(" ") : esc(side.draft.body)}</div>` : "";
+    return `<div class="tk-pane">${head}${lines}${body}</div>`;
+  }
+  function twoKeyCard(a) {
+    const k = a.twoKey, first = k.choices[0]?.id;
+    const title = k.verdict === "unavailable" ? `${esc(agentName(a.agentId))} wants to ${esc(TK_TITLE[k.kind] || "act")}: no second key` : `Two agents disagree about whether to ${esc(TK_TITLE[k.kind] || "act")}`;
+    return `<div class="card tk-card">
+        <div class="what">${title}</div>
+        <div class="detail">${esc(k.why)}</div>
+        <div class="tk-cols">${twoKeyPane(k, "a")}${k.b ? twoKeyPane(k, "b") : ""}</div>
+        <div class="actions">${k.choices.map((c) => `<button class="btn small${c.id === first ? "" : " plain"}" data-answer="${esc(a.id)}" data-choice="${esc(c.id)}">${esc(c.label)}</button>`).join("")}</div>
+      </div>`;
+  }
 
   // ---------- 1.1 file writes: the full diff, read to the end before Approve
   const proposalFor = (a) => st.full[a.id];
