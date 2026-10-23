@@ -188,10 +188,19 @@
       const [rooms, agents, approvals] = await Promise.all([api("/rooms"), api("/agents"), api("/approvals?status=pending")]);
       st.rooms = rooms; st.agents = Object.fromEntries(agents.map((a) => [a.id, a])); st.approvals = approvals;
       connectWs(); render(); loadControl().catch(() => {});
+      openFromHash(); // 3.4: the office page links back here with #room=<id>
       // 1.5: what the hub found about its computer, one line under Settings
       api("/capacity").then((c) => { st.capacity = c; if (st.view === "rooms") renderRooms(); }).catch(() => {});
       api("/resumes").then((r) => { st.probationCount = r.filter((x) => x.probation.on).length; if (st.view === "rooms") renderRooms(); }).catch(() => {}); // 2.3: "2 on probation" under Résumés
     } catch (err) { if (err.message !== "unpaired") toast(`Can't reach the hub: ${err.message}`); }
+  }
+
+  // 3.4: the office page opens an agent's thread by sending the phone back with #room=<id>.
+  function openFromHash() {
+    const m = /^#room=([\w-]+)$/.exec(location.hash);
+    if (!m) return;
+    history.replaceState(null, "", location.pathname + location.search);
+    if (st.rooms.some((r) => r.id === m[1])) go("room", m[1]);
   }
 
   // Catch up after the phone wakes or the connection comes back.
@@ -235,6 +244,7 @@
     $("#title").textContent = st.view === "room" && room ? (room.dmAgentId ? roomName(room) : `# ${room.name}`)
       : st.view === "approvals" ? "Approvals" : st.view === "diff" ? "Review change" : st.view === "folders" ? "Folders" : st.view === "permissions" ? "Permissions" : st.view === "control" ? "Control files" : st.view === "subscriptions" ? "Subscriptions" : st.view === "remote" ? "Remote access" : st.view === "scorecard" ? "Scorecard" : st.view === "personas" ? "Personas" : st.view === "persona" ? (st.agents[st.personas.id]?.name || "Persona") : "Agent Room";
     renderDot(); renderBadge();
+    $("#officeBtn").hidden = st.view !== "room"; // 3.4
     if (st.view === "resumes") $("#title").textContent = "Résumés"; // 2.3
     if (st.view === "pair") return renderPair();
     if (st.view === "rooms") return renderRooms();
@@ -1103,6 +1113,11 @@
   $("#view").addEventListener("scroll", () => { if (st.view === "diff") updateGate(); }, { passive: true });
   window.addEventListener("resize", () => { if (st.view === "diff") updateGate(); });
   $("#approvalsBtn").onclick = () => go("approvals");
+  // 3.4: the office for this room. A direct message has no goal of its own, so it shows every room and comes back here.
+  $("#officeBtn").onclick = () => {
+    const room = st.rooms.find((r) => r.id === st.roomId); if (!room) return;
+    location.href = `/web/office.html?${room.dmAgentId ? "from" : "roomId"}=${encodeURIComponent(room.id)}`;
+  };
   $("#send").onsubmit = (e) => { e.preventDefault(); void sendMessage($("#input").value); };
   $("#input").addEventListener("input", grow);
   $("#input").addEventListener("input", () => { pal.off = false; pal.idx = 0; if (palQuery() !== null) void loadCommands(); renderPalette(); });

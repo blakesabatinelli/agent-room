@@ -11,6 +11,7 @@ import { FoldersScreen } from "./screens/FoldersScreen";
 import { MemoryScreen } from "./screens/MemoryScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
+import { OfficeScreen } from "./screens/OfficeScreen"; // 3.4
 import { Sidebar } from "./components/Sidebar";
 import { Button } from "./components/ui";
 import { launcher } from "./native/hub";
@@ -44,7 +45,7 @@ export default function App() {
   const back = wide ? undefined : () => setShowList(true);
   const main = view.kind === "room" ? <RoomScreen onBack={back} /> : {
     agents: <AgentsScreen onBack={back} />, approvals: <ApprovalsScreen />, memory: <MemoryScreen />,
-    permissions: <PermissionsScreen />, folders: <FoldersScreen />, settings: <SettingsScreen />,
+    permissions: <PermissionsScreen />, folders: <FoldersScreen />, settings: <SettingsScreen />, office: <OfficeScreen />,
   }[view.page];
 
   return (

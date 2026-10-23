@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#ffffff">
+<link rel="icon" type="image/png" sizes="32x32" href="/web/favicon-32.png">
+<link rel="stylesheet" href="/web/office.css">
+<title>Office - Agent Room</title>
+</head>
+<body>
+<header id="bar">
+  <a id="back" class="icon" href="/" aria-label="Back to the room">‹</a>
+  <div id="title">Office</div>
+  <div id="modes" role="group" aria-label="View">
+    <button id="mode3d" type="button" aria-pressed="false">3D</button>
+    <button id="mode2d" type="button" aria-pressed="false">2D</button>
+  </div>
+  <button id="power" class="chip" type="button" aria-pressed="false" title="Stops the animation to save battery">Low power</button>
+  <span id="dot" class="dot" title="Live connection"></span>
+</header>
+<div id="note" role="status" hidden></div>
+<main id="main">
+  <div id="stage" hidden>
+    <canvas id="scene" role="img" aria-label="The office, in 3D"></canvas>
+    <div id="labels"></div>
+  </div>
+  <div id="plan" hidden></div>
+</main>
+<footer id="legend" aria-label="Legend">
+  <span class="key st-working">Working</span>
+  <span class="key st-waiting_approval">Needs approval</span>
+  <span class="key st-judged">Being judged</span>
+  <span class="key st-idle">Idle</span>
+  <span class="key st-offline">Offline</span>
+</footer>
+<p id="summary" class="sr" aria-live="polite"></p>
+<script type="module" src="/web/office.js"></script>
+</body>
+</html>

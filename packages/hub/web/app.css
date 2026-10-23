@@ -19,6 +19,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 #title { flex: 1; font-family: var(--display); font-weight: 600; font-size: 17px; color: var(--strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .icon { font-size: 30px; line-height: 1; padding: 0 6px 4px 0; color: var(--strong); }
 .pill { font-size: 13px; font-weight: 600; padding: 5px 10px; border-radius: 99px; background: var(--accent); color: var(--on-accent); }
+.pill.quiet { background: var(--raised); color: var(--strong); border: 1px solid var(--line); }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--warn); flex: none; }
 .dot.on { background: var(--ok); }
 
