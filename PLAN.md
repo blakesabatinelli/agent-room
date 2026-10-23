@@ -188,10 +188,10 @@
 |---|---|---|
 | Kickoff checklist complete | Oct 30, 2026 | In progress (Oct 23): K1-K3 done except the remote (owner runs `scripts/setup-remote.sh`); K5 dropped (D9: Tailscale required); K4 is the owner's |
 | M0: Foundations | Nov 6, 2026 | In progress (Oct 23): 0.1-0.6 built and tested; D1-D3 proposed in `DECISIONS.md`; waiting on owner sign-off (D1-D3, `CONTROL.md`) and the Mac app screenshot for 0.1 |
-| M1: Runs on any Mac | Dec 18, 2026 | Not started |
-| M2: Learning loop live | Feb 5, 2027 | Not started |
-| M3: Identity and presence | Mar 19, 2027 | Not started |
-| M4: 1.0 public release | Apr 30, 2027 | Not started |
+| M1: Runs on any Mac | Dec 18, 2026 | Built and tested in the hub (Oct 23): 1.1-1.9, two security review rounds on file access. Needs a real Mac: Xcode build, package-mac.sh, install timing test, live Claude Code/Codex confinement, Tailscale Funnel |
+| M2: Learning loop live | Feb 5, 2027 | Built and tested (Oct 23): 2.1-2.7. Real-model behaviour not yet observed |
+| M3: Identity and presence | Mar 19, 2027 | Built and tested (Oct 23): 3.1-3.4. Waiting on the owner's 3.1 screenshot sign-off and D7/D8; Mac screens typechecked only |
+| M4: 1.0 public release | Apr 30, 2027 | Built and tested where no account is needed (Oct 23): 4.1-4.7, three security review rounds on 4.1/4.2. Waiting on Apple Developer, notarization, Sparkle keys, legal review, provider terms (see `docs/owner-todo.md`) |
 
 ---
 
