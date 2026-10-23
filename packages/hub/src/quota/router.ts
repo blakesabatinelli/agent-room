@@ -1,7 +1,7 @@
 import type { AgentConfig, QuotaNote } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import { decide, type RouteDecision } from "../orchestrator/routing.js";
-import { expected } from "../orchestrator/scoring.js";
+import { expectedFor } from "../orchestrator/scoring.js";
 import { quotaFor } from "./index.js";
 
 /**
@@ -51,7 +51,7 @@ export function quotaAdjust(store: Store, candidates: AgentConfig[], taskType: s
   // (b) and (c): small, additive, only when there is a choice to make
   const bonus: Record<string, number> = {};
   if (keep.length > 1) {
-    const exp = new Map(keep.map((i) => [i.agent.id, expected(store.getScore(i.agent.id, taskType))]));
+    const exp = new Map(keep.map((i) => [i.agent.id, expectedFor(store, i.agent.id, taskType, now)]));
     const bestRaw = Math.max(...exp.values());
     for (const i of keep) if (!i.free && i.expiring > 0.001) {
       const b = Math.round(cfg.expiryBonus * i.expiring * 10000) / 10000;
@@ -80,7 +80,7 @@ export function quotaDecide(store: Store, candidates: AgentConfig[], taskType: s
   const open = candidates.filter((a) => !exclude.includes(a.id));
   const adj = quotaAdjust(store, open, taskType, now);
   if (adj.allLimited && busy.some((a) => !exclude.includes(a.id) && !quotaFor(store).agentLimited(a.id, now))) return undefined;
-  const d = decide(store, adj.pool, taskType, epsilon, [], rand, adj.bonus);
+  const d = decide(store, adj.pool, taskType, epsilon, [], rand, adj.bonus, now);
   if (!d) return undefined;
   d.excluded = candidates.filter((a) => exclude.includes(a.id)).map((a) => a.id);
   if (adj.note.excluded.length || adj.note.boosted.length) d.quota = adj.note;

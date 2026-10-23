@@ -1,7 +1,7 @@
 import type { AgentConfig, QuotaNote, RoutingCandidate, RoutingReason, RoutingRecord, RunUsage, Task } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import { id, now } from "../util.js";
-import { expected } from "./scoring.js";
+import { expectedFor } from "./scoring.js";
 
 /**
  * 0.2 Routing decision log. Every pick is recorded with the probability the policy gave each candidate,
@@ -21,8 +21,9 @@ export interface RouteDecision {
 }
 
 /** Each candidate's expected score, in pool order. */
-function scored(store: Store, pool: AgentConfig[], taskType: string) {
-  return pool.map((a) => { const s = store.getScore(a.id, taskType); return { a, expected: expected(s), runs: s.runs }; });
+function scored(store: Store, pool: AgentConfig[], taskType: string, at = Date.now()) {
+  // 2.4: the expectation is by model version, with the previous version's evidence faded (the roll-up's run count is shown as before)
+  return pool.map((a) => ({ a, expected: expectedFor(store, a.id, taskType, at), runs: store.getScore(a.id, taskType).runs }));
 }
 
 /**
@@ -35,10 +36,12 @@ export function decide(
   exclude: string[] = [], rand = Math.random,
   /** 1.6: additive nudge on an agent's expected score (quota: free tier, capacity about to expire). Shown in the record's `quota`. */
   bonus: Record<string, number> = {},
+  /** 2.4: the time the faded expectations are computed at (tests; default now). */
+  at = Date.now(),
 ): RouteDecision | undefined {
   const pool = candidates.filter((a) => !exclude.includes(a.id));
   if (!pool.length) return undefined;
-  const s = scored(store, pool, taskType);
+  const s = scored(store, pool, taskType, at);
   let best = 0;
   for (let i = 1; i < s.length; i++) if (s[i].expected + (bonus[s[i].a.id] ?? 0) > s[best].expected + (bonus[s[best].a.id] ?? 0)) best = i;
   const n = pool.length;

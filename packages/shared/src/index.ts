@@ -980,3 +980,42 @@ export type WriteProposalSummary = Omit<WriteProposal, "diff"> & { diffBytes: nu
 export type FolderCheck =
   | { ok: true; root: string; protected: boolean; because?: string }
   | { ok: false; error: string; canForce: boolean };
+
+// ---- 2.4 scores per model version
+/** An agent's track record on one task type under one model version. `quality` is the running mean (failed runs count as 0). */
+export interface VersionScore extends AgentScore {
+  /** Normalised model version key, e.g. "claude-opus-5-5-20261001", or "unknown". */
+  modelVersion: string;
+  /** Sum of squared deviations of per-run quality from the mean (Welch's online update), for the shift test. */
+  m2: number;
+  firstSeen: number;
+  lastSeen: number;
+}
+/** One entry of GET /model-shifts (KV `model_shifts`). `version_change` is the quiet record of a new version; `shift` is a significant change in results. */
+export interface ModelShift {
+  id: string;
+  at: number;
+  kind: "version_change" | "shift";
+  agentId: string;
+  /** Set for `shift`; a version change covers the whole agent. */
+  taskType?: string;
+  from: string;
+  to: string;
+  /** Mean quality and failure rate on each version, and the number of runs behind them (`shift` only). */
+  fromQuality?: number; toQuality?: number;
+  fromFailRate?: number; toFailRate?: number;
+  fromRuns?: number; toRuns?: number;
+  /** Welch t-test p for the quality difference (`shift` only). */
+  p?: number;
+  /** Why it was flagged: the quality test, or a change in failure rate. */
+  trigger?: "quality" | "failures";
+  /** The line posted in the general room (`shift`), or a plain description (`version_change`). */
+  text: string;
+}
+/** GET /scores/versions: one row per agent, task type and model version, with the weight the version's evidence has now. */
+export interface VersionScoreRow extends VersionScore {
+  /** True for the version the agent last ran on. */
+  current: boolean;
+  /** Weight per run in the expected score (1 for the current version). */
+  weight: number;
+}

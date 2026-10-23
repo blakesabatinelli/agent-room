@@ -849,7 +849,7 @@ export class Orchestrator {
     this.governor.release(task.id);
     const ran = { usage: res.usage, seconds: res.durationMs / 1000, modelVersion: res.model };
     if (signal.aborted) { closeRecord(this.store, task.routingId, { ...ran, outcome: "interrupted" }); return goal; }
-    recordOutcome(this.store, agent.id, task.taskType, { seconds: res.durationMs / 1000, failed: !res.ok, revision: false });
+    recordOutcome(this.store, agent.id, task.taskType, { seconds: res.durationMs / 1000, failed: !res.ok, revision: false }, res.model /* 2.4 */);
     if (res.ok) closeRecord(this.store, task.routingId, { ...ran, outcome: "answered" });
     else closeRecord(this.store, task.routingId, { ...ran, outcome: "run_failed", ...this.tagFailure(task, agent.id, { kind: "run_error" }, firstLine(res.error)) });
     if (res.ok) {
@@ -1299,7 +1299,7 @@ export class Orchestrator {
       // 1.6: a rate limit isn't the agent's work: hand the task to another agent now rather than waiting on this one.
       if (isRateLimit(res.error) && quotaFor(this.store).mayReroute(task.id, this.enabledAgents().length)) return this.rerouteRateLimited(goal, task, agent, res.error, route);
       route("run_failed", this.tagFailure(task, agent.id, { kind: "run_error" }, firstLine(res.error)));
-      recordOutcome(this.store, agent.id, task.taskType, { seconds: res.durationMs / 1000, failed: true, revision: isRevision });
+      recordOutcome(this.store, agent.id, task.taskType, { seconds: res.durationMs / 1000, failed: true, revision: isRevision }, ranModel ?? profile.model /* 2.4 */);
       this.addHistory(task, agent.id, "fail", firstLine(res.error));
       this.log(goal.roomId, `${agent.name} couldn't finish "${task.title}": ${firstLine(res.error)}`, task.id, "task_update");
       return this.retryOrFail(goal, task, agent, "reassign", goalSignal);
@@ -1390,7 +1390,7 @@ export class Orchestrator {
     }
     task.judgment = judgment;
     if (drift.length) task.drift = [...(task.drift ?? []), ...drift].slice(-10);
-    recordOutcome(this.store, agent.id, task.taskType, { judgment, seconds: res.durationMs / 1000, failed: false, revision: isRevision });
+    recordOutcome(this.store, agent.id, task.taskType, { judgment, seconds: res.durationMs / 1000, failed: false, revision: isRevision }, ranModel ?? profile.model /* 2.4 */);
     const crit = Object.entries(judgment.criteria ?? {}).map(([k, v]) => `${k} ${v.verdict}`).join(", ");
     this.log(goal.roomId, `Checked "${task.title}": ${Math.round(judgment.score * 100)}/100, ${judgment.verdict}${crit ? ` (${crit})` : ""}.${drift.length ? ` Drift: ${drift.join(" ")}` : ""} ${judgment.feedback}`, task.id, "task_update");
     if ((this.opts.rand ?? Math.random)() < s.calibrationSampleRate) this.store.emit("event", { type: "calibration", task });
@@ -1586,7 +1586,7 @@ export class Orchestrator {
   rateJudgment(taskId: string, ownerScore: number) {
     const t = this.store.getTask(taskId);
     if (!t?.judgment || !t.assignee) return;
-    applyOwnerRating(this.store, t.assignee, t.taskType, t.judgment.score, ownerScore);
+    applyOwnerRating(this.store, t.assignee, t.taskType, t.judgment.score, ownerScore, (t.routingId ? this.store.getRouting(t.routingId) : undefined)?.modelVersion /* 2.4 */);
     this.store.audit("owner", "judgment.rated", `${t.title}: judge ${t.judgment.score} owner ${ownerScore}`);
   }
 
