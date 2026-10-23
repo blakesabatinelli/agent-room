@@ -12,6 +12,7 @@ import { extractJson } from "./json.js";
 import { directPrompt, judgePrompt, memoryPrompt, planCard, planPrompt, recoverPrompt, replanPrompt, steerPrompt, summaryPrompt, tagPrompt, taskPrompt, verifyPrompt } from "./prompts.js";
 import { MAX_TASKS, coverLeftovers, isTransient, ledgerMarkdown, newProgress, normaliseRequirements, readDeliverables, repairDeps, sameFeedback, validatePlan, writeLedger, type RawPlanTask } from "./ledger.js";
 import { applyOwnerRating, pickAgent, recordOutcome } from "./scoring.js";
+import { FileBroker } from "../files/broker.js";
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -58,7 +59,12 @@ export class Orchestrator {
   floor = new Floor();
   grants = new Map<string, McpGrant>();                    // MCP bearer token -> grant
 
-  constructor(private store: Store, private approvals: Approvals, private opts: OrchestratorOptions) {}
+  /** 0.3 spike: folder grants, file reads, and diff-proposed writes. */
+  files: FileBroker;
+
+  constructor(private store: Store, private approvals: Approvals, private opts: OrchestratorOptions) {
+    this.files = new FileBroker(store, approvals);
+  }
 
   private cfg(): Required<OrchestratorSettings> {
     return { ...SETTING_DEFAULTS, ...this.store.getSettings() } as Required<OrchestratorSettings>;

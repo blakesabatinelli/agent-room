@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { basename } from "node:path";
 import { z } from "zod";
 import { TOOLS } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
@@ -115,6 +116,59 @@ export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant
     return text(JSON.stringify(res.status === "approved"
       ? { behavior: "allow", updatedInput: input ?? {} }
       : { behavior: "deny", message: `Owner ${res.status} this action.` }));
+  });
+
+  // ---- 0.3 spike: files in folders the owner granted. The hub touches the disk; writes wait for the owner.
+  const denied = (reason: string) => text(`DENIED: ${reason}`);
+
+  server.registerTool("list_granted_folders", {
+    description: "List the folders the owner has granted you, with the grantId and whether you may read and/or write. Paths for the other file tools are relative to a granted folder.",
+    inputSchema: {},
+  }, async () => {
+    const a = agent();
+    if (!a || a.tools.filesystem !== true) return denied("the filesystem tool is switched off for you.");
+    const gs = orch.files.grantsFor(grant.agentId, grant.roomId);
+    return text(gs.map((g) => `${g.id} | ${g.label ?? basename(g.path)} | ${g.read ? "read" : "no-read"} ${g.write ? "write" : "no-write"}`).join("\n") || "(no folders granted to you here)");
+  });
+
+  server.registerTool("list_files", {
+    description: "List a folder inside a granted folder. path is relative to the granted folder (omit for its top level). Pass grantId when more than one folder is granted.",
+    inputSchema: { path: z.string().max(1024).optional(), grantId: z.string().optional() },
+  }, async ({ path, grantId }) => {
+    const r = orch.files.list(grant.agentId, grant.roomId, path ?? ".", grantId);
+    if (!r.ok) return denied(r.reason);
+    return text(r.entries.map((e) => `${e.type === "dir" ? "dir " : e.type === "file" ? "file" : e.type} ${e.name}${e.size !== undefined ? ` (${e.size} bytes)` : ""}`).join("\n") || "(empty folder)");
+  });
+
+  server.registerTool("read_file", {
+    description: "Read a text file inside a granted folder (up to 512 KB; binary files are not returned). path is relative to the granted folder.",
+    inputSchema: { path: z.string().min(1).max(1024), grantId: z.string().optional() },
+  }, async ({ path, grantId }) => {
+    const r = orch.files.read(grant.agentId, grant.roomId, path, grantId);
+    if (!r.ok) return denied(r.reason);
+    if (r.binary) return text(r.note);
+    return text(r.truncated ? `${r.content}\n\n[truncated: showing the first ${Buffer.byteLength(r.content)} of ${r.bytes} bytes]` : r.content);
+  });
+
+  server.registerTool("propose_file_write", {
+    description: "Propose creating or replacing a text file inside a granted folder with the complete new content (max 2 MB). Nothing is written yet: the owner sees the diff and must approve. Afterwards call file_write_status with the returned proposalId to see the outcome.",
+    inputSchema: { path: z.string().min(1).max(1024), content: z.string().max(2 * 1024 * 1024), grantId: z.string().optional() },
+  }, async ({ path, content, grantId }) => {
+    const r = orch.files.proposeWrite(grant.agentId, grant.roomId, path, content, grantId);
+    if (!r.ok) return denied(r.reason);
+    const p = orch.files.proposalFor(grant.agentId, r.proposal.id) ?? r.proposal;
+    return text(`proposalId: ${p.id}\nstatus: ${p.status}\nThe file has NOT been changed. The owner must approve this diff first; call file_write_status with proposalId ${p.id} to see whether it was applied.\n\n${p.diff}`);
+  });
+
+  server.registerTool("file_write_status", {
+    description: "Check a write you proposed with propose_file_write: pending, applied, rejected, conflict (the file changed meanwhile) or expired.",
+    inputSchema: { proposalId: z.string().min(1).max(100) },
+  }, async ({ proposalId }) => {
+    const a = agent();
+    if (!a || a.tools.filesystem !== true) return denied("the filesystem tool is switched off for you.");
+    const p = orch.files.proposalFor(grant.agentId, proposalId);
+    if (!p) return denied("unknown proposal.");
+    return text(`proposalId: ${p.id}\nstatus: ${p.status}\npath: ${p.relPath}${p.reason ? `\nreason: ${p.reason}` : ""}`);
   });
 
   return server;
