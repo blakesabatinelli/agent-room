@@ -1,7 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
 import React, { useEffect, useState } from "react";
 import { Platform, ScrollView, Text, View } from "react-native";
-import type { AuditEntry, CapacitySnapshot, ControlCommit, ControlStatus, OrchestratorSettings } from "@agent-room/shared";
+import type { AuditEntry, CapacitySnapshot, ControlCommit, ControlStatus, JuryCalibration, OrchestratorSettings } from "@agent-room/shared";
 import type { SetupInfo } from "../api/client";
 import { useRoom } from "../state/store";
 import { Button, Field, Screen, Section, Toggle } from "../components/ui";
@@ -32,6 +32,8 @@ export function SettingsScreen() {
   const [setup, setSetup] = useState<SetupInfo>();
   const [cap, setCap] = useState<CapacitySnapshot>();
   useEffect(() => { hub?.capacity().then(setCap).catch(() => {}); }, [hub]);
+  const [jury, setJury] = useState<{ calibration: JuryCalibration; juries: number; splits: number }>(); // 2.2
+  useEffect(() => { hub?.juryStats().then(setJury).catch(() => {}); }, [hub]);
   const loadSetup = () => { hub?.setup().then(setSetup).catch(() => {}); };
   useEffect(loadSetup, [hub]);
   useEffect(() => { hub?.settings().then(setS).catch(() => {}); hub?.audit().then(setAudit).catch(() => {}); }, [hub]);
@@ -62,6 +64,15 @@ export function SettingsScreen() {
                   value={s.judgeRotation.includes(a.id)}
                   onChange={(v) => save({ judgeRotation: v ? [...s.judgeRotation, a.id] : s.judgeRotation.filter((x) => x !== a.id) })} />
               ))}
+              <Toggle label="Blind jury of three" hint="Work is rewritten in a neutral voice, then graded by three judges from other model families, one of them local. Needs three families besides the worker's."
+                value={s.jury?.enabled ?? true} onChange={(v) => save({ jury: { ...s.jury, enabled: v } })} />
+              {jury && jury.calibration.n ? (
+                <View style={{ paddingHorizontal: space(4) }}>
+                  <Text style={[t.small, { color: p.muted }]}>
+                    {`Juries are off by ${Math.round(jury.calibration.juryAbsErr * 100)} points from your ratings (${jury.calibration.juryN}), single judges by ${Math.round(jury.calibration.singleAbsErr * 100)} (${jury.calibration.singleN}).`}
+                  </Text>
+                </View>
+              ) : null}
               <View style={{ padding: space(4) }}>
                 <Text style={[t.small, { color: p.muted }]}>
                   {s.calibration.n ? `You've spot-checked ${s.calibration.n} judgments; judges are off by ${Math.round(s.calibration.absErr * 100)} points on average.` : "No spot checks yet."}

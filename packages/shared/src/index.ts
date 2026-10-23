@@ -980,3 +980,109 @@ export type WriteProposalSummary = Omit<WriteProposal, "diff"> & { diffBytes: nu
 export type FolderCheck =
   | { ok: true; root: string; protected: boolean; because?: string }
   | { ok: false; error: string; canForce: boolean };
+
+// ---- 2.2 Blind cross-vendor juries
+/** OrchestratorSettings.jury. Default: on when enough model families are ready; size 3, one local judge, three families. */
+export interface JurySettings {
+  /** Unset: on when at least `minFamilies` distinct families are ready. false switches it off. */
+  enabled?: boolean;
+  /** Judges per jury (2 to 5; 3 by default). */
+  size?: number;
+  /** One judge must be a local model when one is ready. */
+  requireLocal?: boolean;
+  /** Distinct model families (other than the worker's) a jury needs. */
+  minFamilies?: number;
+}
+export interface OrchestratorSettings { jury?: JurySettings }
+
+/** One judge's read, as kept in the jury record. */
+export interface JuryJudgeRecord {
+  agentId: string;
+  /** anthropic, openai, google, meta, nous, or local-<model>. */
+  family: string;
+  local: boolean;
+  model?: string;
+  score: number;
+  verdict: Judgment["verdict"];
+  criteria: Record<string, Verdict>;
+  /** Set when the owner rates the judgment: |judge score - owner score|. */
+  distance?: number;
+}
+
+/** How much the judges agreed. */
+export interface JuryAgreement {
+  /** Share of judges that voted with the aggregate verdict (2 of 3 = 0.67). What the apps show. */
+  majority: number;
+  /** Share of judge pairs with the same verdict. */
+  pairwise: number;
+  /** Fleiss' kappa over the criterion verdicts; null with fewer than 2 criteria or judges, or when it can't be told. */
+  kappa: number | null;
+  /** Highest score minus lowest. */
+  spread: number;
+}
+
+/** juries table, GET /juries. One row per judgment: a real jury, one extra reviewer, or the single judge used when a jury couldn't be formed. */
+export interface JuryRecord {
+  id: string;
+  taskId: string;
+  goalId: string;
+  at: number;
+  /** jury = several families; second = the extra reviewer after an UNSURE; fallback = one judge, the reason says why. */
+  kind: "jury" | "second" | "fallback";
+  reason?: string;
+  /** Asked for a local judge but none could be used. */
+  noLocal?: string;
+  worker: string;
+  workerFamily: string;
+  /** Agent id that rewrote the output, or "mechanical" (no model), or "none". */
+  rewriter: string;
+  rewriterNote?: string;
+  judges: JuryJudgeRecord[];
+  aggregate: { score: number; verdict: Judgment["verdict"]; criteria: Record<string, Verdict>; drift?: string };
+  agreement: JuryAgreement;
+  /** The judges didn't agree on accept or revise. */
+  split: boolean;
+  /** The owner's spot rating and how far the jury was from it (each judge's own distance is on `judges`). */
+  owner?: { score: number; at: number; juryDistance: number };
+}
+
+/** What stays on the task's judgment so the apps can draw the chips without another fetch. */
+export interface JuryInfo {
+  id: string;
+  kind: JuryRecord["kind"];
+  reason?: string;
+  judges: { agentId: string; family: string; local: boolean; verdict: Judgment["verdict"]; score: number }[];
+  agreement: JuryAgreement;
+  split: boolean;
+}
+export interface Judgment { jury?: JuryInfo }
+/** The routing record's judgment, with a jury, names its judges comma-joined in judgeAgentId; this is the juries row (GET /juries?taskId=). */
+export interface RoutingRecord { juryId?: string }
+
+/** KV `jury_calibration`, GET /jury/stats: how far judges are from the owner's spot ratings. Running means of |judge score - owner score|. */
+export interface JuryCalibration {
+  /** Judgments the owner rated that had a jury record. */
+  n: number;
+  /** Juries (several judges): count and mean distance of the aggregate score. */
+  juryN: number;
+  juryAbsErr: number;
+  /** Single judges used when no jury could be formed. */
+  singleN: number;
+  singleAbsErr: number;
+  /** Judges that shared the worker's family (kill criterion: cross-vendor vs same-vendor). */
+  sameFamilyN: number;
+  sameFamilyAbsErr: number;
+  /** Every judge's own distance, by model family. */
+  byFamily: Record<string, { n: number; absErr: number }>;
+}
+
+/** Store event when the judges disagree on accept or revise (2.7 interrupts on it). Emitted with store.emit("event", ...). */
+export interface JurySplitEvent {
+  type: "jury_split";
+  at: number;
+  taskId: string;
+  goalId: string;
+  juryId: string;
+  verdict: Judgment["verdict"];
+  judges: { agentId: string; family: string; verdict: Judgment["verdict"]; score: number }[];
+}

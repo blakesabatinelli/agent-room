@@ -115,6 +115,10 @@ export class MockAdapter implements Adapter {
       text = JSON.stringify({ kind, tasks: [], why: "keyword" });
     } else if (p.includes("[[MEMORY]]")) {
       text = JSON.stringify({ decision: "accept", text: p.split("PROPOSAL:")[1]?.split("\n")[1]?.trim() || "noted" });
+    } else if (p.includes("[[NEUTRALIZE]]")) {
+      // 2.2: a rewriter. It hands back the text between the quotes in a flat voice (badRewrite: drops the facts, like a careless one).
+      const body = p.split('"""')[1]?.trim() ?? "";
+      text = (st as { badRewrite?: boolean }).badRewrite ? "Work was done." : `Neutral rewrite: ${body}`;
     } else if (p.includes("[[SUMMARY]]")) {
       text = "All tasks are complete. Research gathered and summary written.";
     } else if (p.includes("tagged you")) {

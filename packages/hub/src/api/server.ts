@@ -30,6 +30,7 @@ import { emptyCapabilities, cleanNeeds } from "../discovery/connectors.js"; // 1
 import { platformBlock } from "../discovery/apply.js"; // 1.3
 import { SignInManager } from "../install/signin.js";
 import { registerInstallRoutes } from "../install/routes.js";
+import { registerJuryRoutes } from "../jury/routes.js"; // 2.2
 import { setupTimer } from "../install/timer.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -638,6 +639,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   // 1.5: `capacity` holds the owner's overrides; `capacityProfile` is what was detected and what is running now.
   app.get("/settings", async () => ({ ...store.getSettings(), calibration: store.getKV("judge_calibration", { n: 0, absErr: 0 }), capacityProfile: orch.governor.snapshot() }));
   app.get("/capacity", async () => orch.governor.snapshot());
+  registerJuryRoutes(app, store); // 2.2: GET /juries, GET /jury/stats
   app.put("/settings", async (req) => {
     const s = z.object({
       orchestratorAgentId: z.string(), judgeRotation: z.array(z.string()),
@@ -649,6 +651,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
       planApproval: z.enum(["always", "big", "never"]).optional(),
       autoRunChecks: z.boolean().optional(),
       autoResume: z.boolean().optional(),
+      jury: z.object({ enabled: z.boolean().optional(), size: z.number().int().min(2).max(5).optional(), requireLocal: z.boolean().optional(), minFamilies: z.number().int().min(2).max(5).optional() }).optional(), // 2.2
       capacity: z.object({
         maxConcurrentTasks: z.number().int().min(1).max(32).optional(),
         localModels: z.enum(["auto", "on", "off"]).optional(),

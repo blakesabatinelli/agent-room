@@ -5,6 +5,7 @@ import type { FolderGrant, Message, Task } from "@agent-room/shared";
 import { presence, useRoom } from "../state/store";
 import { DayDivider, MessageRow } from "../components/MessageRow";
 import { Avatar, Button, Dot, IconButton } from "../components/ui";
+import { JuryChips } from "../components/JuryChips"; // 2.2
 import { lift, radius, space, type as t, usePalette } from "../theme";
 
 type Row = { kind: "day"; id: string; at: number } | { kind: "new"; id: string } | { kind: "msg"; id: string; m: Message; grouped: boolean };
@@ -369,6 +370,7 @@ function Activity({ log, onClose }: { log: Message[]; onClose: () => void }) {
                       </Text>
                     );
                   })}
+                  <JuryChips jury={task.judgment?.jury} />
                   {task.drift?.length ? <Text style={[t.tiny, { color: p.warn }]} numberOfLines={3}>⚠︎ {task.drift[task.drift.length - 1]}</Text> : null}
                 </View>
               </View>
