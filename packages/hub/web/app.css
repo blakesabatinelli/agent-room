@@ -125,3 +125,17 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .switch:checked { background: var(--accent); }
 .switch:checked::after { transform: translateX(18px); }
 .switch:disabled { opacity: .5; }
+
+/* subscriptions (1.6) */
+.qsub { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.qhead { display: flex; align-items: center; gap: 8px; }
+.qname { flex: 1; font-size: 16px; color: var(--strong); }
+.qtag { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--tint); color: var(--accent); }
+.qtag.warn { background: var(--warn-bg); color: var(--warn); }
+.qrow { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.qlbl { width: 56px; font-size: 13px; color: var(--muted); }
+.qbar { flex: 1; height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; }
+.qbar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 99px; }
+.qbar.hot i { background: var(--warn); }
+.qnote { margin: 2px 0 0 66px; font-size: 12px; color: var(--muted); }
+.qnote.flat { margin-left: 0; }

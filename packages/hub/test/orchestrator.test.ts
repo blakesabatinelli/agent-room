@@ -706,16 +706,18 @@ test("verification: a gap between tasks becomes a fix task before the goal is ca
   assert.equal(goal.status, "done");
 });
 
-test("retries: a rate limit is retried on the same agent without spending an attempt", async () => {
+// 1.6 changed this rule: a rate limit used to be retried on the same agent (twice, after a wait); it now moves the task to another agent straight away.
+test("retries: a rate limit moves the task to another agent without spending an attempt", async () => {
   const { store, orch, room } = setup();
   MockAdapter.transientSeen.clear();
   const codex = store.getAgent("codex")!; codex.settings.transient = 1; store.saveAgent(codex); keepOrder(store);
   const goal = await orch.runGoal(room.id, "Summarize the venue TV market");
   const research = store.listTasks({ goalId: goal.id }).find((t) => t.title === "Research the topic")!;
   assert.equal(goal.status, "done");
-  assert.equal(research.assignee, "codex", "not reassigned");
+  assert.notEqual(research.assignee, "codex", "reassigned instead of waiting");
+  assert.deepEqual(research.triedBy, ["codex"]);
   assert.equal(research.attempts, 1, "a CLI hiccup isn't a failed attempt");
-  assert.ok(store.listMessages(room.id).some((m) => m.text.includes("temporary error")));
+  assert.ok(store.listMessages(room.id).some((m) => m.text.includes("moving it to another agent")));
 });
 
 test("reviews: criteria nobody can verify are escalated once, then flagged instead of looping", async () => {

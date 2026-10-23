@@ -552,3 +552,99 @@ export interface RoutingRecord {
   failureNote?: string;
   completedAt?: number;
 }
+
+// ---- 1.6 Quota awareness
+
+/** "subscription" = a plan with 5-hour and weekly windows; "api" = pay per token; "local" = runs on this Mac, free. */
+export type SubscriptionKind = "subscription" | "api" | "local";
+export type QuotaWindowId = "fiveHour" | "weekly";
+
+/** What the owner says one window allows. Vendors don't publish remaining quota, so unknown means "learning". */
+export interface QuotaWindowLimit { limitTokens?: number; limitRuns?: number }
+
+/** A limit the hub worked out itself: Room usage at the moment a window's limit was hit. */
+export interface LearnedLimit { tokens?: number; runs?: number; samples: number; at: number }
+
+/** One place capacity comes from. Usage is tracked per subscription, not per agent (Hermes has two). */
+export interface Subscription {
+  id: string;
+  provider: string;
+  label: string;
+  /** Plan name as the owner knows it ("Max 5x", "Plus"). */
+  plan?: string;
+  agentIds: string[];
+  kind: SubscriptionKind;
+  /** When an agent has several subscriptions, a run lands on this one if the model it ran matches (regex source, case-insensitive). */
+  modelMatch?: string;
+  windows: { fiveHour?: QuotaWindowLimit; weekly?: QuotaWindowLimit };
+  /** Owner-set window boundaries (ms since epoch of any past window start). */
+  resetAnchor?: { fiveHourStart?: number; weekStart?: number };
+  /** Hub-managed: limits learned from observed rate limits, reset times a CLI reported, and a "limited until" mark. Owner edits don't overwrite it. */
+  learned?: {
+    fiveHour?: LearnedLimit;
+    weekly?: LearnedLimit;
+    anchors?: { fiveHourStart?: number; weekStart?: number };
+    limitedUntil?: number;
+    limitedWindow?: QuotaWindowId;
+    /** When the hub marked it limited; a run that started before this finishing fine doesn't clear the mark. */
+    limitedAt?: number;
+  };
+}
+
+export interface QuotaWindowStatus {
+  window: QuotaWindowId;
+  usedTokens: number;
+  usedRuns: number;
+  limitTokens?: number;
+  limitRuns?: number;
+  /** Where the limit came from; undefined while the hub is still learning it. */
+  limitSource?: "owner" | "learned";
+  /** Unused share of the window, 0..1. Undefined while the limit is unknown. */
+  headroom?: number;
+  /** Unused share that will be lost at the reset; 0 when the reset is far off or the limit is unknown. */
+  expiresSoon: number;
+  start: number;
+  resetsAt: number;
+}
+
+export interface SubscriptionStatus {
+  subscription: Subscription;
+  windows: { fiveHour: QuotaWindowStatus; weekly: QuotaWindowStatus };
+  headroom?: number;
+  expiresSoon: number;
+  /** True when the hub expects a run on this subscription to be rate limited. */
+  limited: boolean;
+  limitedUntil?: number;
+  limitedReason?: "reported" | "estimated";
+  free: boolean;
+}
+
+export interface QuotaSettings {
+  /** A free (local) agent is preferred when its expected quality is within this of the best candidate's. */
+  freeMargin: number;
+  /** Largest score bonus given to capacity that is about to expire. */
+  expiryBonus: number;
+  /** Treat a window as exhausted at this share used (0..1). */
+  nearLimit: number;
+}
+export const QUOTA_DEFAULTS: QuotaSettings = { freeMargin: 0.05, expiryBonus: 0.05, nearLimit: 0.95 };
+
+/** Why the router left an agent out or nudged it up, kept on the routing record. */
+export interface QuotaNote {
+  excluded: { agentId: string; subscriptionId: string; reason: "reported" | "estimated"; until?: number }[];
+  boosted: { agentId: string; subscriptionId: string; bonus: number; reason: "free_tier" | "expiring" }[];
+}
+
+export interface QuotaReport {
+  days: number;
+  since: number;
+  rateLimitFailures: number;
+  /** Failures that happened while the hub's own estimate said the window was at its limit. The target is zero. */
+  predicted: number;
+  /** Failures the hub had no way to see coming (limit still unknown, or well under it). */
+  unpredicted: number;
+  bySubscription: Record<string, { label: string; rateLimitFailures: number; predicted: number; unpredicted: number }>;
+}
+
+// Added by 1.6: why the router left agents out or nudged them (optional, so older records stay valid).
+export interface RoutingRecord { quota?: QuotaNote }

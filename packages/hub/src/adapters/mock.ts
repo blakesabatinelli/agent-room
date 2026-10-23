@@ -12,7 +12,7 @@ import type { Adapter, RunRequest, RunResult } from "./types.js";
  * checks and files), bigPlan (three tasks), skipFiles (don't write deliverables), writeOutside
  * (also write this file, outside scope), verifyGap (the first goal check finds a gap),
  * recoverAsk (recovery asks the owner), recoverOwner (who recovery hands the new task to), transient (fail the
- * first N task runs with a rate-limit error), unsure (as a judge, can't verify anything), decide (report this
+ * first N task runs with a rate-limit error; transientError sets its text, e.g. "5-hour limit reached ∙ resets 3pm"), unsure (as a judge, can't verify anything), decide (report this
  * DECISIONS line), badPlan (the first plan is broken; the repair round fixes it), failureCategory (as a judge,
  * the failure_category it gives work it sends back), noOwner (plans name no owner, so routing is learned).
  */
@@ -115,7 +115,7 @@ export class MockAdapter implements Adapter {
       const n = Number((st as { transient?: number }).transient ?? 0);
       const k = `${req.agent.id}`;
       MockAdapter.transientSeen.set(k, (MockAdapter.transientSeen.get(k) ?? 0) + 1);
-      if (MockAdapter.transientSeen.get(k)! <= n) return { ok: false, text: "", durationMs: Date.now() - t0, error: "429 rate limit exceeded, try again later" };
+      if (MockAdapter.transientSeen.get(k)! <= n) return { ok: false, text: "", durationMs: Date.now() - t0, error: (st as { transientError?: string }).transientError ?? "429 rate limit exceeded, try again later" };
     }
     const delay = p.includes("# Your task:") ? Number((req.agent.settings as { delayMs?: number }).delayMs ?? 0) : 0;
     if (delay) {

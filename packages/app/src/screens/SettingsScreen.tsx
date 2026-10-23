@@ -5,6 +5,7 @@ import type { AuditEntry, OrchestratorSettings } from "@agent-room/shared";
 import type { SetupInfo } from "../api/client";
 import { useRoom } from "../state/store";
 import { Button, Field, Screen, Section, Toggle } from "../components/ui";
+import { SubscriptionList } from "../components/subscriptions";
 import { space, type as t, usePalette } from "../theme";
 
 export function SettingsScreen() {
@@ -85,6 +86,9 @@ export function SettingsScreen() {
             </Section>
           </>
         ) : null}
+        <Section title="Subscriptions" hint="What each plan has used in its 5-hour and weekly windows. Work stops going to a plan that is at its limit.">
+          <SubscriptionList hub={hub} />
+        </Section>
         {setup ? (
           <Section title="Practice mode">
             <Toggle label="Practice agents" value={setup.practiceMode} hint="Stand-ins that answer instantly instead of your real agents"
