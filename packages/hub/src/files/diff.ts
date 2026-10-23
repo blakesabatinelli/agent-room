@@ -81,15 +81,15 @@ function editScript(o: Side, n: Side): Op[] {
  * True when either side is over MAX_DIFF_LINES. unifiedDiff then returns only a one-line summary,
  * which must never stand in for the diff an owner approves: callers refuse such changes.
  */
-export function tooLargeToDiff(oldText: string | null, newText: string): boolean {
-  return split(oldText ?? "").lines.length > MAX_DIFF_LINES || split(newText).lines.length > MAX_DIFF_LINES;
+export function tooLargeToDiff(oldText: string | null, newText: string | null): boolean {
+  return split(oldText ?? "").lines.length > MAX_DIFF_LINES || split(newText ?? "").lines.length > MAX_DIFF_LINES;
 }
 
-/** `oldText` null = the file does not exist yet. Returns "" when nothing changes. */
-export function unifiedDiff(relPath: string, oldText: string | null, newText: string): string {
+/** `oldText` null = the file does not exist yet; `newText` null = the file is deleted (1.1). Returns "" when nothing changes. */
+export function unifiedDiff(relPath: string, oldText: string | null, newText: string | null): string {
   if (oldText !== null && oldText === newText) return "";
-  const header = `--- ${oldText === null ? "/dev/null" : `a/${relPath}`}\n+++ b/${relPath}\n`;
-  const o = split(oldText ?? ""), n = split(newText);
+  const header = `--- ${oldText === null ? "/dev/null" : `a/${relPath}`}\n+++ ${newText === null ? "/dev/null" : `b/${relPath}`}\n`;
+  const o = split(oldText ?? ""), n = split(newText ?? "");
   if (o.lines.length > MAX_DIFF_LINES || n.lines.length > MAX_DIFF_LINES) {
     return `${header}@@ too large to diff: ${o.lines.length} lines -> ${n.lines.length} lines; the whole file is replaced (content hash is verified) @@\n`;
   }

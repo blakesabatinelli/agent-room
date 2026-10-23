@@ -1,5 +1,5 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, appendFileSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, appendFileSync, unlinkSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { runProc } from "../adapters/proc.js";
 import { changedFiles, snapshot } from "./workspace.js";
 
@@ -31,10 +31,23 @@ import { changedFiles, snapshot } from "./workspace.js";
 export const HUB_IDENTITY = { name: "Agent Room", email: "hub@agent-room.local" };
 
 export interface WorkspaceOptions { dataDir: string; /** git binary; default $AGENT_ROOM_GIT or "git" */ git?: string }
-export interface GoalRef { id: string; folder: string }
+/**
+ * 1.1: a goal that works on a folder the owner granted. `path` is the real, granted folder.
+ * `write` false (or `revoked`) means nothing is ever written to it: tasks work in a private copy.
+ */
+export interface GoalSource { grantId: string; path: string; write: boolean; label?: string; /** git folders: where accepted work lands, agent-room/<goal-id> */ branch: string; revoked?: boolean }
+export interface GoalRef { id: string; folder: string; /** 1.1 */ source?: GoalSource }
+/** What the base of a goal is: the hub's own folder (plain), the owner's repo through a branch (granted-git), or a private copy of the owner's folder (shadow). */
+export type BaseMode = "plain" | "granted-git" | "shadow";
 export interface TaskWorkspace {
   goalId: string; taskId: string; agentId: string;
   kind: "git" | "copy";
+  /** 1.1: how this task's base relates to the owner's granted folder. Absent = plain (the hub's own goal folder). */
+  mode?: BaseMode;
+  /** 1.1 granted-git: the hub's worktree on branch agent-room/<goal>, where accepted work is merged. The owner's checkout is never touched. */
+  integration?: string;
+  /** 1.1 git kind: what git wrote in the work folder's `.git` file, put back before the hub runs git there (an agent can overwrite it). */
+  gitdir?: string;
   /** The task's own directory: the agent's cwd. */
   path: string;
   /** The goal folder this was cut from. */
@@ -45,8 +58,20 @@ export interface TaskWorkspace {
   /** Files left with conflict markers by the last failed accept. */
   conflicted?: string[];
 }
+export interface WritebackChange { relPath: string; /** null = deleted */ content: Buffer | null }
+/** 1.1: what an accepted task did to a granted folder, for the caller to act on. */
+export interface SourceOutcome {
+  mode: "granted-git" | "shadow";
+  /** granted-git: the branch the work was merged into. */
+  branch?: string;
+  /** The grant no longer allows writing: nothing was merged or collected. */
+  withheld?: boolean;
+  /** shadow with a writable grant: the files this task changed, read under the goal's lock, to be proposed to the owner as one diff. */
+  changes?: WritebackChange[];
+  skipped?: { relPath: string; reason: string }[];
+}
 export type AcceptResult =
-  | { ok: true; merged: string[]; how: "empty" | "fast-forward" | "merge" | "copy" }
+  | { ok: true; merged: string[]; how: "empty" | "fast-forward" | "merge" | "copy"; source?: SourceOutcome }
   | { ok: false; conflict: string[]; /** true when the files still carry the markers from last time */ markers?: boolean };
 
 /** Hooks other items plug into (1.9 writes/restores the agent's context file here). Errors are logged, never fatal. */
@@ -61,6 +86,34 @@ export interface WorkspaceHooks {
 const BRANCH = (taskId: string) => `ar/${taskId}`;
 const EXCLUDES = ["LEDGER.md", ".agent-room*", "node_modules", ".DS_Store"];
 const hasMarkers = (text: string) => /^<{7}(?: .*)?$/m.test(text) && /^>{7}(?: .*)?$/m.test(text);
+
+const COPY_SKIP = new Set([".git", "node_modules", ".DS_Store", "LEDGER.md"]);
+const COPY_MAX_FILES = 20_000, COPY_MAX_BYTES = 1024 * 1024 * 1024;
+
+/**
+ * 1.1: copy a granted folder into the hub's private area. Only plain files and folders are copied: a symlink is never followed or
+ * recreated (a link inside the folder could point at ~/.ssh, and the copy is handed to an agent), and version-control internals,
+ * dependencies and the ledger are left out. Refuses a folder too large to copy rather than copying half of it.
+ */
+export function copyGrantedTree(src: string, dst: string): { files: number; skippedLinks: number } {
+  let files = 0, bytes = 0, skippedLinks = 0;
+  mkdirSync(dst, { recursive: true });
+  const walk = (from: string, to: string) => {
+    for (const name of readdirSync(from)) {
+      if (COPY_SKIP.has(name) || name.startsWith(".agent-room")) continue;
+      const a = join(from, name), b = join(to, name);
+      const st = lstatSync(a);
+      if (st.isSymbolicLink()) { skippedLinks++; continue; }
+      if (st.isDirectory()) { mkdirSync(b, { recursive: true }); walk(a, b); }
+      else if (st.isFile()) {
+        if (++files > COPY_MAX_FILES || (bytes += st.size) > COPY_MAX_BYTES) throw new Error("The granted folder is too large to work on as a copy (over 20,000 files or 1 GB). Grant a smaller folder.");
+        copyFileSync(a, b);
+      }
+    }
+  };
+  try { walk(src, dst); } catch (e) { rmSync(dst, { recursive: true, force: true }); throw e; }
+  return { files, skippedLinks };
+}
 
 export class TaskWorkspaces {
   private chains = new Map<string, Promise<unknown>>();
@@ -83,7 +136,7 @@ export class TaskWorkspaces {
   private listMeta(goalId: string): TaskWorkspace[] {
     let names: string[] = [];
     try { names = readdirSync(this.root(goalId)); } catch { return []; }
-    return names.filter((n) => n.endsWith(".json")).flatMap((n) => {
+    return names.filter((n) => n.endsWith(".json") && !n.startsWith("_")).flatMap((n) => {
       try { return [JSON.parse(readFileSync(join(this.root(goalId), n), "utf8")) as TaskWorkspace]; } catch { return []; }
     });
   }
@@ -150,18 +203,31 @@ export class TaskWorkspaces {
 
   // ---------- open
   /** The task's workspace for this attempt: reused for the same agent, otherwise fresh from the current base. */
-  open(goal: GoalRef, task: { id: string }, agentId: string): Promise<TaskWorkspace & { reused: boolean }> {
-    return this.locked(goal.id, async () => {
+  open(goalIn: GoalRef, task: { id: string }, agentId: string): Promise<TaskWorkspace & { reused: boolean }> {
+    return this.locked(goalIn.id, async () => {
+      // 1.1: a goal on a granted folder gets its base from the grant (the owner's repo through a branch, or a private copy). Otherwise the base is the hub's goal folder, as before.
+      const src = await this.ensureSource(goalIn);
+      const goal: GoalRef = src?.mode === "shadow" ? { id: goalIn.id, folder: src.shadow! } : { id: goalIn.id, folder: goalIn.folder };
+      const mode: BaseMode = src?.mode ?? "plain";
       const have = this.find(goal.id, task.id);
       if (have && have.agentId === agentId) return { ...have, reused: true };
       await this.discardNow(goal, task.id);
       mkdirSync(this.root(goal.id), { recursive: true });
       const path = this.pathFor(goal.id, task.id);
+      if (src?.mode === "granted-git") {
+        // The task's branch comes from the head of agent-room/<goal> (all accepted work so far). The owner's checked-out branch and files are never touched.
+        const head = await this.out(src.integration!, ["rev-parse", "HEAD"]);
+        await this.git(src.path, ["worktree", "prune"]); // forget a work folder of the same task that a crash left registered
+        const add = head ? await this.git(src.path, ["worktree", "add", "-q", "-B", BRANCH(task.id), path, head]) : undefined;
+        if (add?.code !== 0) { rmSync(path, { recursive: true, force: true }); await this.git(src.path, ["worktree", "prune"]); throw new Error("Could not cut a work folder from the granted folder's repository."); }
+        const m: TaskWorkspace = { goalId: goal.id, taskId: task.id, agentId, kind: "git", path, base: src.path, branch: BRANCH(task.id), mode, integration: src.integration, gitdir: this.pointerOf(path) };
+        this.save(m); return { ...m, reused: false };
+      }
       if ((await this.base(goal)) === "git") {
         const head = await this.out(goal.folder, ["rev-parse", "HEAD"]);
         const add = head ? await this.git(goal.folder, ["worktree", "add", "-q", "-B", BRANCH(task.id), path, head]) : undefined;
         if (add?.code === 0) {
-          const m: TaskWorkspace = { goalId: goal.id, taskId: task.id, agentId, kind: "git", path, base: goal.folder, branch: BRANCH(task.id) };
+          const m: TaskWorkspace = { goalId: goal.id, taskId: task.id, agentId, kind: "git", path, base: goal.folder, branch: BRANCH(task.id), gitdir: this.pointerOf(path), ...(mode !== "plain" ? { mode } : {}) };
           this.save(m); return { ...m, reused: false };
         }
         rmSync(path, { recursive: true, force: true });
@@ -171,9 +237,97 @@ export class TaskWorkspaces {
       const snap = snapshot(goal.folder);
       mkdirSync(path, { recursive: true });
       for (const rel of snap.keys()) { const to = join(path, rel); mkdirSync(dirname(to), { recursive: true }); cpSync(join(goal.folder, rel), to); }
-      const m: TaskWorkspace = { goalId: goal.id, taskId: task.id, agentId, kind: "copy", path, base: goal.folder, snap: Object.fromEntries(snap) };
+      const m: TaskWorkspace = { goalId: goal.id, taskId: task.id, agentId, kind: "copy", path, base: goal.folder, snap: Object.fromEntries(snap), ...(mode !== "plain" ? { mode } : {}) };
       this.save(m); return { ...m, reused: false };
     });
+  }
+
+  // ---------- 1.1 granted folders
+  /** What the base of a goal on a granted folder is, written once when its first task opens. */
+  private sourceFile(goalId: string) { return join(this.root(goalId), "_source.json"); }
+  sourceOf(goalId: string): { mode: "granted-git" | "shadow"; path: string; branch?: string; integration?: string; shadow?: string } | undefined {
+    try { return JSON.parse(readFileSync(this.sourceFile(goalId), "utf8")); } catch { return undefined; }
+  }
+  /** The folder holding a goal's accepted state, when it is not the goal folder: the integration worktree or the private copy. For checks and the final review. */
+  stateFolder(goalId: string): string | undefined {
+    const s = this.sourceOf(goalId);
+    const p = s?.mode === "granted-git" ? s.integration : s?.shadow;
+    return p && existsSync(p) ? p : undefined;
+  }
+
+  /** True when `dir` is the top level of a git repository with at least one commit. */
+  private async isRepoRoot(dir: string): Promise<boolean> {
+    const top = await this.out(dir, ["rev-parse", "--show-toplevel"]);
+    if (!top) return false;
+    try { if (realpathSync(top) !== realpathSync(dir)) return false; } catch { return false; }
+    return !!(await this.out(dir, ["rev-parse", "--verify", "-q", "HEAD"]));
+  }
+
+  private async ensureSource(goal: GoalRef) {
+    const have = this.sourceOf(goal.id);
+    const s = goal.source;
+    if (have) {
+      // The hub's worktree on the branch may be gone (hub restart prunes idle ones): put it back, on the same branch, never reset.
+      if (have.mode === "granted-git" && have.integration && !existsSync(have.integration)) {
+        await this.git(have.path, ["worktree", "prune"]);
+        const r = await this.git(have.path, ["worktree", "add", "-q", have.integration, have.branch!]);
+        if (r.code !== 0) throw new Error("Could not reopen the branch for this goal in the granted folder's repository.");
+      }
+      if (have.mode === "shadow" && have.shadow && !existsSync(have.shadow)) copyGrantedTree(have.path, have.shadow);
+      return have;
+    }
+    if (!s || s.revoked) return undefined;
+    mkdirSync(this.root(goal.id), { recursive: true });
+    let meta: NonNullable<ReturnType<TaskWorkspaces["sourceOf"]>> | undefined;
+    // Writable git folder: accepted work goes to a branch the owner merges. The hub works on that branch in its own worktree.
+    if (s.write && await this.isRepoRoot(s.path)) {
+      const integration = join(this.root(goal.id), "_integration");
+      const exists = await this.gitOk(s.path, ["rev-parse", "--verify", "-q", `refs/heads/${s.branch}`]);
+      const head = await this.out(s.path, ["rev-parse", "HEAD"]);
+      const r = await this.git(s.path, exists ? ["worktree", "add", "-q", integration, s.branch] : ["worktree", "add", "-q", "-b", s.branch, integration, head]);
+      if (r.code === 0) meta = { mode: "granted-git", path: s.path, branch: s.branch, integration };
+      else { rmSync(integration, { recursive: true, force: true }); await this.git(s.path, ["worktree", "prune"]); }
+    }
+    // Anything else (not a repo, read-only grant, git unusable): a private copy. Accepted work stays in the copy; it reaches the owner's folder only as a reviewed diff.
+    if (!meta) {
+      const shadow = join(this.root(goal.id), "_shadow");
+      copyGrantedTree(s.path, shadow);
+      meta = { mode: "shadow", path: s.path, shadow };
+    }
+    writeFileSync(this.sourceFile(goal.id), JSON.stringify(meta));
+    return meta;
+  }
+
+  /** Detach the hub's worktree from the owner's repository (the branch stays: it is the owner's result) or drop the private copy. */
+  private async removeSource(goalId: string) {
+    const s = this.sourceOf(goalId);
+    if (!s) return;
+    if (s.mode === "granted-git") {
+      if (s.integration) await this.git(s.path, ["worktree", "remove", "--force", "--force", s.integration]);
+      await this.git(s.path, ["worktree", "prune"]);
+      if (s.integration) rmSync(s.integration, { recursive: true, force: true });
+    } else if (s.shadow) rmSync(s.shadow, { recursive: true, force: true });
+    rmSync(this.sourceFile(goalId), { force: true });
+  }
+
+  /**
+   * Read what a task changed in the private copy, for writing back to the owner's folder. Runs under the goal's lock, so a later task
+   * cannot change the copy between the merge and this read. Symlinks and anything that is not a plain file are skipped, with the reason.
+   */
+  private collectChanges(shadow: string, files: string[], maxBytes: number): { changes: WritebackChange[]; skipped: { relPath: string; reason: string }[] } {
+    const changes: WritebackChange[] = [], skipped: { relPath: string; reason: string }[] = [];
+    for (const rel of files) {
+      const full = join(shadow, rel);
+      try {
+        if (relative(shadow, full).startsWith("..")) continue;
+        let st; try { st = lstatSync(full); } catch { changes.push({ relPath: rel, content: null }); continue; }
+        if (st.isSymbolicLink()) { skipped.push({ relPath: rel, reason: "symlink; not written back" }); continue; }
+        if (!st.isFile()) continue;
+        if (st.size > maxBytes) { skipped.push({ relPath: rel, reason: `larger than ${maxBytes} bytes` }); continue; }
+        changes.push({ relPath: rel, content: readFileSync(full) });
+      } catch { skipped.push({ relPath: rel, reason: "could not be read" }); }
+    }
+    return { changes, skipped };
   }
 
   // ---------- accept
@@ -185,14 +339,38 @@ export class TaskWorkspaces {
       const stuck = (m.conflicted ?? []).filter((f) => { try { return hasMarkers(readFileSync(join(m.path, f), "utf8")); } catch { return false; } });
       if (stuck.length) return { ok: false, conflict: stuck, markers: true };
       if (m.conflicted?.length) { m.conflicted = []; this.save(m); }
-      return m.kind === "git" ? this.acceptGit(m, task) : this.acceptCopy(m);
+      // 1.1: the grant may have lost its write access since the goal started. Then nothing is merged into the owner's repository or collected for them.
+      if (m.mode === "granted-git" && (!goal.source?.write || goal.source.revoked)) return { ok: true, merged: [], how: "empty", source: { mode: "granted-git", withheld: true } };
+      const r = m.kind === "git" ? await this.acceptGit(m, task) : await this.acceptCopy(m);
+      if (!r.ok || !m.mode || m.mode === "plain") return r;
+      if (m.mode === "granted-git") return { ...r, source: { mode: "granted-git", branch: this.sourceOf(goal.id)?.branch } };
+      // shadow: the work is merged into the private copy. When the grant is writable, read what this task changed so it can go to the owner as one diff.
+      if (!goal.source?.write || goal.source.revoked) return { ...r, source: { mode: "shadow", withheld: true } };
+      return { ...r, source: { mode: "shadow", ...this.collectChanges(m.base, r.merged, 2 * 1024 * 1024) } };
     });
   }
 
+  private pointerOf(path: string): string | undefined { try { return readFileSync(join(path, ".git"), "utf8"); } catch { return undefined; } }
+
+  /**
+   * 1.1: the `.git` file in a work folder tells git where the repository is. An agent can overwrite it (or run `git init` there) so that
+   * the hub's own git commands, which run outside the agent's sandbox, read a config the agent wrote (core.fsmonitor and friends run commands).
+   * Before the hub runs git in a work folder the pointer is put back exactly as git wrote it.
+   */
+  private restorePointer(m: TaskWorkspace) {
+    if (m.kind !== "git" || !m.gitdir) return;
+    const p = join(m.path, ".git");
+    try { const st = lstatSync(p); if (st.isFile() && readFileSync(p, "utf8") === m.gitdir) return; rmSync(p, { recursive: true, force: true }); } catch { /* missing: written below */ }
+    writeFileSync(p, m.gitdir);
+  }
+
   private async acceptGit(m: TaskWorkspace, task: { id: string; title?: string }): Promise<AcceptResult> {
-    const wt = m.path, base = m.base, branch = m.branch!;
+    // 1.1: for a granted repo the merge happens in the hub's own worktree on agent-room/<goal>, never in the owner's checkout.
+    this.restorePointer(m);
+    const wt = m.path, base = m.integration ?? m.base, branch = m.branch!;
     // 1. commit the agent's work on its branch (author = the agent)
-    await this.git(wt, ["add", "-A"]);
+    // 1.1: the owner's repo has no local exclude file of ours, so the files the hub itself writes into a work folder are left out here.
+    await this.git(wt, m.integration ? ["add", "-A", "--", ".", ":(exclude).agent-room*", ":(exclude)LEDGER.md", ":(exclude)node_modules", ":(exclude).DS_Store"] : ["add", "-A"]);
     const merging = await this.gitOk(wt, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
     const dirty = !(await this.gitOk(wt, ["diff", "--cached", "--quiet"]));
     if (dirty || merging) {
@@ -200,7 +378,8 @@ export class TaskWorkspaces {
       if (c.code !== 0) return { ok: false, conflict: [] };
     }
     // 2. merge into the base
-    await this.syncBase(base);
+    if (m.integration) { await this.git(base, ["reset", "--hard", "-q", "HEAD"]); await this.git(base, ["clean", "-fdq"]); } // the hub's own worktree: a check may have left files in it
+    else await this.syncBase(base);
     const before = await this.out(base, ["rev-parse", "HEAD"]);
     if (await this.gitOk(base, ["merge-base", "--is-ancestor", branch, "HEAD"])) return { ok: true, merged: [], how: "empty" };
     const fastForward = await this.gitOk(base, ["merge-base", "--is-ancestor", "HEAD", branch]);
@@ -260,7 +439,7 @@ export class TaskWorkspaces {
   private async discardNow(goal: GoalRef, taskId: string) {
     const m = this.find(goal.id, taskId);
     const path = m?.path ?? this.pathFor(goal.id, taskId);
-    const base = m?.base ?? goal.folder;
+    const base = m?.base ?? this.baseOf(goal); // 1.1: with no metadata left, the branch to delete is still in the owner's repo (granted-git) or the private copy
     if (m?.kind !== "copy" && existsSync(join(base, ".git"))) {
       await this.git(base, ["worktree", "remove", "--force", "--force", path]);
       await this.git(base, ["branch", "-D", BRANCH(taskId)]);
@@ -274,21 +453,28 @@ export class TaskWorkspaces {
   cleanup(goal: GoalRef, taskIds: string[] = []): Promise<void> {
     return this.locked(goal.id, async () => {
       const ids = new Set([...this.listMeta(goal.id).map((m) => m.taskId), ...taskIds]);
-      try { for (const n of readdirSync(this.root(goal.id))) if (!n.endsWith(".json")) ids.add(n); } catch { /* none */ }
+      try { for (const n of readdirSync(this.root(goal.id))) if (!n.endsWith(".json") && !n.startsWith("_")) ids.add(n); } catch { /* none */ }
       for (const t of ids) await this.discardNow(goal, t);
       if (existsSync(join(goal.folder, ".git"))) await this.git(goal.folder, ["worktree", "prune"]);
+      await this.removeSource(goal.id); // 1.1: the hub's worktree in the owner's repo goes; the branch agent-room/<goal> stays, it is the owner's result
       try { rmSync(this.root(goal.id), { recursive: true, force: true }); } catch { /* best effort */ }
     });
   }
 
+  /** 1.1: where git commands for a goal's tasks run when no task metadata is left. */
+  private baseOf(goal: GoalRef): string {
+    const s = this.sourceOf(goal.id);
+    return s?.mode === "granted-git" ? s.path : s?.mode === "shadow" && s.shadow ? s.shadow : goal.folder;
+  }
+
   /** Hub start: remove worktrees whose task is no longer open (or unknown). Returns the task ids removed. */
-  async prune(keep: (goalId: string, taskId: string) => boolean): Promise<string[]> {
+  async prune(keep: (goalId: string, taskId: string) => boolean, goalAlive: (goalId: string) => boolean = () => false): Promise<string[]> {
     const removed: string[] = [];
     let goals: string[] = [];
     try { goals = readdirSync(this.root()); } catch { return removed; }
     for (const goalId of goals) {
       const metas = this.listMeta(goalId);
-      const base = metas[0]?.base;
+      const base = metas[0]?.base ?? this.sourceOf(goalId)?.path;
       for (const m of metas) {
         if (keep(goalId, m.taskId) && existsSync(m.path)) continue;
         await this.locked(goalId, () => this.discardNow({ id: goalId, folder: m.base }, m.taskId));
@@ -297,12 +483,14 @@ export class TaskWorkspaces {
       // directories with no metadata are leftovers
       try {
         for (const n of readdirSync(this.root(goalId))) {
-          if (n.endsWith(".json") || this.listMeta(goalId).some((m) => m.taskId === n)) continue;
+          if (n.endsWith(".json") || n.startsWith("_") || this.listMeta(goalId).some((m) => m.taskId === n)) continue; // "_" = 1.1 base of a goal on a granted folder, handled below
           rmSync(join(this.root(goalId), n), { recursive: true, force: true }); removed.push(n);
         }
       } catch { /* none */ }
+      // 1.1: a goal that is still going keeps its integration worktree or private copy (accepted work lives there); a finished or gone goal does not.
+      if (!goalAlive(goalId)) await this.locked(goalId, () => this.removeSource(goalId));
       if (base && existsSync(join(base, ".git"))) await this.git(base, ["worktree", "prune"]);
-      if (!this.listMeta(goalId).length) try { rmSync(this.root(goalId), { recursive: true, force: true }); } catch { /* best effort */ }
+      if (!this.listMeta(goalId).length && !this.sourceOf(goalId)) try { rmSync(this.root(goalId), { recursive: true, force: true }); } catch { /* best effort */ }
     }
     return removed;
   }

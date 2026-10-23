@@ -773,3 +773,77 @@ export interface RemoteStatus extends Omit<TailscaleStatus, "funnel"> {
     extraPaths: string[];
   };
 }
+
+// ---- 1.1 Local file access
+// These interfaces extend ones declared above (TypeScript merges same-named interfaces), so the spike's own definitions stay untouched.
+
+/** Set when the owner granted a folder that is normally off limits (credentials, system or hub folders), with the reason they gave. */
+export interface FolderGrant {
+  override?: { reason: string; at: number; /** What made the folder protected, in plain words. */ because: string };
+}
+
+/** Body of POST /folder-grants (1.1). `force` + `reason` are needed only for folders the hub normally refuses. */
+export interface FolderGrantInput {
+  path: string; label?: string; roomId?: string; agentId: string; read?: boolean; write?: boolean;
+  force?: boolean; reason?: string;
+}
+/** Body of PUT /folder-grants/:id (1.1). Only what is sent changes. The path itself never changes: remove the grant and add a new one. */
+export interface FolderGrantUpdate { label?: string; roomId?: string | null; agentId?: string; read?: boolean; write?: boolean }
+
+/** Error body for a refused grant: `canForce` tells the UI whether to offer "Grant anyway" (it then asks for a reason). */
+export interface GrantRefusal { error: string; code: "protected_folder" | "hard_refused" | "invalid"; canForce: boolean; because?: string }
+
+/** The approval card for a file write names its proposal, so a UI can fetch the whole diff from GET /write-proposals/:id. */
+export interface Approval { proposalId?: string }
+
+/** One file in a proposal that changes several (a task's accepted work written back to a granted folder). */
+export interface WriteProposalFile {
+  relPath: string;
+  op: "create" | "edit" | "delete";
+  baseSha256: string | null;
+  /** null = the file is deleted. */
+  newSha256: string | null;
+  bytes: number;
+}
+export interface WriteProposal {
+  /** "file" = one file an agent proposed through MCP; "task" = everything one task changed, one approval. */
+  kind?: "file" | "task";
+  goalId?: string;
+  taskId?: string;
+  title?: string;
+  /** kind "task": every file, in order. The diff covers all of them. */
+  files?: WriteProposalFile[];
+  /** kind "task": files that could not be proposed (binary, too large, symlink...) and why. The owner should know. */
+  skipped?: { relPath: string; reason: string }[];
+  /** Set when the owner will see that this cannot be applied as asked (the agent is never told why on a write-only grant). */
+  unappliable?: string;
+  /** What the agent asked for, in its own spelling. Agents see this instead of the resolved path. */
+  askedPath?: string;
+  /** True when the diff was shortened to save space after the proposal was settled. */
+  diffDropped?: boolean;
+}
+
+/** A task's accepted work on a goal that targets a granted folder (1.1). */
+export interface Goal {
+  /** The folder grant this goal works on. Tasks read from it and (when it is writable) their accepted work returns to it. */
+  sourceGrantId?: string;
+  /** Git folders: the branch accepted work lands on (never the owner's checked-out branch). */
+  sourceBranch?: string;
+}
+
+/** What GET /mcp-tokens lists. Never the key itself: only a hash is kept. */
+export interface McpTokenInfo {
+  id: string;
+  agentId: string;
+  name: string;
+  /** When set, the key only works as that room: room-scoped folder grants apply and every room argument is pinned to it. */
+  roomId?: string;
+  createdAt: number;
+  expiresAt?: number;
+  lastUsedAt?: number;
+  expired: boolean;
+}
+export interface McpTokenCreated extends McpTokenInfo { token: string; url: string }
+
+/** The key is shown once, when it is made or rotated. Later reads of a connection leave `token` empty and set this. */
+export interface McpConnection { tokenHidden?: boolean }

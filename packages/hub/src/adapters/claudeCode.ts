@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { TOOLS } from "@agent-room/shared";
 import type { Adapter, RunRequest, RunResult } from "./types.js";
 import { runProc, which } from "./proc.js";
+import { claudeConfinementArgs, scopeAllowedTools } from "../files/confine.js";
 
 /**
  * Drives the Claude Code CLI, signed in with the owner's Claude subscription.
@@ -52,7 +53,7 @@ export class ClaudeCodeAdapter implements Adapter {
   }
 
   buildArgs(req: RunRequest): string[] {
-    const s = req.agent.settings as { model?: string; toolMap?: Record<string, string[]> };
+    const s = req.agent.settings as { model?: string; toolMap?: Record<string, string[]>; bashSandbox?: boolean };
     const args = ["-p", req.prompt, "--output-format", "stream-json", "--verbose"];
     const model = req.model ?? s.model;
     if (model) args.push("--model", model);
@@ -69,8 +70,10 @@ export class ClaudeCodeAdapter implements Adapter {
       args.push("--permission-prompt-tool", "mcp__agent-room__approval_prompt");
     }
     const { allowed, disallowed } = claudePermissionArgs(req.agent.tools, s.toolMap, req.agent.autoApprove);
-    args.push("--allowedTools", allowed.join(","));
+    // 1.1: file tools reach the task folder only (cwd), never a bare `Read`/`Write` that would allow any path. See files/confine.ts.
+    args.push("--allowedTools", ...scopeAllowedTools(allowed, req.cwd));
     if (disallowed.length) args.push("--disallowedTools", disallowed.join(","));
+    args.push(...claudeConfinementArgs({ cwd: req.cwd, dataDir: req.dataDir, bashSandbox: s.bashSandbox !== false }));
     return args;
   }
 

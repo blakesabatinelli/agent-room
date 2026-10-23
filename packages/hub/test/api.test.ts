@@ -165,10 +165,15 @@ test("MCP keys for Hermes and Muse survive a hub restart and only change on requ
   await app.listen({ host: "127.0.0.1", port: 0 });
   const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
   auth = { authorization: auth.authorization, "content-type": "application/json" }; // paired device survives too
-  const shown = (await (await fetch(`${base}/agents/hermes/mcp-connection/config`, { headers: auth })).json()) as { token: string; instructions: string };
-  assert.equal(shown.token, made.token, "restart keeps the key");
+  const shown = (await (await fetch(`${base}/agents/hermes/mcp-connection/config`, { headers: auth })).json()) as { token: string; tokenHidden?: boolean; instructions: string };
+  // 1.1: only a hash of the key is stored, so after a restart the key works but can't be shown again.
+  assert.equal(shown.token, "", "the key itself is not kept");
+  assert.equal(shown.tokenHidden, true);
   assert.ok(shown.instructions.includes("get_updates"));
   assert.equal(await tools(base, made.token), 200, "old key still works after restart");
+  const again = (await (await fetch(`${base}/agents/hermes/mcp-connection`, { method: "POST", headers: auth, body: "{}" })).json()) as { token: string };
+  assert.equal(again.token, "", "asking again after a restart does not make a new key");
+  assert.equal(await tools(base, made.token), 200, "and does not retire the old one");
 
   const rotated = await post(base, { rotate: true });
   assert.notEqual(rotated.token, made.token);

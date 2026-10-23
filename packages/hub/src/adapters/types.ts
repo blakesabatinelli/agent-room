@@ -6,6 +6,8 @@ export interface RunRequest {
   systemPrompt?: string;
   /** sandboxed working directory for this agent + task */
   cwd: string;
+  /** 1.1: the hub's data folder, so a confined Claude Code run can keep the hub's database and other tasks' folders off limits. */
+  dataDir?: string;
   /** hub MCP endpoint the agent can use to talk to the room */
   mcp?: { url: string; token: string };
   /** true for orchestrator planning/judging calls: no tools, JSON out */

@@ -202,7 +202,7 @@ test("list and read: sizes, truncation, binary files and non-files", () => {
   const r = files.read("claude", undefined, "big.txt", undefined, 100);
   assert.ok(r.ok && !r.binary && r.content.length === 100 && r.truncated && r.bytes === 1000);
   const b = files.read("claude", undefined, "bin.dat");
-  assert.ok(b.ok && b.binary && /Binary/.test(b.note));
+  assert.ok(b.ok && b.binary && /Not a text file/.test(b.note)); // 1.1: the same wording for binary and invalid UTF-8, on read and on write
   assert.equal(files.read("claude", undefined, "sub").ok, false, "a folder is not a file");
   assert.equal(files.read("claude", undefined, "missing.txt").ok, false);
 });
@@ -342,9 +342,15 @@ test("removing the grant, or switching the tool off, while a write waits stops i
     writeFileSync(join(root, "a.txt"), "keep\n");
     const r = files.proposeWrite("claude", undefined, "a.txt", "lose\n");
     assert.ok(r.ok); if (!r.ok) return;
-    if (how === "grant") files.removeGrant(grant.id);
-    else { const a = store.getAgent("claude")!; a.tools.filesystem = false; store.saveAgent(a); }
-    approvals.decide(pendingApproval(store).id, "approved");
+    if (how === "grant") {
+      files.removeGrant(grant.id);
+      // 1.1: removing the grant settles the waiting write at once; the owner is not left an approval that can only fail.
+      assert.equal(files.proposal(r.proposal.id)!.status, "rejected");
+      assert.equal(store.listApprovals("pending").length, 0);
+    } else {
+      const a = store.getAgent("claude")!; a.tools.filesystem = false; store.saveAgent(a);
+      approvals.decide(pendingApproval(store).id, "approved");
+    }
     await until(() => files.proposal(r.proposal.id)!.status !== "pending");
     assert.notEqual(files.proposal(r.proposal.id)!.status, "applied", how);
     assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "keep\n", how);

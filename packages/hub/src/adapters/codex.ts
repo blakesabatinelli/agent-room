@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Adapter, RunRequest, RunResult } from "./types.js";
 import { runProc, which } from "./proc.js";
+import { codexConfinementArgs } from "../files/confine.js";
 
 /**
  * Drives OpenAI's Codex CLI (`codex exec`), signed in with the owner's ChatGPT plan.
@@ -15,6 +16,26 @@ export function codexSandboxArgs(tools: Record<string, boolean>): string[] {
   const writable = tools.filesystem || tools.shell;
   const args = ["--sandbox", writable ? "workspace-write" : "read-only"];
   if (writable) args.push("-c", `sandbox_workspace_write.network_access=${tools.web ? "true" : "false"}`);
+  return args;
+}
+
+/**
+ * Everything before the prompt for `codex exec`. 1.1 confinement: `-C <task folder>` and the workspace-write sandbox with no extra
+ * writable roots (no --add-dir, writable_roots empty, /tmp excluded), so writes stay inside the task's worktree.
+ */
+export function codexBaseArgs(req: Pick<RunRequest, "agent" | "cwd" | "model" | "effort" | "jsonOnly">, outFile: string): string[] {
+  const s = req.agent.settings as { model?: string };
+  const args = ["exec", "--json", "--skip-git-repo-check", "-C", req.cwd, "--output-last-message", outFile];
+  const model = req.model ?? s.model;
+  if (model) args.push("-m", model);
+  // Codex calls the top rung "xhigh"; it has no "max".
+  if (req.effort) args.push("-c", `model_reasoning_effort="${req.effort === "max" ? "xhigh" : req.effort}"`);
+  if (req.jsonOnly) args.push("--sandbox", "read-only");
+  else {
+    const sandbox = codexSandboxArgs(req.agent.tools);
+    args.push(...sandbox);
+    if (sandbox.includes("workspace-write")) args.push(...codexConfinementArgs());
+  }
   return args;
 }
 
@@ -36,15 +57,7 @@ export class CodexAdapter implements Adapter {
     const outFile = join(tmp, "last.txt");
     const s = req.agent.settings as { model?: string; binary?: string };
     const prompt = req.systemPrompt ? `${req.systemPrompt}\n\n---\n\n${req.prompt}` : req.prompt;
-    const args = ["exec", "--json", "--skip-git-repo-check", "-C", req.cwd, "--output-last-message", outFile];
-    const model = req.model ?? s.model;
-    if (model) args.push("-m", model);
-    // Codex calls the top rung "xhigh"; it has no "max".
-    if (req.effort) args.push("-c", `model_reasoning_effort="${req.effort === "max" ? "xhigh" : req.effort}"`);
-    if (req.jsonOnly) args.push("--sandbox", "read-only");
-    else {
-      args.push(...codexSandboxArgs(req.agent.tools));
-    }
+    const args = codexBaseArgs(req, outFile);
     // The token travels in an env var; Codex reads it via bearer_token_env_var.
     const mcpArgs = !req.jsonOnly && req.mcp
       ? ["-c", `mcp_servers.agent_room.url="${req.mcp.url}"`, "-c", `mcp_servers.agent_room.bearer_token_env_var="AGENT_ROOM_MCP_TOKEN"`]

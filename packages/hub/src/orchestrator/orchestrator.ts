@@ -19,6 +19,7 @@ import { quotaDecide, quotaLimited } from "../quota/router.js";
 import { addFailure, classifyFailure, parseFailureCategory, type FailureEvidence } from "./failures.js";
 import { Library, defaultLibraryRoot } from "../library/library.js";
 import { FileBroker } from "../files/broker.js";
+import { GoalSources, branchFor } from "../files/goalSource.js"; // 1.1
 import { TaskWorkspaces, type TaskWorkspace, type WorkspaceHookContext, type WorkspaceHooks } from "./worktree.js";
 import type { ControlFolder } from "../control/folder.js"; // 1.9
 import { restoreTaskContext, writeTaskContext } from "../control/context.js"; // 1.9 x 1.4
@@ -38,7 +39,7 @@ const ORCH: Author = { kind: "orchestrator", id: "orchestrator", name: "Orchestr
 const SYS: Author = { kind: "system", id: "system", name: "System" };
 const OPEN = (t: Task) => !["done", "failed", "cancelled"].includes(t.status);
 
-export interface McpGrant { agentId: string; roomId?: string; taskId?: string; expiresAt?: number; hop?: number }
+export interface McpGrant { agentId: string; roomId?: string; taskId?: string; expiresAt?: number; hop?: number; /** 1.1: an external key pinned to one room: every room argument is ignored in favour of roomId */ locked?: boolean; /** 1.1: the external key behind this grant (for the audit log) */ tokenId?: string; /** 1.1: the folder this run works in; file tools aimed elsewhere are refused */ cwd?: string }
 
 export interface OrchestratorOptions {
   dataDir: string;
@@ -82,6 +83,8 @@ export class Orchestrator {
   library: Library;
   /** 0.3 spike: folder grants, file reads, and diff-proposed writes. */
   files: FileBroker;
+  /** 1.1: goals that work on a folder the owner granted (branch or private copy, approval of write-back). */
+  goalSources: GoalSources;
   /** 1.4: every task attempt works in its own git worktree (or folder copy) cut from the goal folder. */
   workspaces: TaskWorkspaces;
   /** 1.4: hooks around each task's worktree (1.9 writes and restores the agent's context file here). */
@@ -95,7 +98,9 @@ export class Orchestrator {
 
   constructor(private store: Store, private approvals: Approvals, private opts: OrchestratorOptions) {
     this.library = new Library(store, opts.libraryDir ?? defaultLibraryRoot());
-    this.files = new FileBroker(store, approvals);
+    // 1.1: the control folder's version history can never be granted to agents (it is read lazily: the control folder may be attached after this).
+    this.files = new FileBroker(store, approvals, { extraProtected: () => (this.control ? [{ path: join(this.control.root, ".git"), because: "the Agent Room control folder's version history can't be shared with agents" }] : []) });
+    this.goalSources = new GoalSources(this.files, store); // 1.1
     this.workspaces = new TaskWorkspaces({ dataDir: opts.dataDir, git: opts.gitBin });
     this.control = opts.control; // 1.9
     // 1.9 x 1.4: each task's worktree gets its agent's context file, built from the control folder's layers,
@@ -246,19 +251,21 @@ export class Orchestrator {
     const dir = join(this.opts.dataDir, "workspaces", agentId, roomId);
     mkdirSync(dir, { recursive: true }); return dir;
   }
-  private grantFor(agentId: string, roomId?: string, taskId?: string, hop = 0) {
+  private grantFor(agentId: string, roomId?: string, taskId?: string, hop = 0, cwd?: string) {
     const t = token();
-    this.grants.set(t, { agentId, roomId, taskId, hop, expiresAt: now() + 2 * 3600_000 });
+    // 1.1: a run's own key is locked to its room, and carries its worktree so approval_prompt can refuse file tools outside it.
+    this.grants.set(t, { agentId, roomId, taskId, hop, expiresAt: now() + 2 * 3600_000, locked: !!roomId, cwd });
     return t;
   }
 
   async call(agent: AgentConfig, prompt: string, o: { jsonOnly?: boolean; roomId?: string; taskId?: string; signal?: AbortSignal; systemPrompt?: string; hop?: number; profile?: Profile; cwd?: string } = {}): Promise<RunResult> {
     const url = this.opts.mcpUrl();
-    const grant = url && !o.jsonOnly ? { url, token: this.grantFor(agent.id, o.roomId, o.taskId, o.hop) } : undefined;
+    const cwd = o.cwd ?? this.workspace(agent.id, o.roomId ?? "_orchestrator");
+    const grant = url && !o.jsonOnly ? { url, token: this.grantFor(agent.id, o.roomId, o.taskId, o.hop, cwd) } : undefined;
     const adapter = this.store.getKV("practice_mode", false) ? adapters.mock : adapters[agent.adapter];
     const res = await adapter.run({
       agent, prompt, jsonOnly: o.jsonOnly, signal: o.signal, systemPrompt: o.systemPrompt,
-      cwd: o.cwd ?? this.workspace(agent.id, o.roomId ?? "_orchestrator"), mcp: grant, roomId: o.roomId, taskId: o.taskId,
+      cwd, dataDir: this.opts.dataDir, mcp: grant, roomId: o.roomId, taskId: o.taskId, // 1.1: dataDir keeps the hub's own files off limits to a confined run
       model: o.profile?.model, effort: o.profile?.effort,
       claimTimeoutMs: this.cfg().claimTimeoutMinutes * 60_000,
     });
@@ -283,7 +290,7 @@ export class Orchestrator {
   }
 
   // ---------- owner input
-  async handleOwnerMessage(roomId: string, text: string, ownerName = "Blake") {
+  async handleOwnerMessage(roomId: string, text: string, ownerName = "Blake", opts: { folderGrantId?: string } = {}) {
     const msg = this.store.addMessage({
       roomId, author: { kind: "human", id: "owner", name: ownerName }, text, type: "human",
       mentions: [...text.matchAll(/@([\w-]+)/g)].map((m) => m[1].toLowerCase()),
@@ -331,7 +338,7 @@ export class Orchestrator {
       for (const a of tagged) void this.lane(a.id, () => this.reply(roomId, a, { from: "owner", text, hop: 0 }));
       return msg;
     }
-    void this.runGoal(roomId, body);
+    void this.runGoal(roomId, body, { folderGrantId: opts.folderGrantId });
     return msg;
   }
 
@@ -430,7 +437,7 @@ export class Orchestrator {
       `Owner changed direction: ${text}`,
       done.length ? `Already finished (reuse it, don't redo it):\n${done.map((t) => `- ${t.title}: ${(t.result ?? "").slice(0, 600)}`).join("\n")}` : "",
     ].filter(Boolean).join("\n\n");
-    void this.runGoal(goal.roomId, next);
+    void this.runGoal(goal.roomId, next, { folderGrantId: goal.sourceGrantId }); // 1.1: the new plan keeps the folder
   }
 
   /** MCP get_updates: owner steering for the caller's current task since it started. */
@@ -608,8 +615,11 @@ export class Orchestrator {
   }
 
   // ---------- goals
-  async runGoal(roomId: string, text: string): Promise<Goal> {
+  async runGoal(roomId: string, text: string, opts: { folderGrantId?: string } = {}): Promise<Goal> {
     const goal: Goal = { id: id("goal"), roomId, text, status: "planning", createdAt: now() };
+    // 1.1: a goal on a granted folder. The work lands on agent-room/<goal> (git) or comes back as an approval (anything else).
+    const src = opts.folderGrantId ? this.goalSources.usable(opts.folderGrantId, roomId) : undefined;
+    if (opts.folderGrantId && src?.ok) { goal.sourceGrantId = opts.folderGrantId; goal.sourceBranch = branchFor(goal.id); }
     this.store.saveGoal(goal);
     return this.advance(goal.id);
   }
@@ -665,8 +675,9 @@ export class Orchestrator {
       await this.answerDirect(goal, pick, signal); return;
     }
     this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", label: "planning", active: true });
+    const folderNote = this.goalSources.note(goal); // 1.1: tell the planner about the granted folder (label, read/write)
     const plan = await this.callJson<Plan>(
-      planPrompt(text, agents, this.store.listShared(roomId), notes, this.conversation(roomId), this.store.listScores(), orch.name), orch, signal,
+      planPrompt(text + folderNote, agents, this.store.listShared(roomId), notes, this.conversation(roomId), this.store.listScores(), orch.name), orch, signal,
     );
     this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", active: false });
     if (signal.aborted) return;
@@ -687,7 +698,7 @@ export class Orchestrator {
     if (problems.length && current?.tasks?.length) {
       this.log(roomId, `Plan needs fixing before work starts: ${problems.join(" ")}`);
       this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", label: "planning", active: true });
-      const fixed = await this.callJson<Plan>(planPrompt(text, agents, this.store.listShared(roomId), notes, this.conversation(roomId), this.store.listScores(), orch.name, problems, JSON.stringify(current)), orch, signal);
+      const fixed = await this.callJson<Plan>(planPrompt(text + folderNote, agents, this.store.listShared(roomId), notes, this.conversation(roomId), this.store.listScores(), orch.name, problems, JSON.stringify(current)), orch, signal);
       this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", active: false });
       if (signal.aborted) return;
       if (fixed?.tasks?.length) { current = fixed; raw = fixed.tasks; problems = validatePlan(raw, reqsOf(current), agentIds); }
@@ -1001,7 +1012,7 @@ export class Orchestrator {
     if (!done.length) return false;
     const p = this.progress(goal.id);
     if (p.verifyRounds >= cfg.maxVerifyRounds) return false;
-    const folder = g.folder;
+    const folder = this.workspaces.stateFolder(g.id) ?? g.folder; // 1.1: for a goal on a granted folder, accepted work lives in the integration worktree or private copy
 
     // Regression: a later task can break an earlier one's checks.
     const mayRun = !!g.approvedAt || cfg.autoRunChecks;
@@ -1125,27 +1136,49 @@ export class Orchestrator {
 
   /** Remove every worktree and branch the goal still holds. Tracked so idle() can wait for it. */
   private dropWorktrees(goalId: string): Promise<void> {
-    const folder = this.store.getGoal(goalId)?.folder;
-    if (!folder) return Promise.resolve();
-    const p: Promise<void> = this.workspaces.cleanup({ id: goalId, folder }, this.store.listTasks({ goalId }).map((t) => t.id))
+    const g = this.store.getGoal(goalId);
+    const folder = g?.folder;
+    if (!g || !folder) return Promise.resolve();
+    const p: Promise<void> = this.workspaces.cleanup(this.goalSources.ref(g, folder), this.store.listTasks({ goalId }).map((t) => t.id)) // 1.1: ref carries the granted folder
       .catch(() => undefined).finally(() => { this.cleanups.delete(p); });
     this.cleanups.add(p);
     return p;
   }
   private async discardWorktree(goal: Goal, task: Task) {
-    const folder = this.store.getGoal(goal.id)?.folder ?? goal.folder;
-    if (folder) await this.workspaces.discard({ id: goal.id, folder }, task.id).catch(() => undefined);
+    const g = this.store.getGoal(goal.id) ?? goal;
+    if (g.folder) await this.workspaces.discard(this.goalSources.ref(g, g.folder), task.id).catch(() => undefined);
   }
   private async workspaceHook(name: keyof WorkspaceHooks, ws: TaskWorkspace, agentId: string) {
     const fn = this.workspaceHooks[name]; if (!fn) return;
     const ctx: WorkspaceHookContext = { goalId: ws.goalId, taskId: ws.taskId, agentId, path: ws.path, kind: ws.kind };
     try { await fn(ctx); } catch (e) { this.store.audit(agentId, "worktree.hook", `${name} failed: ${firstLine(String(e))}`); }
   }
+  /**
+   * 1.1: the owner points an existing goal at a granted folder (or clears it). Only before any task has run, so no work is half on
+   * one base and half on another.
+   */
+  setGoalFolder(goalId: string, grantId: string | null): { ok: true; goal: Goal } | { ok: false; reason: string } {
+    const g = this.store.getGoal(goalId);
+    if (!g) return { ok: false, reason: "No such goal." };
+    if (!["planning", "awaiting_approval"].includes(g.status)) return { ok: false, reason: "The folder can only be set before work starts." };
+    if (grantId) {
+      const u = this.goalSources.usable(grantId, g.roomId);
+      if (!u.ok) return u;
+      g.sourceGrantId = grantId; g.sourceBranch = branchFor(g.id);
+    } else { delete g.sourceGrantId; delete g.sourceBranch; }
+    this.store.saveGoal(g);
+    this.store.audit("owner", "goal.source.set", `${g.id} ${grantId ?? "none"}`);
+    return { ok: true, goal: g };
+  }
+
   /** Hub start: remove worktrees of tasks that are no longer open. Call before recover(). */
   pruneWorktrees() {
     return this.workspaces.prune((goalId, taskId) => {
       const g = this.store.getGoal(goalId), t = this.store.getTask(taskId);
       return !!g && ["planning", "awaiting_approval", "running", "paused"].includes(g.status) && !!t && OPEN(t);
+    }, (goalId) => { // 1.1: a goal still going keeps its integration worktree or private copy
+      const g = this.store.getGoal(goalId);
+      return !!g && ["planning", "awaiting_approval", "running", "paused"].includes(g.status);
     });
   }
 
@@ -1187,7 +1220,8 @@ export class Orchestrator {
     const fresh = this.store.getGoal(goal.id) ?? goal;
     const folder = fresh.folder ?? goalFolder(this.opts.dataDir, goal.id); // the goal's BASE folder (LEDGER.md, final checks)
     // 1.4: the agent never works in the base. Its own worktree (or copy) is `work`: the cwd, the checks and the judge's view.
-    const ws = await this.workspaces.open({ id: goal.id, folder }, task, agent.id);
+    const ref = this.goalSources.ref(fresh, folder); // 1.1: carries the granted folder, when the goal has one
+    const ws = await this.workspaces.open(ref, task, agent.id);
     const work = ws.path;
     await this.workspaceHook("beforeRun", ws, agent.id); // 1.9 HOOK: write the agent's context file into `work` here
     // The owner may have stopped or cancelled this while the worktree was being cut: don't resurrect the task or leak the worktree.
@@ -1203,7 +1237,7 @@ export class Orchestrator {
     const deps = this.store.listTasks({ goalId: goal.id }).filter((t) => task.dependsOn.includes(t.id));
     const notes = this.ownerNotes.get(goal.id) ?? [];
     const before = snapshot(work);
-    const prompt = taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.store.listPrivate(agent.id), notes, this.enabledAgents(), agent.id, feedback, { path: work, files: [...before.keys()], ledger: join(folder, "LEDGER.md") }, this.ledgerText(fresh), this.decisionsFor(fresh));
+    const prompt = taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.store.listPrivate(agent.id), notes, this.enabledAgents(), agent.id, feedback, { path: work, files: [...before.keys()], ledger: join(folder, "LEDGER.md"), note: this.goalSources.note(fresh) /* 1.1 */ }, this.ledgerText(fresh), this.decisionsFor(fresh));
     let res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: work });
     let usage: RunUsage | undefined = res.usage, ms = res.durationMs, ranModel = res.model;
     // A rate limit or timeout says nothing about the agent's work: wait and retry, without spending an attempt.
@@ -1326,9 +1360,10 @@ export class Orchestrator {
     if (judgment.verdict === "accept") {
       // 1.4: accepted work merges into the goal folder. A conflict with another task's accepted work is a send-back, never "done".
       await this.workspaceHook("beforeMerge", ws, agent.id); // 1.9 HOOK: restore the agent's context file in `work` before it is committed
-      const merge = await this.workspaces.accept({ id: goal.id, folder }, task);
+      const merge = await this.workspaces.accept(ref, task);
       if (!merge.ok) { route("revise", judged); return this.sendBackConflict(goal, task, agent, judgment, merge.conflict, !!merge.markers, goalSignal); }
       await this.discardWorktree(goal, task);
+      if (merge.source) this.goalSources.afterAccept(fresh, task, agent, merge.source, (t) => this.post(goal.roomId, SYS, t, "system", task.id)); // 1.1
       if (merge.merged.length) this.store.audit(agent.id, "worktree.merge", `"${task.title}" merged (${merge.how}): ${merge.merged.slice(0, 12).join(", ")}`.slice(0, 400));
       route("accepted", judged);
       this.addHistory(task, agent.id, "ok", `${Math.round(judgment.score * 100)}/100`);

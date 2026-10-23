@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** Thrown for any path the hub refuses. The message is safe to show to an agent. */
@@ -57,29 +57,75 @@ export function resolveInGrant(grantRoot: string, relPath: string): string {
   return join(resolved, relative(cur, lexical));
 }
 
-/** The credential folders under the user's home that can never be granted. */
-const SECRET_DIRS = [".ssh", ".aws", ".gnupg", ".kube"];
+/** Thrown for a folder the hub refuses to grant. `canForce` = the owner may still grant it with `force` and a reason. */
+export class GrantRefused extends PathDenied {
+  constructor(message: string, readonly canForce: boolean, readonly because?: string) { super(message); }
+}
+
+/** Parts of the machine that hold credentials, settings or the system itself. Granting inside one needs the owner's explicit override. */
+const SYSTEM_ROOTS = ["/System", "/Library", "/private", "/etc", "/usr", "/bin", "/sbin", "/Applications", "/var", "/dev", "/proc", "/sys", "/boot", "/lib", "/lib64"];
+
+export interface GrantRootOptions {
+  /** The hub's data folder (database, worktrees). */
+  dataDir?: string;
+  home?: string;
+  /** Other paths that may not be granted, each with the words shown to the owner (the control folder's version history). */
+  extraProtected?: { path: string; because: string }[];
+  /** Replaces the system folder list (tests). */
+  systemRoots?: string[];
+}
+
+const realIfExists = (p: string | undefined) => { if (!p) return undefined; try { return existsSync(p) ? real(p) : undefined; } catch { return undefined; } };
 
 /**
- * Check a folder the owner wants to grant and return its realpath. Refuses: missing paths, non-directories,
- * `/`, the home folder itself, any folder that contains the home folder or the hub's data folder,
- * anything inside the data folder, and the usual credential folders under home.
+ * Check a folder the owner wants to grant and say how it is protected.
+ * Throws GrantRefused (canForce false) for the ones that can never be granted: missing paths, non-directories, `/`, and the home folder
+ * or any folder that contains it. Returns `because` for the ones that need an explicit override (every dot-folder under home, ~/Library,
+ * system folders, the hub's data folder, the control folder's version history), and nothing for an ordinary folder.
  */
-export function validateGrantRoot(input: string, opts: { dataDir?: string; home?: string } = {}): string {
-  if (typeof input !== "string" || !input || input.includes("\0")) throw new PathDenied("a folder path is required");
-  if (!isAbsolute(input)) throw new PathDenied("the folder path must be absolute");
+export function inspectGrantRoot(input: string, opts: GrantRootOptions = {}): { root: string; because?: string } {
+  const hard = (m: string) => new GrantRefused(m, false);
+  if (typeof input !== "string" || !input || input.includes("\0")) throw hard("a folder path is required");
+  if (!isAbsolute(input)) throw hard("the folder path must be absolute");
   let root: string;
-  try { root = real(input); } catch { throw new PathDenied("that folder does not exist"); }
-  if (!statSync(root).isDirectory()) throw new PathDenied("that path is not a folder");
-  if (root === sep || dirname(root) === root) throw new PathDenied("the filesystem root cannot be granted");
+  try { root = real(input); } catch { throw hard("that folder does not exist"); }
+  if (!statSync(root).isDirectory()) throw hard("that path is not a folder");
+  if (root === sep || dirname(root) === root) throw hard("the filesystem root cannot be granted");
 
-  const protect = (p: string | undefined) => (p && existsSync(p) ? real(p) : undefined);
-  const home = protect(opts.home ?? homedir());
-  const data = protect(opts.dataDir);
-  if (home) {
-    if (isInside(root, home)) throw new PathDenied("the home folder (or a folder containing it) cannot be granted; pick a subfolder");
-    for (const d of SECRET_DIRS) if (isInside(join(home, d), root)) throw new PathDenied(`${d} holds credentials and cannot be granted`);
+  const home = realIfExists(opts.home ?? homedir());
+  if (home && isInside(root, home)) throw hard("the home folder (or a folder containing it) cannot be granted; pick a subfolder");
+
+  const reasons: string[] = [];
+  if (home && isInside(home, root)) {
+    const first = relative(home, root).split(sep)[0];
+    if (first.startsWith(".")) reasons.push(`~/${first} holds settings, credentials or app data`);
+    else if (first === "Library") reasons.push("~/Library holds app data and credentials");
   }
-  if (data && (isInside(root, data) || isInside(data, root))) throw new PathDenied("the Agent Room data folder cannot be granted");
+  // The user's temp folder lives under /var or /private on a Mac. It is scratch space, not system.
+  const tmp = realIfExists(tmpdir());
+  if (!(tmp && isInside(tmp, root))) {
+    for (const s of opts.systemRoots ?? SYSTEM_ROOTS) {
+      const r = realIfExists(s);
+      if (r && (isInside(r, root) || isInside(s, root))) { reasons.push(`${s} is part of the system`); break; }
+    }
+  }
+  const data = realIfExists(opts.dataDir);
+  if (data && (isInside(root, data) || isInside(data, root))) reasons.push("the Agent Room data folder holds the database and keys");
+  for (const x of opts.extraProtected ?? []) {
+    const r = realIfExists(x.path);
+    if (r && isInside(r, root)) reasons.push(x.because);
+  }
+  return { root, because: reasons.length ? reasons.join("; ") : undefined };
+}
+
+/** inspectGrantRoot, refusing every protected folder. The owner's override goes through inspectGrantRoot and is audited by the broker. */
+export function validateGrantRoot(input: string, opts: GrantRootOptions = {}): string {
+  const { root, because } = inspectGrantRoot(input, opts);
+  if (because) throw new GrantRefused(`${because}, so it cannot be granted without an explicit override`, true, because);
   return root;
+}
+
+/** True when a path (relative, any spelling) goes through a `.git` folder. Agents never read or write version-control internals: .git/config can hold credentials. */
+export function touchesGit(relPath: string): boolean {
+  return relPath.split(/[\\/]/).some((part) => part.toLowerCase() === ".git");
 }

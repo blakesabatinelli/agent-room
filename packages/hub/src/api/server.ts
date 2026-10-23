@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";
 import { z } from "zod";
-import { TOOLS, type AgentConfig, type McpConnection, type ServerEvent } from "@agent-room/shared";
+import { TOOLS, type AgentConfig, type GrantRefusal, type McpConnection, type ServerEvent } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { Approvals } from "../orchestrator/approvals.js";
@@ -16,7 +16,9 @@ import { listFiles } from "../orchestrator/workspace.js";
 import { routingJsonl } from "../orchestrator/routing.js";
 import { quotaFor } from "../quota/index.js";
 import { runProc } from "../adapters/proc.js";
-import { PathDenied } from "../files/paths.js";
+import { PathDenied, GrantRefused } from "../files/paths.js";
+import { McpTokens } from "../mcp/tokens.js";
+import type { McpGrant } from "../orchestrator/orchestrator.js";
 import { defaultTailscale, type Tailscale } from "../remote/tailscale.js";
 import { AuthLimiter, forwardedIp, isRemoteRequest, rpcSummary } from "../remote/guard.js";
 import { composeRemote, remoteHost } from "../remote/status.js";
@@ -49,7 +51,12 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   const authLimiter = new AuthLimiter(remoteAuth?.burst ?? 10, remoteAuth?.refillMs ?? 6000);
 
   const bearer = (h?: string) => (h?.startsWith("Bearer ") ? h.slice(7) : undefined);
-  const externalMcp = () => store.getKV<Record<string, { agentId: string; name: string }>>("mcp_tokens", {});
+  // 1.1: external MCP keys are kept as SHA-256 hashes (legacy plaintext keys are migrated on start), may expire, and may be pinned to a room.
+  const mcpTokens = new McpTokens(store);
+  // 1.1: every route, so a test can prove none but /mcp answers a proxied (Funnel) request and none answers an unpaired one.
+  const routeTable: { method: string; url: string }[] = [];
+  app.addHook("onRoute", (r) => { for (const m of ([] as string[]).concat(r.method)) routeTable.push({ method: m, url: r.url }); });
+  app.decorate("routeTable", () => routeTable);
 
   app.addHook("onRequest", async (req, reply) => {
     if (restrictInterfaces && !isAllowedLocalAddress(req.socket.localAddress)) return reply.code(403).send({ error: "Only reachable over localhost or Tailscale." });
@@ -206,25 +213,55 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     const from = remote ? forwardedIp(req) : "";
     if (remote && authLimiter.blocked(from)) return reply.code(429).send({ error: "Too many failed attempts. Try again in a minute." });
     const t = bearer(req.headers.authorization);
-    const grant = t ? orch.grants.get(t) ?? (externalMcp()[t] ? { agentId: externalMcp()[t].agentId } : undefined) : undefined;
+    let grant: McpGrant | undefined = t ? orch.grants.get(t) : undefined;
+    if (!grant && t) {
+      const hit = mcpTokens.lookup(t); // by hash
+      if (hit && !hit.expired) { grant = { agentId: hit.record.agentId, roomId: hit.record.roomId, locked: !!hit.record.roomId, tokenId: hit.record.id }; mcpTokens.touch(hit.record.id); }
+      else if (hit) store.audit(hit.record.agentId, "mcp.token.expired", `${hit.record.id} was used after it expired${remote ? ` from ${from}` : ""}`);
+    }
     if (!grant || (grant.expiresAt && grant.expiresAt < Date.now())) {
       if (remote) { authLimiter.fail(from); store.audit("remote", "mcp.remote.denied", `from ${from}`); }
       return reply.code(401).send({ error: "Invalid MCP token." });
     }
-    if (remote) store.audit(grant.agentId, "mcp.remote", `agent=${grant.agentId} ${rpcSummary(req.body)} from ${from}`);
+    if (remote) store.audit(grant.agentId, "mcp.remote", `agent=${grant.agentId}${grant.tokenId ? ` key=${grant.tokenId}` : ""} ${rpcSummary(req.body)} from ${from}`);
     reply.hijack();
     await handleMcp(store, orch, grant, req.raw, reply.raw, req.body);
   });
   app.get("/mcp", async (_req, reply) => reply.code(405).send({ error: "Use POST (stateless Streamable HTTP)." }));
 
-  app.post("/mcp-tokens", async (req) => {
-    const b = z.object({ agentId: z.string(), name: z.string() }).parse(req.body);
+  // 1.1: external MCP keys. The key is in the response that makes or rotates it and nowhere else (only its hash is stored).
+  // Body: { agentId, name, roomId?, expiresAt? (ms) | expiresInDays? }. roomId pins the key to a room, so room-scoped folder grants reach it.
+  const tokenBody = z.object({
+    agentId: z.string().min(1).max(80), name: z.string().min(1).max(80), roomId: z.string().optional(),
+    expiresAt: z.number().int().positive().optional(), expiresInDays: z.number().min(0.01).max(3650).optional(),
+  });
+  const expiryOf = (b: { expiresAt?: number; expiresInDays?: number }) => b.expiresAt ?? (b.expiresInDays ? Date.now() + Math.round(b.expiresInDays * 86_400_000) : undefined);
+  app.post("/mcp-tokens", async (req, reply) => {
+    const parsed = tokenBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Send agentId and name (and optionally roomId, expiresAt or expiresInDays)." });
+    const b = parsed.data;
+    if (b.roomId && !store.getRoom(b.roomId)) return reply.code(400).send({ error: "Room not found." });
+    const expiresAt = expiryOf(b);
+    if (expiresAt && expiresAt <= Date.now()) return reply.code(400).send({ error: "The expiry must be in the future." });
     if (!store.getAgent(b.agentId)) {
       store.saveAgent({ id: b.agentId, name: b.name, provider: "mcp", adapter: "mcp", enabled: true, color: "#5A6B7D", settings: {}, tools: { web: false, filesystem: false, shell: false, gmail: false, slack: false, drive: false, salesforce: false } });
     }
-    const t = token(); const all = externalMcp(); all[t] = b; store.setKV("mcp_tokens", all);
-    store.audit("owner", "mcp.token.created", b.name);
-    return { token: t, url: "/mcp" };
+    const made = mcpTokens.create({ agentId: b.agentId, name: b.name, roomId: b.roomId, expiresAt });
+    return { ...made.info, token: made.token, url: "/mcp" };
+  });
+  app.get("/mcp-tokens", async () => mcpTokens.list());
+  app.post("/mcp-tokens/:id/rotate", async (req, reply) => {
+    const b = z.object({ expiresAt: z.number().int().positive().nullable().optional(), expiresInDays: z.number().min(0.01).max(3650).optional() }).safeParse(req.body ?? {});
+    if (!b.success) return reply.code(400).send({ error: "Send expiresAt (ms) or expiresInDays, or nothing." });
+    const expiresAt = b.data.expiresAt === null ? null : expiryOf({ expiresAt: b.data.expiresAt, expiresInDays: b.data.expiresInDays });
+    if (expiresAt && expiresAt <= Date.now()) return reply.code(400).send({ error: "The expiry must be in the future." });
+    const r = mcpTokens.rotate((req.params as { id: string }).id, expiresAt === undefined ? {} : { expiresAt });
+    if (!r) return reply.code(404).send({ error: "Key not found." });
+    return { ...r.info, token: r.token, url: "/mcp" };
+  });
+  app.delete("/mcp-tokens/:id", async (req, reply) => {
+    if (!mcpTokens.revoke((req.params as { id: string }).id)) return reply.code(404).send({ error: "Key not found." });
+    return { ok: true };
   });
 
   // ---------- rooms & chat
@@ -279,9 +316,22 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   app.post("/rooms/:id/messages", async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!store.getRoom(id)) return reply.code(404).send({ error: "Room not found." });
-    const { text } = z.object({ text: z.string().min(1).max(20000) }).parse(req.body);
-    await orch.handleOwnerMessage(id, text, ownerName);
+    const { text, folderGrantId } = z.object({ text: z.string().min(1).max(20000), folderGrantId: z.string().max(80).optional() }).parse(req.body);
+    // 1.1: a goal on a granted folder. A grant that can't carry a goal is refused up front, never silently dropped.
+    if (folderGrantId) {
+      const u = orch.goalSources.usable(folderGrantId, id);
+      if (!u.ok) return reply.code(400).send({ error: u.reason });
+    }
+    await orch.handleOwnerMessage(id, text, ownerName, { folderGrantId });
     return { ok: true };
+  });
+  // 1.1: point a goal that hasn't started work at a granted folder ({ grantId }), or clear it ({ grantId: null }).
+  app.post("/goals/:id/folder-grant", async (req, reply) => {
+    const b = z.object({ grantId: z.string().max(80).nullable() }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: "Send grantId (or null to clear it)." });
+    const r = orch.setGoalFolder((req.params as { id: string }).id, b.data.grantId);
+    if (!r.ok) return reply.code(r.reason === "No such goal." ? 404 : 409).send({ error: r.reason });
+    return r.goal;
   });
   app.post("/rooms/:id/pause", async (req) => { const { id } = req.params as { id: string }; orch.setPaused(id, z.object({ paused: z.boolean() }).parse(req.body).paused); return { ok: true }; });
   app.post("/rooms/:id/stop", async (req) => { orch.stopRoom((req.params as { id: string }).id); return { ok: true }; });
@@ -297,6 +347,8 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     return r;
   });
   // The goal's shared folder: what the agents have produced.
+  // 1.1 audit: this, /goals/:id/reveal and /documents show the hub's own goal folders and library, behind a paired device. The onRequest hook
+  // answers a proxied (Funnel/serve) request 404 before it gets here, so nothing that reads files is reachable except through /mcp.
   app.get("/goals/:id/files", async (req, reply) => {
     const g = store.getGoal((req.params as { id: string }).id);
     if (!g) return reply.code(404).send({ error: "Goal not found." });
@@ -359,7 +411,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   });;
   app.delete("/agents/:id", async (req) => {
     const agentId = (req.params as { id: string }).id;
-    revokeMcp(agentId); store.deleteAgent(agentId); orch.forgetStatus(agentId);
+    mcpTokens.revokeAgent(agentId); store.deleteAgent(agentId); orch.forgetStatus(agentId);
     store.audit("owner", "agent.deleted", agentId);
     store.emit("event", { type: "agent_status", status: { id: agentId, ready: false, state: "offline", detail: "deleted", checkedAt: Date.now() } });
     return { ok: true };
@@ -375,20 +427,18 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   });
 
   // ---------- connecting agents that join over MCP (Hermes, Muse, any MCP client)
-  const revokeMcp = (agentId: string) => {
-    const all = externalMcp();
-    for (const [t, v] of Object.entries(all)) if (v.agentId === agentId) delete all[t];
-    store.setKV("mcp_tokens", all);
-  };
   const port = () => (app.server.address() as { port: number } | null)?.port ?? 4747;
   app.get("/agents/:id/mcp-connection", async (req, reply) => {
     const a = store.getAgent((req.params as { id: string }).id);
     if (!a) return reply.code(404).send({ error: "Agent not found." });
-    return { exists: Object.values(externalMcp()).some((v) => v.agentId === a.id), connected: inbox.connected(a.id), lastSeen: inbox.lastSeenAt(a.id) ?? null };
+    return { exists: mcpTokens.forAgent(a.id).length > 0, connected: inbox.connected(a.id), lastSeen: inbox.lastSeenAt(a.id) ?? null };
   });
-  const existingToken = (agentId: string) => Object.entries(externalMcp()).find(([, v]) => v.agentId === agentId)?.[0];
+  /** The agent's connection key (the unscoped one the Connect screen manages). Room-scoped keys made through /mcp-tokens are separate. */
+  const connectionKey = (agentId: string) => mcpTokens.forAgent(agentId).filter((k) => !k.roomId).sort((x, y) => y.createdAt - x.createdAt)[0];
   /** Builds the config snippets and start message for a key. Same key in, same text out. */
-  const connectionFor = async (a: AgentConfig, t: string): Promise<McpConnection> => {
+  const connectionFor = async (a: AgentConfig, shown: string | undefined): Promise<McpConnection> => {
+    // 1.1: only a hash of the key is stored, so after a hub restart the key can't be shown again. The snippets keep a placeholder; rotating makes a key that can be shown.
+    const t = shown ?? "YOUR_KEY";
     const st = await tailscale.status();
     const host = remoteHost(st); // MagicDNS name first, then the tailnet IP
     const ip = process.env.AGENT_ROOM_TAILSCALE_IP ?? (st.state === "running" ? st.ip : undefined);
@@ -415,7 +465,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
         `curl -s ${localUrl} -H 'Authorization: Bearer ${t}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'` },
     ];
     const conn: McpConnection = {
-      agentId: a.id, token: t, localUrl, tailscaleUrl, tailscaleIpUrl, funnelUrl, snippets,
+      agentId: a.id, token: shown ?? "", tokenHidden: shown ? undefined : true, localUrl, tailscaleUrl, tailscaleIpUrl, funnelUrl, snippets,
       config: json(localUrl),
       instructions: [
         `You are ${a.name}, a member of Agent Room, a shared workspace where several AI agents work for ${ownerName}.`,
@@ -436,27 +486,32 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   app.get("/agents/:id/mcp-connection/config", async (req, reply) => {
     const a = store.getAgent((req.params as { id: string }).id);
     if (!a) return reply.code(404).send({ error: "Agent not found." });
-    const t = existingToken(a.id);
-    if (!t) return reply.code(404).send({ error: `${a.name} has no connection yet.` });
-    return connectionFor(a, t);
+    const k = connectionKey(a.id);
+    if (!k) return reply.code(404).send({ error: `${a.name} has no connection yet.` });
+    return connectionFor(a, mcpTokens.plaintext(k.id));
   });
-  // Creates the agent's key if it has none and otherwise returns the one it has.
+  // Creates the agent's key if it has none and otherwise describes the one it has (the key itself only until the hub restarts: see tokenHidden).
   // Replacing a working key only happens when the owner asks for it with { rotate: true }.
   app.post("/agents/:id/mcp-connection", async (req, reply) => {
     const a = store.getAgent((req.params as { id: string }).id);
     if (!a) return reply.code(404).send({ error: "Agent not found." });
     const rotate = (req.body as { rotate?: boolean } | undefined)?.rotate === true;
-    let t = existingToken(a.id);
-    if (!t || rotate) {
-      revokeMcp(a.id); // one live key per agent; a new one retires the old
-      t = token(); const all = externalMcp(); all[t] = { agentId: a.id, name: a.name }; store.setKV("mcp_tokens", all);
-      store.audit("owner", rotate ? "mcp.connection.rotated" : "mcp.connection.created", a.id);
+    const k = connectionKey(a.id);
+    if (!k) {
+      const made = mcpTokens.create({ agentId: a.id, name: a.name });
+      store.audit("owner", "mcp.connection.created", a.id);
+      return connectionFor(a, made.token);
     }
-    return connectionFor(a, t);
+    if (rotate) {
+      const r = mcpTokens.rotate(k.id)!; // the old key stops working at once
+      store.audit("owner", "mcp.connection.rotated", a.id);
+      return connectionFor(a, r.token);
+    }
+    return connectionFor(a, mcpTokens.plaintext(k.id));
   });
   app.delete("/agents/:id/mcp-connection", async (req) => {
     const agentId = (req.params as { id: string }).id;
-    revokeMcp(agentId); orch.forgetStatus(agentId); store.audit("owner", "mcp.connection.revoked", agentId);
+    mcpTokens.revokeAgent(agentId); orch.forgetStatus(agentId); store.audit("owner", "mcp.connection.revoked", agentId);
     return { ok: true };
   });
   app.get("/scores", async () => store.listScores());
@@ -562,33 +617,81 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   });
   app.post("/control/lint", async (_req, reply) => control() ? control()!.lint() : noControl(reply));
 
-  // ---------- 0.3 spike: folder grants and write proposals (owner only; agents reach files through MCP)
-  app.get("/folder-grants", async () => orch.files.listGrants());
+  // ---------- 1.1 folder grants and write proposals (owner only; agents reach files through MCP). The broker audits every change.
+  // A refused grant answers 400 with a GrantRefusal body: { error, code, canForce, because? }. canForce true = the UI may offer "Grant anyway", which asks for a reason.
+  const refusal = (e: PathDenied): GrantRefusal => e instanceof GrantRefused
+    ? { error: e.message, code: e.canForce ? "protected_folder" : "hard_refused", canForce: e.canForce, because: e.because }
+    : { error: e.message, code: "invalid", canForce: false };
+  const grantCheck = (b: { roomId?: string | null; agentId?: string }) => {
+    if (b.roomId && !store.getRoom(b.roomId)) return "Room not found.";
+    if (b.agentId && b.agentId !== "*" && !store.getAgent(b.agentId)) return "Agent not found.";
+    return undefined;
+  };
+  // Filters: ?roomId= and ?agentId= keep grants that apply to that room/agent (a "*" grant applies to every agent, a grant with no room to every room).
+  app.get("/folder-grants", async (req) => {
+    const q = z.object({ roomId: z.string().optional(), agentId: z.string().optional() }).parse(req.query ?? {});
+    return orch.files.listGrants().filter((g) => (!q.roomId || !g.roomId || g.roomId === q.roomId) && (!q.agentId || g.agentId === "*" || g.agentId === q.agentId));
+  });
+  // What one agent in one room can actually reach: the grants that apply to it. Same rule the file tools use.
+  app.get("/folder-grants/effective", async (req, reply) => {
+    const q = z.object({ agentId: z.string().min(1), roomId: z.string().optional() }).safeParse(req.query ?? {});
+    if (!q.success) return reply.code(400).send({ error: "Send agentId (and optionally roomId)." });
+    return orch.files.grantsFor(q.data.agentId, q.data.roomId);
+  });
+  // Would this folder be accepted? Nothing is stored. { ok: true, root, protected, because? } or { ok: false, error, canForce }.
+  app.post("/folder-grants/check", async (req, reply) => {
+    const b = z.object({ path: z.string().min(1).max(4096) }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: "Send path (an absolute folder)." });
+    return orch.files.checkFolder(b.data.path);
+  });
   app.post("/folder-grants", async (req, reply) => {
     const parsed = z.object({
       path: z.string().min(1).max(4096), label: z.string().max(80).optional(), roomId: z.string().optional(),
       agentId: z.string().min(1).max(80), read: z.boolean().default(true), write: z.boolean().default(false),
+      force: z.boolean().optional(), reason: z.string().max(300).optional(),
     }).safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: "Send path (an absolute folder) and agentId, plus read/write." });
+    if (!parsed.success) return reply.code(400).send({ error: "Send path (an absolute folder) and agentId, plus read/write.", code: "invalid", canForce: false } satisfies GrantRefusal);
     const b = parsed.data;
-    if (b.roomId && !store.getRoom(b.roomId)) return reply.code(400).send({ error: "Room not found." });
-    if (b.agentId !== "*" && !store.getAgent(b.agentId)) return reply.code(400).send({ error: "Agent not found." });
+    const bad = grantCheck(b);
+    if (bad) return reply.code(400).send({ error: bad, code: "invalid", canForce: false } satisfies GrantRefusal);
+    try { return orch.files.addGrant(b); } // the broker audits grant.added (and grant.override)
+    catch (e) {
+      if (e instanceof PathDenied) return reply.code(400).send(refusal(e));
+      throw e;
+    }
+  });
+  // Change who a grant covers or what it allows: { label?, roomId? (null = every room), agentId?, read?, write? }. The path never changes.
+  app.put("/folder-grants/:id", async (req, reply) => {
+    const parsed = z.object({
+      label: z.string().max(80).optional(), roomId: z.string().nullable().optional(),
+      agentId: z.string().min(1).max(80).optional(), read: z.boolean().optional(), write: z.boolean().optional(),
+    }).safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Send label, roomId, agentId, read or write.", code: "invalid", canForce: false } satisfies GrantRefusal);
+    const bad = grantCheck(parsed.data);
+    if (bad) return reply.code(400).send({ error: bad, code: "invalid", canForce: false } satisfies GrantRefusal);
     try {
-      const g = orch.files.addGrant(b);
-      store.audit("owner", "grant.added", `${g.id} ${g.path} agent=${g.agentId} room=${g.roomId ?? "*"} read=${g.read} write=${g.write}`);
-      return g;
+      const g = orch.files.updateGrant((req.params as { id: string }).id, parsed.data);
+      return g ?? reply.code(404).send({ error: "Grant not found." });
     } catch (e) {
-      if (e instanceof PathDenied) return reply.code(400).send({ error: e.message });
+      if (e instanceof PathDenied) return reply.code(400).send(refusal(e));
       throw e;
     }
   });
   app.delete("/folder-grants/:id", async (req, reply) => {
     const g = orch.files.removeGrant((req.params as { id: string }).id);
     if (!g) return reply.code(404).send({ error: "Grant not found." });
-    store.audit("owner", "grant.removed", `${g.id} ${g.path} agent=${g.agentId}`);
     return { ok: true };
   });
-  app.get("/write-proposals", async () => orch.files.proposals());
+  // Proposals, newest first, without their diffs (the list stays small): ?status= ?grantId= ?goalId= ?agentId=. The whole diff is GET /write-proposals/:id.
+  app.get("/write-proposals", async (req) => {
+    const q = z.object({ status: z.string().optional(), grantId: z.string().optional(), goalId: z.string().optional(), agentId: z.string().optional() }).parse(req.query ?? {});
+    return orch.files.proposals()
+      .filter((p) => (!q.status || p.status === q.status) && (!q.grantId || p.grantId === q.grantId) && (!q.goalId || p.goalId === q.goalId) && (!q.agentId || p.agentId === q.agentId))
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(({ diff, ...rest }) => ({ ...rest, diffBytes: Buffer.byteLength(diff) }));
+  });
+  // One proposal with its full stored diff: for a task proposal, every file's diff, the one the owner approves.
+  app.get("/write-proposals/:id", async (req, reply) => orch.files.proposal((req.params as { id: string }).id) ?? reply.code(404).send({ error: "Proposal not found." }));
   app.get("/devices", async () => store.listDevices());
 
   // ---------- live events
