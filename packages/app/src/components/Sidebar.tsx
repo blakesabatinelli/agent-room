@@ -113,6 +113,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       <View style={{ borderTopWidth: 1, borderColor: p.line, paddingVertical: space(2) }}>
         <Row label="Agents & connections" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚇</Text>} active={isPage("agents")} onPress={() => page("agents")} />
         <Row label="Permissions" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚿</Text>} active={isPage("permissions")} onPress={() => page("permissions")} />
+        <Row label="Folders" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>▤</Text>} active={isPage("folders")} onPress={() => page("folders")} />
         <Row label="Settings" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚙</Text>} active={isPage("settings")} onPress={() => page("settings")} />
       </View>
     </View>

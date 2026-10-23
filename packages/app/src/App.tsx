@@ -7,6 +7,7 @@ import { RoomScreen } from "./screens/RoomScreen";
 import { ApprovalsScreen } from "./screens/ApprovalsScreen";
 import { AgentsScreen } from "./screens/AgentsScreen";
 import { PermissionsScreen } from "./screens/PermissionsScreen";
+import { FoldersScreen } from "./screens/FoldersScreen";
 import { MemoryScreen } from "./screens/MemoryScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
@@ -43,7 +44,7 @@ export default function App() {
   const back = wide ? undefined : () => setShowList(true);
   const main = view.kind === "room" ? <RoomScreen onBack={back} /> : {
     agents: <AgentsScreen onBack={back} />, approvals: <ApprovalsScreen />, memory: <MemoryScreen />,
-    permissions: <PermissionsScreen />, settings: <SettingsScreen />,
+    permissions: <PermissionsScreen />, folders: <FoldersScreen />, settings: <SettingsScreen />,
   }[view.page];
 
   return (

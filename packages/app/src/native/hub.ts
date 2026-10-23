@@ -4,6 +4,8 @@ type Launcher = {
   ensureRunning(): Promise<{ started: boolean; log: string }>;
   startAtLoginEnabled(): Promise<boolean>;
   setStartAtLogin(enabled: boolean): Promise<boolean>;
+  /** 1.1: the Mac's folder chooser. Resolves to the chosen path, or null if cancelled. Not built into the native module yet, so the app checks for it. */
+  chooseFolder?(): Promise<string | null>;
 };
 
 const native = NativeModules.HubLauncher as Launcher | undefined;

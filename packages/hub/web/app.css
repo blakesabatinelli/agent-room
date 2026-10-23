@@ -144,3 +144,41 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .qbar.hot i { background: var(--warn); }
 .qnote { margin: 2px 0 0 66px; font-size: 12px; color: var(--muted); }
 .qnote.flat { margin-left: 0; }
+
+/* 1.1 folders and file changes */
+:root { --add-bg: rgba(24,121,78,0.12); --add-ink: #12603f; --del-bg: rgba(198,45,59,0.11); --del-ink: #a3232f; }
+.plus { color: var(--add-ink); font-weight: 700; }
+.minus { color: var(--del-ink); font-weight: 700; }
+.actions.pad { padding: 4px 16px 14px; margin-top: 0; }
+.section.flush { padding-left: 0; padding-top: 4px; }
+.grant { border-bottom: 1px solid var(--line); }
+.gtop { padding: 12px 16px 2px; }
+.gname { font-family: var(--display); font-weight: 600; color: var(--strong); font-size: 16px; }
+.gpath { font: 13px/1.4 ui-monospace, Menlo, monospace; color: var(--ink); overflow-wrap: anywhere; user-select: text; }
+.gmeta { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.gform { padding: 6px 16px 32px; display: flex; flex-direction: column; gap: 12px; }
+.gform .perm { padding-left: 0; padding-right: 0; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field label { font-size: 13px; font-weight: 700; color: var(--muted); }
+.field input, .field select { width: 100%; font: inherit; font-size: 16px; color: var(--strong); background: var(--bg);
+  border: 1px solid var(--line-strong); border-radius: 10px; padding: 11px 12px; }
+.field input:focus, .field select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--tint); }
+.btn:disabled { opacity: .4; cursor: default; }
+
+/* the full diff of a file write */
+.dv-head { padding: 14px 16px 10px; border-bottom: 1px solid var(--line); }
+.dv-path { font: 600 14px/1.4 ui-monospace, Menlo, monospace; color: var(--strong); overflow-wrap: anywhere; }
+.dv-sub { font-size: 14px; color: var(--muted); margin-top: 4px; }
+.dv-body { padding: 4px 0 12px; }
+.dl { display: flex; font: 12.5px/1.5 ui-monospace, Menlo, monospace; color: var(--ink); }
+.dl .ln { flex: none; min-width: 40px; padding-right: 8px; text-align: right; color: var(--muted); user-select: none; }
+.dl .mk { flex: none; width: 14px; text-align: center; user-select: none; }
+.dl .tx { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; padding-right: 10px; }
+.dl.add { background: var(--add-bg); color: var(--add-ink); }
+.dl.del { background: var(--del-bg); color: var(--del-ink); }
+.dl.hunk { margin-top: 8px; padding: 3px 10px; background: var(--raised); color: var(--muted); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dl.note { padding: 0 10px 0 54px; color: var(--muted); font-style: italic; font-size: 12px; }
+.dv-more { text-align: center; padding: 10px; color: var(--muted); font-size: 13px; }
+.dv-bar { position: sticky; bottom: 0; background: var(--bg); border-top: 1px solid var(--line); padding: 10px 14px calc(10px + env(safe-area-inset-bottom)); }
+.dv-hint { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+.dv-bar .actions { margin-top: 0; }

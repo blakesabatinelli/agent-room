@@ -1,6 +1,6 @@
 import type {
-  AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
-  Message, OrchestratorSettings, RemoteStatus, Room, ServerEvent, Subscription, SubscriptionStatus, Task,
+  AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, DiscoveryState, FolderGrant, McpConnection, McpInvite, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
+  Message, OrchestratorSettings, RemoteStatus, Room, ServerEvent, Subscription, SubscriptionStatus, Task, WriteProposal,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -101,6 +101,12 @@ export class Hub {
   saveDiscoverySettings = (connectAutomatically: boolean) => this.send<DiscoveryState>("PUT", "/discovery/settings", { connectAutomatically });
   connectHermes = () => this.send<HermesConnectResult>("POST", "/discovery/hermes/connect");
   invite = (id: string) => this.send<McpInvite>("POST", `/agents/${id}/invite`);
+  // 1.1 folder grants and file writes
+  folderGrants = () => this.req<FolderGrant[]>("/folder-grants");
+  addFolderGrant = (g: { path: string; label?: string; roomId?: string; agentId: string; read: boolean; write: boolean }) => this.send<FolderGrant>("POST", "/folder-grants", g);
+  removeFolderGrant = (id: string) => this.send("DELETE", `/folder-grants/${id}`);
+  /** Every write proposal with its full diff. File approvals are decided from this, never from the approval's preview text. */
+  writeProposals = () => this.req<WriteProposal[]>("/write-proposals");
   mcpToken = (agentId: string, name: string) => this.send<{ token: string; url: string }>("POST", "/mcp-tokens", { agentId, name });
 
   /** Live events with automatic reconnect. Returns a stop function. */
