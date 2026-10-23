@@ -19,6 +19,7 @@ import type { Adapter, RunRequest, RunResult } from "./types.js";
  * and when the file holds git conflict markers it keeps both sides and drops the markers, like a careful agent would;
  * the file is not written again by the usual scope-file loop).
  * Every call also records the cwd it ran in (MockAdapter.calls[].cwd), so tests can see which worktree a task used.
+ * wide (the plan is N independent tasks).
  */
 export class MockAdapter implements Adapter {
   /** Every run, for tests: which profile reached the agent. */
@@ -47,12 +48,19 @@ export class MockAdapter implements Adapter {
           files: checks ? ["summary.md"] : [], criteria: checks ? [{ text: "summary.md has content", check: "test -s summary.md" }] : ["Under 200 words"], taskType: "writing", dependsOn: ["a"] },
       ];
       if (st.bigPlan) tasks.push({ key: "c", owner: agents[0], role: "reviewer", title: "Review it", description: "Check the summary against the research for errors.", criteria: ["No errors"], taskType: "analysis", dependsOn: ["b"] });
+      // wide (N): N independent tasks, none depending on another (capacity tests).
+      const wide = Number((st as { wide?: number }).wide ?? 0);
+      if (wide) {
+        tasks.length = 0;
+        for (let i = 0; i < wide; i++) tasks.push({ key: `w${i}`, owner: agents[i % agents.length], role: "worker", title: `Part ${i + 1}`, description: `Write part ${i + 1} of the summary on its own, a few lines.`,
+          files: [], criteria: ["A few lines"], taskType: "writing", dependsOn: [] });
+      }
       if ((st as { noOwner?: boolean }).noOwner) for (const t of tasks as { owner?: string }[]) delete t.owner;
       const bad = !!(st as { badPlan?: boolean }).badPlan && !p.includes("can't run as written");
       for (const t of tasks as { key: string; output?: string; covers?: string[]; dependsOn?: string[] }[]) {
         if (bad) { if (t.key === "b") t.dependsOn = ["zz"]; continue; }
         t.output = checks ? (t.key === "a" ? "research.md" : t.key === "b" ? "summary.md" : "review notes") : "the result, in the reply";
-        t.covers = t.key === "a" ? ["G1"] : t.key === "b" ? ["G2"] : ["G2"];
+        t.covers = t.key === "a" || t.key === "w0" ? ["G1"] : t.key === "b" ? ["G2"] : ["G2"];
       }
       text = JSON.stringify({ mode: "plan",
         contract: { objective: "A short, sourced summary.", requirements: ["At least 3 sourced facts", "A summary under 200 words"],

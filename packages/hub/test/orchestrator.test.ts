@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { setup } from "./helpers.js";
+import { HW, setup } from "./helpers.js";
+import { CapacityGovernor } from "../src/capacity/governor.js";
 import { extractJson } from "../src/orchestrator/json.js";
 import { pickAgent, recordOutcome } from "../src/orchestrator/scoring.js";
 import { claudePermissionArgs } from "../src/adapters/claudeCode.js";
@@ -524,7 +525,7 @@ test("files: changing a file outside the task's files is flagged as drift", asyn
 });
 
 const restart = (store: ReturnType<typeof setup>["store"], dir: string) =>
-  new Orchestrator(store, new Approvals(store, 2000), { dataDir: dir, mcpUrl: () => undefined, rand: () => 0.99 });
+  new Orchestrator(store, new Approvals(store, 2000), { dataDir: dir, mcpUrl: () => undefined, rand: () => 0.99, governor: new CapacityGovernor(store, HW.large) });
 
 test("resume: work running when the hub stopped is picked up and finished after a restart", async () => {
   const { store, orch, room, dir } = setup();

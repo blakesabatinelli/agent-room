@@ -12,6 +12,7 @@
     rooms: [], agents: {}, roomId: "", messages: [], goals: {}, working: {}, approvals: [],
     unread: new Set(), readAt: 0, readSent: {}, positioned: "",
     online: false, ws: null, wsDelay: 1000,
+    capacity: null,
   };
 
   // ---------- helpers
@@ -175,6 +176,8 @@
       const [rooms, agents, approvals] = await Promise.all([api("/rooms"), api("/agents"), api("/approvals?status=pending")]);
       st.rooms = rooms; st.agents = Object.fromEntries(agents.map((a) => [a.id, a])); st.approvals = approvals;
       connectWs(); render(); loadControl().catch(() => {});
+      // 1.5: what the hub found about its computer, one line under Settings
+      api("/capacity").then((c) => { st.capacity = c; if (st.view === "rooms") renderRooms(); }).catch(() => {});
     } catch (err) { if (err.message !== "unpaired") toast(`Can't reach the hub: ${err.message}`); }
   }
 
@@ -246,7 +249,8 @@
       : `<div class="empty">No rooms yet. Make one on the Mac.</div>`;
     const nCtl = st.control ? st.control.notices.length : 0;
     $("#view").innerHTML += `<div class="section">Settings</div><button class="row" data-nav="permissions"><span class="hash">⚙︎</span><span class="name">Permissions</span></button>
-      <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>`;
+      <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>${st.capacity ? `<div class="capline">${esc(st.capacity.summary)}</div>` : ""}`;
+
     paintColors();
   }
 

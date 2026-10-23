@@ -18,6 +18,8 @@ import { Library, defaultLibraryRoot } from "../library/library.js";
 import { FileBroker } from "../files/broker.js";
 import { TaskWorkspaces, type TaskWorkspace, type WorkspaceHookContext, type WorkspaceHooks } from "./worktree.js";
 import type { ControlFolder } from "../control/folder.js"; // 1.9
+import { CapacityGovernor } from "../capacity/governor.js";
+import { detectHardware } from "../capacity/hardware.js";
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -46,6 +48,8 @@ export interface OrchestratorOptions {
   gitBin?: string;
   /** 1.9: the control folder (rules, personas, permissions, scope as Markdown files). */
   control?: ControlFolder;
+  /** 1.5: how much local work this machine takes at once. Defaults to what the hardware allows. */
+  governor?: CapacityGovernor;
 }
 
 type PlanTask = RawPlanTask;
@@ -82,12 +86,15 @@ export class Orchestrator {
   private cleanups = new Set<Promise<unknown>>();
   /** 1.9: the control folder; undefined when the hub runs without one (most tests). */
   control?: ControlFolder;
+  /** 1.5: limits for local work, from the hardware and the owner's overrides. */
+  governor: CapacityGovernor;
 
   constructor(private store: Store, private approvals: Approvals, private opts: OrchestratorOptions) {
     this.library = new Library(store, opts.libraryDir ?? defaultLibraryRoot());
     this.files = new FileBroker(store, approvals);
     this.workspaces = new TaskWorkspaces({ dataDir: opts.dataDir, git: opts.gitBin });
     this.control = opts.control; // 1.9
+    this.governor = opts.governor ?? new CapacityGovernor(store, detectHardware());
   }
 
   private cfg(): Required<OrchestratorSettings> {
@@ -794,6 +801,7 @@ export class Orchestrator {
     goal.status = "running"; this.store.saveGoal(goal);
     this.log(goal.roomId, `Routed to ${agent.name} directly.`, task.id);
     this.busy.add(agent.id);
+    this.governor.start(task.id, agent); // 1.5: counted, never refused (the owner asked)
     this.floor.give(agent.id, goal.roomId);
     this.working(goal.roomId, agent, true, "replying");
     let convo = this.conversation(goal.roomId);
@@ -803,6 +811,7 @@ export class Orchestrator {
       { roomId: goal.roomId, taskId: task.id, signal });
     this.working(goal.roomId, agent, false);
     this.busy.delete(agent.id);
+    this.governor.release(task.id);
     const ran = { usage: res.usage, seconds: res.durationMs / 1000, modelVersion: res.model };
     if (signal.aborted) { closeRecord(this.store, task.routingId, { ...ran, outcome: "interrupted" }); return goal; }
     recordOutcome(this.store, agent.id, task.taskType, { seconds: res.durationMs / 1000, failed: !res.ok, revision: false });
@@ -885,7 +894,7 @@ export class Orchestrator {
           if (this.progress(goal.id).runs + inflight.size >= budget) break;
           const agent = this.assign(t, live, g.text);
           if (!agent) continue;
-          const pr = this.runTask(goal, t, agent, signal).finally(() => { inflight.delete(t.id); this.busy.delete(agent.id); });
+          const pr = this.runTask(goal, t, agent, signal).finally(() => { inflight.delete(t.id); this.busy.delete(agent.id); this.governor.release(t.id); });
           inflight.set(t.id, pr);
         }
       }
@@ -1038,7 +1047,8 @@ export class Orchestrator {
     const s = this.store.getSettings();
     const free = (a: AgentConfig) => !this.busy.has(a.id) && !this.chatting.has(a.id) && live.has(a.id);
     const enabled = this.enabledAgents();
-    const idle = enabled.filter(free);
+    // 1.5: only agents this machine can take right now; cloud agents are the overflow when local work is at its limit.
+    const idle = this.governor.preferForOverflow(enabled.filter(free));
     const tried = t.triedBy ?? [];
     let agent: AgentConfig | undefined;
     let route: RouteDecision | undefined;
@@ -1046,13 +1056,13 @@ export class Orchestrator {
     if (t.status === "revising" && t.assignee) {
       // a revision stays with the same agent; if it went offline, the task goes back in the pool
       const same = enabled.find((a) => a.id === t.assignee);
-      if (same && live.has(same.id)) { if (!free(same)) return undefined; agent = same; route = fixedDecision(this.store, same, idle, t.taskType, "revision", s.explorationRate); }
+      if (same && live.has(same.id)) { if (!free(same) || !this.governor.admit(same)) return undefined; agent = same; route = fixedDecision(this.store, same, idle, t.taskType, "revision", s.explorationRate); }
       else { t.triedBy = [...tried, t.assignee]; t.assignee = undefined; t.status = "pending"; this.store.saveTask(t); }
     }
     if (!agent && t.owner && !tried.includes(t.owner) && live.has(t.owner)) {
       const owner = enabled.find((a) => a.id === t.owner)!;
-      if (free(owner)) { agent = owner; route = fixedDecision(this.store, owner, idle, t.taskType, "planned_owner", s.explorationRate); }
-      else if (now() - t.updatedAt < 10 * 60_000) return undefined; // wait for the planned owner
+      if (free(owner) && this.governor.admit(owner)) { agent = owner; route = fixedDecision(this.store, owner, idle, t.taskType, "planned_owner", s.explorationRate); }
+      else if (!free(owner) && now() - t.updatedAt < 10 * 60_000) return undefined; // wait for the planned owner (an owner the machine can't take right now is overflowed instead)
     }
     route ??= decide(this.store, idle, t.taskType, s.explorationRate, tried, this.opts.rand)
            ?? decide(this.store, idle, t.taskType, s.explorationRate, [], this.opts.rand);
@@ -1061,6 +1071,7 @@ export class Orchestrator {
     // 0.2: every pick is logged with each candidate's probability, before the work starts.
     t.routingId = openRecord(this.store, route, t, goalText).id;
     this.busy.add(agent.id);
+    this.governor.start(t.id, agent); // 1.5: released in drive() when the task ends
     return agent;
   }
 

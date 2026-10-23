@@ -1,5 +1,5 @@
 import type {
-  AgentConfig, AgentScore, AgentStatus, ControlCommit, ControlNotice, ControlStatus, McpConnection, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
+  AgentConfig, AgentScore, AgentStatus, CapacitySnapshot, ControlCommit, ControlNotice, ControlStatus, McpConnection, Approval, AuditEntry, Goal, MemoryEntry, MemoryProposal,
   Message, OrchestratorSettings, Room, ServerEvent, Task,
 } from "@agent-room/shared";
 
@@ -68,6 +68,7 @@ export class Hub {
 
   settings = () => this.req<OrchestratorSettings & { calibration: { n: number; absErr: number } }>("/settings");
   saveSettings = (s: Partial<OrchestratorSettings>) => this.send<OrchestratorSettings>("PUT", "/settings", s);
+  capacity = () => this.req<CapacitySnapshot>("/capacity");
 
   memory = (roomId?: string) => this.req<MemoryEntry[]>(`/memory${roomId ? `?roomId=${roomId}` : ""}`);
   editMemory = (id: string, text: string) => this.send("PUT", `/memory/${id}`, { text });
