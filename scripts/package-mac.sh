@@ -265,6 +265,11 @@ mkdir -p "$BUILD/dmg"
 ditto "$APP" "$BUILD/dmg/AgentRoom.app"
 ln -s /Applications "$BUILD/dmg/Applications"
 rm -f "$DMG"
+# A DMG from an earlier build that is still open in Finder makes hdiutil fail with "Resource busy": eject it first.
+for dev in $(hdiutil info | awk -v img="$DMG" '/^=+$/ {p=0} /^image-path/ {sub(/^image-path[ \t]*:[ \t]*/, ""); p=($0==img)} p && /^\/dev\/disk[0-9]+[ \t]/ {print $1}'); do
+  echo "Ejecting the earlier $(basename "$DMG"), still open as $dev"
+  hdiutil detach "$dev" -quiet 2>/dev/null || hdiutil detach "$dev" -force -quiet
+done
 hdiutil create -volname "Agent Room" -srcfolder "$BUILD/dmg" -fs HFS+ -format UDZO -ov "$DMG" >/dev/null
 hdiutil verify "$DMG" >/dev/null
 
