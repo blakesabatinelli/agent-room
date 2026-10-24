@@ -5,15 +5,22 @@ import { runProc } from "./adapters/proc.js";
 
 const PATHS = 'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"';
 const LOGF = (name: string) => `"$HOME/.agent-room/signin-${name}.log"`;
-const LOGIN: Record<string, { cmd: string; note: string }> = {
+export const LOGIN: Record<string, { cmd: string; note: string }> = {
   "claude-code": {
     cmd: [
       PATHS,
       `: > ${LOGF("claude")}`,
-      'if ! command -v claude >/dev/null; then',
-      `  { echo "Installing Claude Code…"; curl -fsSL https://claude.ai/install.sh | bash || npm install -g @anthropic-ai/claude-code || npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code; } 2>&1 | tee -a ${LOGF("claude")}`,
+      // "Installed" means it starts: an old npm install can leave a `claude` link whose target is gone, and the native installer's clean-up of
+      // that old install can remove the link it just made. So check with --version, and run the installer a second time if the first left none.
+      'claude_ok() { hash -r; command -v claude >/dev/null && claude --version >/dev/null 2>&1; }',
+      'install_claude() { curl -fsSL --http1.1 --retry 3 https://claude.ai/install.sh | bash; }',
+      'if ! claude_ok; then',
+      `  { echo "Installing Claude Code…"; install_claude || npm install -g @anthropic-ai/claude-code || npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code; } 2>&1 | tee -a ${LOGF("claude")}`,
+      `  claude_ok || { echo; echo "Finishing the install…"; install_claude; } 2>&1 | tee -a ${LOGF("claude")}`,
       'fi',
-      `command -v claude >/dev/null || { echo "Claude Code didn't install. Agent Room can show you this log." | tee -a ${LOGF("claude")}; read; exit 1; }`,
+      `claude_ok || { echo "Claude Code didn't install. Agent Room can show you this log."; echo "Found: $(ls -la "$HOME/.local/bin/claude" 2>&1)"; } 2>&1 | tee -a ${LOGF("claude")}`,
+      `claude_ok || { read; exit 1; }`,
+      `echo "Claude Code: $(command -v claude) $(claude --version 2>&1)" | tee -a ${LOGF("claude")}`,
       'echo; echo "Type /login if Claude doesn\'t ask you to sign in, then /exit and go back to Agent Room."; echo',
       'claude',
     ].join("\n"),
