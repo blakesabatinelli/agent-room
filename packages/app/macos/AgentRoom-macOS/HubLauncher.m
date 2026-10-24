@@ -106,6 +106,20 @@ static int ARRun(NSString *shellCommand) {
   return t.terminationStatus;
 }
 
+// A hub is answering on 4747 but has written no pairing key: it is one from an older version, still running after the app was updated
+// (a process keeps its old code until it exits). Stop it so the current one can start. With start-at-login on, launchd restarts it from the
+// app's current files; otherwise only a process running our hub (hub.mjs) is stopped, never anything else that happens to use the port.
+static void ARStopStaleHub(void) {
+  if (hubTask.running) { [hubTask terminate]; [hubTask waitUntilExit]; }
+  if ([[NSFileManager defaultManager] fileExistsAtPath:ARAgentPlist()]) {
+    ARRun([NSString stringWithFormat:@"launchctl kickstart -k gui/%u/%@ 2>/dev/null; true", getuid(), kAgentLabel]);
+    for (int i = 0; i < 20 && !ARLocalPairSecret(); i++) [NSThread sleepForTimeInterval:0.5];
+    return;
+  }
+  ARRun(@"for p in $(lsof -ti tcp:4747 -sTCP:LISTEN 2>/dev/null); do ps -o command= -p $p | grep -q 'hub.mjs' && kill $p; done; true");
+  for (int i = 0; i < 20 && ARHealthy(); i++) [NSThread sleepForTimeInterval:0.5];
+}
+
 @implementation HubLauncher
 
 RCT_EXPORT_MODULE();
@@ -114,7 +128,15 @@ RCT_EXPORT_MODULE();
 
 RCT_EXPORT_METHOD(ensureRunning:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-    if (ARHealthy()) { resolve(@{ @"started": @NO, @"log": ARLogPath() }); return; }
+    if (ARHealthy()) {
+      if (ARLocalPairSecret()) { resolve(@{ @"started": @NO, @"log": ARLogPath() }); return; }
+      ARStopStaleHub();
+      if (ARHealthy()) {
+        if (ARLocalPairSecret()) { resolve(@{ @"started": @YES, @"log": ARLogPath() }); return; }
+        reject(@"stale_hub", @"An older copy of the hub is still running and couldn't be stopped. Restart your Mac, then open Agent Room again.", nil);
+        return;
+      }
+    }
 
     NSDictionary *spec = ARLaunchSpec();
     if (!spec) {
