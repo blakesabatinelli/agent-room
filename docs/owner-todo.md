@@ -14,7 +14,8 @@ Everything in the plan that could be built without you is built and tested (hub 
 | D6 | Business model | Yours. Licence drafts (MIT/Apache vs EULA) are in `docs/legal/` |
 | D7 | 3D office tech | three.js in a web view, 2D fallback. Built on it |
 | D8 | Subagent limits | Depth 2, budget 6 per goal. Built on it |
-| New | Minimum macOS | The Podfile says 14.0, the Xcode project says 11.0. Pick one. Recommendation: 14.0 (one target to test; Sparkle and RN macOS are fine there) |
+
+Decided since: minimum macOS is 14 (D10, Oct 24).
 
 ## 2. Sign-offs
 - `CONTROL.md` (the control-file spec).

@@ -16,8 +16,13 @@ IDs D1-D9 match the decisions register in `PLAN.md` section 10. Status is **Open
 | D9 | Remote access: Tailscale required | Phase 0 | **Decided** (owner, Oct 23) |
 | K5 | Relay prototype hosting | Week of Oct 26 | Withdrawn (D9) |
 | B1 | Version control host and CI | Week of Oct 26 | Decided (build), remote pending owner |
+| D10 | Minimum macOS | Before 1.0 | **Decided** (owner, Oct 24): macOS 14 |
 
 ---
+
+## D10: Minimum macOS (Decided by owner, 2026-10-24)
+
+macOS 14 (Sonoma) or later, Apple silicon. The Xcode project's `MACOSX_DEPLOYMENT_TARGET` now matches the Podfile (both 14.0); `LSMinimumSystemVersion` follows the deployment target, and `scripts/make-appcast.sh`, the download page and the user guide already say 14. One target to build and test.
 
 ## D7: 3D technology for the office (Proposed, 2026-10-23; built on it)
 
