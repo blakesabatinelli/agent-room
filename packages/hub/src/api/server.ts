@@ -394,6 +394,8 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   const readMarks = () => store.getKV<Record<string, number>>("read_marks", {});
   app.get("/rooms/read", async () => readMarks());
   app.get("/rooms/:id/read", async (req) => ({ at: readMarks()[(req.params as { id: string }).id] ?? 0 }));
+  // Reply turns: who was asked to answer in this room, whether and how they answered, and repeat posts kept out (turns/turns.ts).
+  app.get("/rooms/:id/turns", async (req) => ({ turns: orch.turns.list((req.params as { id: string }).id, Math.min(500, Number((req.query as { limit?: string }).limit ?? 100) || 100)) }));
   app.put("/rooms/:id/read", async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!store.getRoom(id)) return reply.code(404).send({ error: "Room not found." });

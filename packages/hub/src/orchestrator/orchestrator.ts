@@ -44,6 +44,7 @@ import { Subagents, subagentSettings, type SubagentHost } from "../subagents/ind
 import { RoomRules, StandingRooms } from "../rooms/index.js"; // 4.3
 import { Forks, type ForkHost } from "../fork/index.js"; // 4.4
 import { PolicyEngine } from "../policy/index.js"; // 4.2
+import { ReplyTurns, type ReplyTurn, type TurnKind } from "../turns/turns.js";
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -138,6 +139,8 @@ export class Orchestrator {
   forks: Forks;
   /** 4.2: the owner's learned and written approval rules (POLICY.md) and permission leases. requestApproval asks it once. */
   policy: PolicyEngine;
+  /** Every reply the hub asks an agent for in a room: one turn, one reply, logged (turns/turns.ts). */
+  turns: ReplyTurns;
   /** 4.1: two agents from different vendors draft an email send, a CRM write or a delete; it runs only if they match, else the owner decides. */
   twoKey: TwoKey;
 
@@ -180,6 +183,7 @@ export class Orchestrator {
     this.forks = new Forks(this.forkHost()); // 4.4
     // 4.2: started by main.ts with orch.policy.start() (the lease sweep and the daily learning).
     this.policy = new PolicyEngine({ store, approvals, control: () => this.control, rooms: this.rooms, attention: this.attention });
+    this.turns = new ReplyTurns(store);
     // 4.3: the calendar trigger for standing rooms (started by main.ts with orch.standing.start()).
     this.standing = new StandingRooms({
       store, control: () => this.control, attention: this.attention,
@@ -466,7 +470,7 @@ export class Orchestrator {
     // Direct-message room: the agent answers, nobody else is involved.
     const room = this.store.getRoom(roomId);
     const dm = room?.dmAgentId ? this.store.getAgent(room.dmAgentId) : undefined;
-    if (dm) { void this.lane(dm.id, () => this.reply(roomId, dm, { from: "owner", text, hop: 0 })); return msg; }
+    if (dm) { void this.lane(dm.id, () => this.reply(roomId, dm, { from: "owner", text, hop: 0, turn: { kind: "owner", triggerId: msg.id } })); return msg; }
 
     // 4.3: an agent outside the room's roster gets a short "not in this room" reply and does nothing.
     const mentioned = resolveMentions(text, this.enabledAgents());
@@ -474,7 +478,7 @@ export class Orchestrator {
     for (const a of mentioned.filter((m) => !tagged.includes(m))) this.post(roomId, SYS, this.rooms.notInRoom(roomId, a, this.enabledAgents()), "system");
     if (mentioned.length && !tagged.length) return msg;
     // A roll call ("have each agent respond", "@all"): every connected agent in the room answers, one after another, each seeing the earlier replies.
-    if (!mentioned.length && isRollCall(text)) { void this.rollCall(roomId, text); return msg; }
+    if (!mentioned.length && isRollCall(text)) { void this.rollCall(roomId, text, msg.id); return msg; }
     const active = this.activeGoal(roomId);
     // Explicit steering commands: /redirect [@agent] text, /replan text
     const forced = /^\/redirect\b/i.test(text) ? "redirect" : /^\/replan\b/i.test(text) ? "replan" : undefined;
@@ -504,7 +508,7 @@ export class Orchestrator {
 
     // Tagged agents answer, in the order tagged, each seeing the earlier replies.
     if (tagged.length) {
-      void (async () => { for (const a of tagged) await this.lane(a.id, () => this.reply(roomId, a, { from: "owner", text, hop: 0 })); })();
+      void (async () => { for (const a of tagged) await this.lane(a.id, () => this.reply(roomId, a, { from: "owner", text, hop: 0, turn: { kind: "owner", triggerId: msg.id } })); })();
       return msg;
     }
     // Room folders: no folder named = the room's default (if it still works); "" = no folder for this one.
@@ -516,13 +520,22 @@ export class Orchestrator {
 
   /** Every agent in the room answers the owner in turn (the room's order), each seeing the replies before it. Agents that are switched on but
    *  can't answer right now (not signed in, out of quota, offline) are named, so a missing reply is never a mystery. */
-  private async rollCall(roomId: string, text: string) {
+  private async rollCall(roomId: string, text: string, triggerId?: string) {
     const inRoom = this.enabledAgents(roomId);
     const ready = await this.readyAgents(roomId);
     const missing = inRoom.filter((a) => !ready.some((r) => r.id === a.id));
     if (!ready.length) { this.post(roomId, SYS, "No agent in this room can answer right now. Check them on the Agents page.", "system"); return; }
     if (missing.length) this.post(roomId, SYS, `${missing.map((a) => a.name).join(", ")} can't answer right now (not connected or not signed in). Check ${missing.length === 1 ? "it" : "them"} on the Agents page.`, "system");
-    for (const a of ready) await this.lane(a.id, () => this.reply(roomId, a, { from: "owner", text, hop: 0 }));
+    const turns: ReplyTurn[] = [];
+    for (const a of ready) await this.lane(a.id, () => this.reply(roomId, a, { from: "owner", text, hop: 0, turn: { kind: "rollcall", triggerId }, onTurn: (t) => turns.push(t) }));
+    // The orchestrator's tally, so a missing or doubled reply is visible at a glance (the full log is GET /rooms/:id/turns).
+    const name = (aid: string) => this.store.getAgent(aid)?.name ?? aid;
+    const ok = turns.filter((t) => t.status === "answered"), bad = turns.filter((t) => t.status !== "answered"), dropped = turns.reduce((n, t) => n + t.dropped, 0);
+    const parts = [`Roll call: ${ok.length} of ${inRoom.length} answered.`];
+    if (bad.length) parts.push(bad.map((t) => `${name(t.agentId)} didn't${t.error ? ` (${firstLine(t.error)})` : ""}`).join("; ") + ".");
+    if (missing.length) parts.push(`${missing.map((a) => a.name).join(", ")} couldn't be asked.`);
+    if (dropped) parts.push(`${dropped} repeat post${dropped === 1 ? "" : "s"} kept out.`);
+    this.post(roomId, SYS, parts.join(" "), "system", undefined, !bad.length && !dropped && !missing.length); // shown in full only when something is off
   }
 
   /**
@@ -592,7 +605,7 @@ export class Orchestrator {
         const here = this.enabledAgents(goal.roomId); // 4.3
         const pick = tagged[0] ?? here.find((a) => !busyIds.has(a.id) && a.id === this.store.getSettings().orchestratorAgentId)
           ?? here.find((a) => !busyIds.has(a.id)) ?? here[0] ?? (this.rooms.rosterIds(goal.roomId) ? undefined : this.orchestratorAgent());
-        if (pick) void this.lane(pick.id, () => this.reply(goal.roomId, pick, { from: "owner", text, hop: 0, inProgress: this.progressBrief(goal.id) }));
+        if (pick) void this.lane(pick.id, () => this.reply(goal.roomId, pick, { from: "owner", text, hop: 0, inProgress: this.progressBrief(goal.id), turn: { kind: "aside" } }));
         break;
       }
       case "amend":
@@ -711,7 +724,15 @@ export class Orchestrator {
    * One agent answers a message: the owner's, or another agent's tag.
    * Replies are routed onward if they tag someone, up to the hop limit.
    */
-  private async reply(roomId: string, agent: AgentConfig, o: { from: string; text: string; hop: number; inProgress?: string }): Promise<string | undefined> {
+  private async reply(roomId: string, agent: AgentConfig, o: { from: string; text: string; hop: number; inProgress?: string; turn?: { kind: TurnKind; triggerId?: string }; onTurn?: (t: ReplyTurn) => void }): Promise<string | undefined> {
+    // One turn, one reply (turns/turns.ts). The same message never asks the same agent twice.
+    const turn = this.turns.start(roomId, agent.id, o.turn?.kind ?? "owner", o.turn?.triggerId);
+    if (!turn) { this.log(roomId, `${agent.name} was already asked about this message. Not asked again.`); return undefined; }
+    try { return await this.replyTurn(roomId, agent, o, turn); }
+    finally { if (turn.status === "open") this.turns.end(turn, "failed", "No reply."); o.onTurn?.(turn); }
+  }
+
+  private async replyTurn(roomId: string, agent: AgentConfig, o: { from: string; text: string; hop: number; inProgress?: string }, turn: ReplyTurn): Promise<string | undefined> {
     const hops = this.cfg().maxAgentHops;
     this.chatting.add(agent.id);
     this.floor.give(agent.id, roomId);
@@ -725,12 +746,21 @@ export class Orchestrator {
     const res = await this.call(agent, prompt, { roomId, hop: o.hop + (asker ? 1 : 0) });
     this.working(roomId, agent, false);
     this.chatting.delete(agent.id);
+    if (turn.messageId) {
+      // The agent already posted its reply with the MCP tool during this turn: its final answer is not posted a second time.
+      this.turns.end(turn, "answered");
+      if (res.ok && res.text.trim()) this.harvestMemory(agent.id, roomId, res.text);
+      return this.store.listMessages(roomId).find((x) => x.id === turn.messageId)?.text ?? res.text;
+    }
     if (!res.ok) {
+      this.turns.end(turn, "failed", res.error ?? "No reply.");
       this.post(roomId, SYS, `${agent.name} couldn't reply: ${firstLine(res.error)}`, "system");
       return undefined;
     }
     const hop = o.hop + (asker ? 1 : 0);
     const m = this.post(roomId, this.agentAuthor(agent), res.text, "agent", undefined, false, hop);
+    this.turns.replied(turn, m.id, "answer");
+    this.turns.end(turn, "answered");
     this.harvestMemory(agent.id, roomId, res.text);
     // Don't bounce straight back to whoever asked: the reply already goes to them.
     this.routeTags(m, hop, asker ? [asker.id] : []);
@@ -750,7 +780,7 @@ export class Orchestrator {
     }
     for (const a of targets) {
       this.log(m.roomId, `${m.author.name} tagged ${a.name}.`);
-      void this.lane(a.id, () => this.reply(m.roomId, a, { from: m.author.id, text: m.text, hop }));
+      void this.lane(a.id, () => this.reply(m.roomId, a, { from: m.author.id, text: m.text, hop, turn: { kind: "tag", triggerId: m.id } }));
     }
   }
 
@@ -776,11 +806,20 @@ export class Orchestrator {
   agentPost(grant: McpGrant, text: string, roomId?: string): { ok: boolean; why?: string } {
     if (grant.shadow) return { ok: false, why: "You can't post right now. Put what you have in your reply." }; // 2.3
     const a = this.store.getAgent(grant.agentId);
-    const rid = this.roomFor(grant, roomId);
+    // A post with no room goes to the room the agent is answering in, when it is answering in exactly one.
+    const rid = roomId ?? grant.roomId ?? (a ? this.turns.current(a.id)?.roomId : undefined) ?? this.roomFor(grant, roomId);
     if (!a || !rid) return { ok: false, why: "Room or agent not found. You can post only while you hold an assignment or after being tagged." };
     const gate = this.mayPost(a.id, rid);
     if (!gate.ok) { this.store.audit(a.id, "post.denied", text.slice(0, 200)); return gate; }
+    // A reply turn has one reply: the first post is it, a second one is kept out (and counted), and the final answer isn't posted again.
+    const turn = this.turns.current(a.id, rid);
+    if (turn?.messageId) {
+      this.turns.extra(turn);
+      this.store.audit(a.id, "post.repeat_dropped", text.slice(0, 200));
+      return { ok: false, why: "Your reply to this is already in the room, so this wasn't posted. Don't post it again, and don't repeat it in your final answer." };
+    }
     const m = this.post(rid, this.agentAuthor(a), text, "agent", grant.taskId, false, grant.hop);
+    if (turn) this.turns.replied(turn, m.id, "post");
     this.routeTags(m, grant.hop ?? 0);
     return { ok: true };
   }
@@ -799,10 +838,10 @@ export class Orchestrator {
     if (hop >= this.cfg().maxAgentHops) return "This thread has gone back and forth enough. Continue without it, or report STATUS: needs_input.";
     const gate = this.mayPost(asker.id, rid);
     if (!gate.ok) return gate.why!;
-    this.post(rid, this.agentAuthor(asker), `@${agent.id} ${question}`, "agent", grant.taskId, false, hop);
+    const q = this.post(rid, this.agentAuthor(asker), `@${agent.id} ${question}`, "agent", grant.taskId, false, hop);
     let timer: NodeJS.Timeout | undefined;
     const answer = await Promise.race([
-      this.lane(agent.id, () => this.reply(rid, agent, { from: asker.id, text: question, hop })),
+      this.lane(agent.id, () => this.reply(rid, agent, { from: asker.id, text: question, hop, turn: { kind: "ask", triggerId: q.id } })),
       new Promise<undefined>((r) => { timer = setTimeout(() => r(undefined), 10 * 60_000); timer.unref?.(); }),
     ]);
     clearTimeout(timer);
