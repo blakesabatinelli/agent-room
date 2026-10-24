@@ -352,7 +352,7 @@
 					"-ObjC",
 					"-lc++",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.agentroom.app";
+				PRODUCT_BUNDLE_IDENTIFIER = com.agentroom.app;
 				PRODUCT_NAME = AgentRoom;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
@@ -373,7 +373,7 @@
 					"-ObjC",
 					"-lc++",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.agentroom.app";
+				PRODUCT_BUNDLE_IDENTIFIER = com.agentroom.app;
 				PRODUCT_NAME = AgentRoom;
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
@@ -396,7 +396,7 @@
 					"-ObjC",
 					"-lc++",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.agentroom.app";
+				PRODUCT_BUNDLE_IDENTIFIER = com.agentroom.app;
 				PRODUCT_NAME = AgentRoom;
 				SDKROOT = macosx;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -419,7 +419,7 @@
 					"-ObjC",
 					"-lc++",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.agentroom.app";
+				PRODUCT_BUNDLE_IDENTIFIER = com.agentroom.app;
 				PRODUCT_NAME = AgentRoom;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.0;
