@@ -1,5 +1,5 @@
 // 1.7 Installing the agent CLIs without Terminal. Each script is run headless by the hub (bash -c), never typed by the owner.
-//   Claude Code: the official native installer, https://code.claude.com/docs/en/setup  (curl -fsSL https://claude.ai/install.sh | bash)
+//   Claude Code: the official native installer, https://code.claude.com/docs/en/setup  (curl -fsSL --http1.1 --retry 3 --retry-all-errors https://claude.ai/install.sh | bash)
 //   Codex:       the macOS binary from the latest GitHub release, https://github.com/openai/codex/releases
 //                (asset codex-<arch>-apple-darwin.tar.gz holds one file, codex-<arch>-apple-darwin)
 // Both end up in ~/.local/bin, which the hub already puts on its PATH.
@@ -18,7 +18,7 @@ esac
 mkdir -p "$HOME/.local/bin"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-curl -fsSL "https://github.com/openai/codex/releases/latest/download/codex-$T.tar.gz" | tar -xz -C "$TMP"
+curl -fsSL --http1.1 --retry 3 --retry-all-errors "https://github.com/openai/codex/releases/latest/download/codex-$T.tar.gz" | tar -xz -C "$TMP"
 mv "$TMP/codex-$T" "$HOME/.local/bin/codex"
 chmod +x "$HOME/.local/bin/codex"
 "$HOME/.local/bin/codex" --version

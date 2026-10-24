@@ -19,11 +19,12 @@ import { installCrashHandlers } from "./distribution/crash.js"; // 4.7
 import { sendPendingCrashes } from "./distribution/reporting.js"; // 4.7
 import { UpdateChecker, startTelemetryTimer } from "./distribution/schedule.js"; // 4.7
 import { appVersion } from "./distribution/version.js"; // 4.7
+import { hubPath, knownCliDirs, loginShellPath } from "./env/shellPath.js";
 
 // Apps launched from Finder get a thin PATH; make sure the agent CLIs are findable.
 const home = homedir();
-const extraPath = [join(home, ".local/bin"), join(home, ".npm-global/bin"), join(home, ".bun/bin"), "/opt/homebrew/bin", "/usr/local/bin"];
-process.env.PATH = [...new Set([...(process.env.PATH ?? "").split(":"), ...extraPath].filter(Boolean))].join(":");
+// The owner's own PATH (from their login shell) plus the usual install folders, so `claude`, `codex` and the rest are found from a Finder launch.
+process.env.PATH = hubPath(process.env.PATH, process.env.AGENT_ROOM_DEMO === "1" ? undefined : loginShellPath(), knownCliDirs(home));
 
 const dataDir = process.env.AGENT_ROOM_DATA ?? join(homedir(), ".agent-room");
 const port = Number(process.env.AGENT_ROOM_PORT ?? 4747);

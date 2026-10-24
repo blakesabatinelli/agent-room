@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 
 export interface ProcResult { code: number | null; stdout: string; stderr: string }
 
@@ -24,7 +25,11 @@ export function runProc(
       while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); opts.onLine?.(line); }
     });
     child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
-    child.on("error", (e) => { stderr += String(e); });
+    child.on("error", (e: NodeJS.ErrnoException) => {
+      // ENOENT from spawn means the program wasn't found on PATH (or the folder to run it in is gone): say which, plainly.
+      if (e.code === "ENOENT") stderr += opts.cwd && !existsSync(opts.cwd) ? `The folder ${opts.cwd} to run ${cmd} in doesn't exist.` : `${cmd} wasn't found on this Mac. Install it, or check where it is with \`which ${cmd}\` in Terminal. (${String(e)})`;
+      else stderr += String(e);
+    });
     child.on("close", (code) => {
       if (buf) opts.onLine?.(buf);
       if (timer) clearTimeout(timer);
