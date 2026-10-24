@@ -21,9 +21,9 @@ export function OfficeScreen() {
   const room = rooms.find((r) => r.id === roomId);
   const uri = useMemo(() => {
     if (!hub) return "";
-    const q = new URLSearchParams({ embed: "1" });
-    if (room && !room.dmAgentId) q.set("roomId", room.id); // a direct message has no goal of its own: show every room
-    return `${hub.baseUrl}/web/office.html?${q}`;
+    // Built by hand: React Native's URLSearchParams throws on set() ("not implemented"), and a thrown error in a release build quits the app.
+    const roomQ = room && !room.dmAgentId ? `&roomId=${encodeURIComponent(room.id)}` : ""; // a direct message has no goal of its own: show every room
+    return `${hub.baseUrl}/web/office.html?embed=1${roomQ}`;
   }, [hub, room]);
   const start = useMemo(() => `window.__AGENT_ROOM__ = { token: ${JSON.stringify(hub?.token ?? "")} }; true;`, [hub]);
 

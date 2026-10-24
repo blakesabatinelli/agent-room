@@ -56,7 +56,7 @@ export function SignInPanel({ agentId, adapter, ready, notInstalled, onChanged }
   const sendCode = async () => { try { setView(await hub!.signInCode(agentId, pasted.trim())); setPasted(""); } catch (e) { setNote((e as Error).message); } };
   const open = () => { if (view?.url) void Linking.openURL(view.url); };
 
-  const host = view?.url ? new URL(view.url).host : "";
+  const host = view?.url ? (/^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(view.url)?.[1] ?? "") : ""; // not new URL(): React Native's URL throws on .host
   return (
     <View style={{ gap: space(2) }}>
       {!active ? (

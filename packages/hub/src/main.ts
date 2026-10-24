@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./db/store.js";
@@ -29,6 +30,18 @@ const port = Number(process.env.AGENT_ROOM_PORT ?? 4747);
 const demo = process.env.AGENT_ROOM_DEMO === "1";
 const ownerName = process.env.AGENT_ROOM_OWNER ?? "Blake";
 mkdirSync(dataDir, { recursive: true });
+// Work from the data folder, not the folder the hub was started in. Updating the app replaces its bundle, which deletes the folder an older hub
+// is still running in; every program it then starts without a folder of its own inherits a folder that no longer exists, and Codex refuses to
+// start ("Error loading configuration: No such file or directory").
+process.chdir(dataDir);
+// Which hub files this process runs, and their date: the Mac app compares them with what's on disk now and restarts a hub left running from an
+// older build (the files were replaced since it started).
+{
+  const script = fileURLToPath(import.meta.url);
+  let scriptMtimeMs = 0;
+  try { scriptMtimeMs = Math.round(statSync(script).mtimeMs); } catch { /* run from source */ }
+  try { writeFileSync(join(dataDir, "hub.json"), JSON.stringify({ pid: process.pid, script, scriptMtimeMs, startedAt: Date.now() }) + "\n", { mode: 0o600 }); } catch { /* best effort */ }
+}
 // 4.7: an uncaught exception or unhandled rejection is written (scrubbed) to <data>/crashes/ and the hub exits; launchd or the app starts it again.
 installCrashHandlers({ dataDir, version: appVersion() });
 
