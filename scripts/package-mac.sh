@@ -126,13 +126,20 @@ pnpm --filter @agent-room/hub build
 step "2/$TOTAL Getting Node $NODE_VERSION (official build, checked against nodejs.org's SHA-256 list)"
 NODE_TGZ="node-v$NODE_VERSION-darwin-arm64.tar.gz"
 NODE_URL="https://nodejs.org/dist/v$NODE_VERSION"
-curl -fsSL "$NODE_URL/SHASUMS256.txt" -o "$BUILD/cache/SHASUMS256-$NODE_VERSION.txt"
-EXPECTED="$(awk -v f="$NODE_TGZ" '$2 == f { print $1 }' "$BUILD/cache/SHASUMS256-$NODE_VERSION.txt")"
+# HTTP/1.1 and retries: nodejs.org's CDN sometimes drops HTTP/2 streams ("Error in the HTTP2 framing layer"). A version's list never changes, so
+# when nodejs.org can't be reached, the copy saved by an earlier build is used.
+fetch() { curl -fSL --http1.1 --retry 4 --retry-delay 2 --retry-all-errors "$@"; }
+SUMS="$BUILD/cache/SHASUMS256-$NODE_VERSION.txt"
+if fetch -s "$NODE_URL/SHASUMS256.txt" -o "$SUMS.part"; then mv "$SUMS.part" "$SUMS"
+elif [ -s "$SUMS" ]; then rm -f "$SUMS.part"; echo "Couldn't reach nodejs.org; using the checksum list saved by an earlier build."
+else die "Couldn't download Node's checksum list from nodejs.org. Check the connection and run this again."; fi
+EXPECTED="$(awk -v f="$NODE_TGZ" '$2 == f { print $1 }' "$SUMS")"
 [ -n "$EXPECTED" ] || die "nodejs.org's list has no $NODE_TGZ. Check NODE_VERSION."
 [ -z "${NODE_SHA256:-}" ] || [ "$NODE_SHA256" = "$EXPECTED" ] || die "NODE_SHA256 doesn't match nodejs.org's list for $NODE_TGZ."
 sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 if [ ! -f "$BUILD/cache/$NODE_TGZ" ] || [ "$(sha_of "$BUILD/cache/$NODE_TGZ")" != "$EXPECTED" ]; then
-  curl -fSL --progress-bar "$NODE_URL/$NODE_TGZ" -o "$BUILD/cache/$NODE_TGZ"
+  fetch --progress-bar "$NODE_URL/$NODE_TGZ" -o "$BUILD/cache/$NODE_TGZ.part" || die "Couldn't download Node from nodejs.org. Check the connection and run this again."
+  mv "$BUILD/cache/$NODE_TGZ.part" "$BUILD/cache/$NODE_TGZ"
 fi
 [ "$(sha_of "$BUILD/cache/$NODE_TGZ")" = "$EXPECTED" ] || die "The Node download's SHA-256 doesn't match nodejs.org's list. Not using it."
 echo "SHA-256 OK: $EXPECTED"
