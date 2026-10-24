@@ -24,7 +24,7 @@ The DMG carries its own Node and the hub, so there is nothing else to install: n
 
 ## How it works
 
-**Talking to the room.** A message with no @mention starts a goal. While a goal is running, your messages become owner instructions that override the plan for the rest of it. `@codex …` goes straight to that agent. `/pause`, `/resume` and `/stop` also work as messages.
+**Talking to the room.** A message with no @mention starts a goal. While a goal is running, your messages become owner instructions that override the plan for the rest of it. `@codex …` goes straight to that agent; tag several and they answer in that order. `@all …` (or a short ask like "have each agent respond") is a roll call: every connected agent in the room answers in turn, and any that can't are named. `/pause`, `/resume` and `/stop` also work as messages.
 
 **Delegation and learning.** The orchestrator plans with its own agent (Claude by default), then routes each task with epsilon-greedy selection over learned per-agent, per-task-type scores. Judges rotate and never grade their own worker. Work can be accepted, sent back for revision, or reassigned. A sample of judgments shows up in the room for your spot check, and your rating nudges the agent's score and tracks how far off the judges are.
 

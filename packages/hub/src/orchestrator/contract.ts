@@ -96,6 +96,20 @@ export function resolveMentions(text: string, agents: AgentConfig[]): AgentConfi
   return out;
 }
 
+/**
+ * A roll call: the owner wants every agent in the room to answer, not one picked by routing. Either a room-wide tag (`@all`, `@everyone`,
+ * `@here`, `@agents`) or a short message that names everyone ("each agent", "all of you", "everyone") and asks them to speak ("respond",
+ * "reply", "introduce", "chime in"...). A longer message is a real request and goes to planning as before.
+ */
+export function isRollCall(text: string): boolean {
+  const plain = text.replace(/```[\s\S]*?```/g, "").replace(/`[^`]*`/g, "");
+  if (/(?:^|[^\w@])@(all|everyone|everybody|here|agents|room)\b/i.test(plain)) return true;
+  if (plain.length > 300) return false;
+  const everyone = /\b(each|every)\s+(agent|one\s+of\s+(you|the\s+agents|them)|model|bot)s?\b|\ball\s+(of\s+)?(you|the\s+)?agents\b|\ball\s+of\s+(you|them)\b|\b(everyone|everybody|you\s+all|y'all)\b/i;
+  const speak = /\b(respond|reply|answer|introduce|chime\s+in|weigh\s+in|sound\s+off|check\s+in|say\s+(hi|hello)|share|vote|give\s+(me\s+)?(your|their))\b/i;
+  return everyone.test(plain) && speak.test(plain);
+}
+
 export function roster(agents: AgentConfig[], self?: string) {
   return agents.filter((a) => a.id !== self).map((a) => `@${handle(a)} (${a.name})`).join(", ") || "(nobody else)";
 }

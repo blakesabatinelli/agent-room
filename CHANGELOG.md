@@ -3,6 +3,11 @@
 Weekly release notes. Each Friday: bump `VERSION`, add an entry here, update the status column in `PLAN.md` section 11.
 Format: `## <VERSION>` then what shipped, grouped by plan item.
 
+## Unreleased
+
+- **Roll call:** `@all` (also `@everyone`, `@here`), or a short message like "have each agent respond", makes every connected agent in the room answer in turn instead of planning a goal that one agent answers. Agents that can't answer are named. Tagged agents now answer one after another in the order tagged (they used to run at once).
+- **Mac app fixes from the first real build:** codesign could not read the entitlements (a `--` inside an XML comment); the office and the sign-in screen crashed on React Native's partial URL APIs; the build now runs `pod install` when the app's native dependencies change; a hub left running from an older build is restarted, and the hub works from its data folder, so Codex no longer fails with "Error loading configuration"; the DMG step ejects an earlier DMG still open in Finder; minimum macOS is 14 (D10).
+
 ## 2026-10-23.2 (Phases 1-4: everything that needs no owner input)
 
 Tests: hub 123 to 855, relay 12. Every plan item 1.1-4.7 is built and tested; what still needs the owner, a real Mac or an account is in `docs/owner-todo.md`.

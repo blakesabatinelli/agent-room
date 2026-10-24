@@ -6,7 +6,7 @@ import type { Store } from "../db/store.js";
 import { adapters, type RunResult } from "../adapters/index.js";
 import { id, now, token } from "../util.js";
 import type { Approvals } from "./approvals.js";
-import { Floor, gate, gateText, normaliseCriteria, parseReport, pickProfile, profileText, resolveMentions, selfReportedDrift } from "./contract.js";
+import { Floor, gate, gateText, normaliseCriteria, parseReport, pickProfile, profileText, resolveMentions, isRollCall, selfReportedDrift } from "./contract.js";
 import { changedFiles, goalFolder, listFiles, outsideScope, runCheck, snapshot } from "./workspace.js";
 import { extractJson } from "./json.js";
 import { directPrompt, judgePrompt, memoryPrompt, planCard, planPrompt, recoverPrompt, replanPrompt, steerPrompt, summaryPrompt, tagPrompt, taskPrompt, verifyPrompt } from "./prompts.js";
@@ -469,6 +469,8 @@ export class Orchestrator {
     const tagged = mentioned.filter((a) => this.rooms.allows(roomId, a.id));
     for (const a of mentioned.filter((m) => !tagged.includes(m))) this.post(roomId, SYS, this.rooms.notInRoom(roomId, a, this.enabledAgents()), "system");
     if (mentioned.length && !tagged.length) return msg;
+    // A roll call ("have each agent respond", "@all"): every connected agent in the room answers, one after another, each seeing the earlier replies.
+    if (!mentioned.length && isRollCall(text)) { void this.rollCall(roomId, text); return msg; }
     const active = this.activeGoal(roomId);
     // Explicit steering commands: /redirect [@agent] text, /replan text
     const forced = /^\/redirect\b/i.test(text) ? "redirect" : /^\/replan\b/i.test(text) ? "replan" : undefined;
@@ -498,11 +500,22 @@ export class Orchestrator {
 
     // Tagged agents answer, in the order tagged, each seeing the earlier replies.
     if (tagged.length) {
-      for (const a of tagged) void this.lane(a.id, () => this.reply(roomId, a, { from: "owner", text, hop: 0 }));
+      void (async () => { for (const a of tagged) await this.lane(a.id, () => this.reply(roomId, a, { from: "owner", text, hop: 0 })); })();
       return msg;
     }
     void this.runGoal(roomId, body, { folderGrantId: opts.folderGrantId });
     return msg;
+  }
+
+  /** Every agent in the room answers the owner in turn (the room's order), each seeing the replies before it. Agents that are switched on but
+   *  can't answer right now (not signed in, out of quota, offline) are named, so a missing reply is never a mystery. */
+  private async rollCall(roomId: string, text: string) {
+    const inRoom = this.enabledAgents(roomId);
+    const ready = await this.readyAgents(roomId);
+    const missing = inRoom.filter((a) => !ready.some((r) => r.id === a.id));
+    if (!ready.length) { this.post(roomId, SYS, "No agent in this room can answer right now. Check them on the Agents page.", "system"); return; }
+    if (missing.length) this.post(roomId, SYS, `${missing.map((a) => a.name).join(", ")} can't answer right now (not connected or not signed in). Check ${missing.length === 1 ? "it" : "them"} on the Agents page.`, "system");
+    for (const a of ready) await this.lane(a.id, () => this.reply(roomId, a, { from: "owner", text, hop: 0 }));
   }
 
   /**
