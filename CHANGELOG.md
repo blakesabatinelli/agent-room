@@ -5,6 +5,7 @@ Format: `## <VERSION>` then what shipped, grouped by plan item.
 
 ## Unreleased
 
+- **Room folders:** a room can have a default folder. Add one from the room's settings on the Mac (the native folder chooser, now built into the app) or make an existing folder the default; goals started in the room work on it, and **No folder** is still one tap in the composer. Removing a folder grant clears it as any room's default. The phone's room info lists the folders with **Make default** and **Remove from room**. Hub: `PUT /rooms/:id` takes `folderGrantId` (null clears), and `POST /rooms/:id/messages` treats `folderGrantId: ""` as no folder. Apps that send nothing now get the room's default.
 - **Roll call:** `@all` (also `@everyone`, `@here`), or a short message like "have each agent respond", makes every connected agent in the room answer in turn instead of planning a goal that one agent answers. Agents that can't answer are named. Tagged agents now answer one after another in the order tagged (they used to run at once).
 - **Mac app fixes from the first real build:** codesign could not read the entitlements (a `--` inside an XML comment); the office and the sign-in screen crashed on React Native's partial URL APIs; the build now runs `pod install` when the app's native dependencies change; a hub left running from an older build is restarted, and the hub works from its data folder, so Codex no longer fails with "Error loading configuration"; the DMG step ejects an earlier DMG still open in Finder; minimum macOS is 14 (D10).
 

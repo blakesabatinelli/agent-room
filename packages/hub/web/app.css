@@ -404,3 +404,8 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .tk-m { background: var(--warn-bg); color: var(--warn); }
 .tk-body { margin-top: 6px; padding: 6px 4px; font-size: 14px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; border-top: 1px solid var(--line); }
 .tk-w { background: var(--warn-bg); color: var(--warn); border-radius: 3px; padding: 0 2px; }
+
+/* Room folders (room info) */
+.rfolder { padding: 10px 0; border-top: 1px solid var(--line); }
+.rfolder .rfname { color: var(--ink); font-weight: 600; overflow-wrap: anywhere; }
+.rfolder .actions { padding: 8px 0 0; }

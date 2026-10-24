@@ -20,6 +20,7 @@ import { addFailure, classifyFailure, parseFailureCategory, type FailureEvidence
 import { Library, defaultLibraryRoot } from "../library/library.js";
 import { FileBroker } from "../files/broker.js";
 import { GoalSources, branchFor } from "../files/goalSource.js"; // 1.1
+import { RoomFolders } from "../files/roomFolders.js"; // room folders
 import { TaskWorkspaces, type TaskWorkspace, type WorkspaceHookContext, type WorkspaceHooks } from "./worktree.js";
 import type { ControlFolder } from "../control/folder.js"; // 1.9
 import { restoreTaskContext, writeTaskContext } from "../control/context.js"; // 1.9 x 1.4
@@ -105,6 +106,8 @@ export class Orchestrator {
   files: FileBroker;
   /** 1.1: goals that work on a folder the owner granted (branch or private copy, approval of write-back). */
   goalSources: GoalSources;
+  /** Room folders: a room's default folder for new goals. */
+  roomFolders: RoomFolders;
   /** 1.4: every task attempt works in its own git worktree (or folder copy) cut from the goal folder. */
   workspaces: TaskWorkspaces;
   /** 1.4: hooks around each task's worktree (1.9 writes and restores the agent's context file here). */
@@ -147,6 +150,7 @@ export class Orchestrator {
     // 1.1: the control folder's version history can never be granted to agents (it is read lazily: the control folder may be attached after this).
     this.files = new FileBroker(store, approvals, { rooms: this.rooms /* 4.3 */, twoKey: (q) => this.twoKey.checkDeletes(q) /* 4.1: read at call time */, extraProtected: () => (this.control ? [{ path: join(this.control.root, ".git"), because: "the Agent Room control folder's version history can't be shared with agents" }] : []) });
     this.goalSources = new GoalSources(this.files, store); // 1.1
+    this.roomFolders = new RoomFolders(store, this.goalSources); // room folders
     this.workspaces = new TaskWorkspaces({ dataDir: opts.dataDir, git: opts.gitBin, onSecurity: (action, detail) => store.audit("hub", action, detail) }); // 1.1: git config restored, hard links left out
     this.control = opts.control; // 1.9
     // 1.9 x 1.4: each task's worktree gets its agent's context file, built from the control folder's layers,
@@ -503,7 +507,10 @@ export class Orchestrator {
       void (async () => { for (const a of tagged) await this.lane(a.id, () => this.reply(roomId, a, { from: "owner", text, hop: 0 })); })();
       return msg;
     }
-    void this.runGoal(roomId, body, { folderGrantId: opts.folderGrantId });
+    // Room folders: no folder named = the room's default (if it still works); "" = no folder for this one.
+    const folder = this.roomFolders.resolve(roomId, opts.folderGrantId);
+    if (folder.notice) this.post(roomId, SYS, folder.notice, "system");
+    void this.runGoal(roomId, body, { folderGrantId: folder.grantId });
     return msg;
   }
 

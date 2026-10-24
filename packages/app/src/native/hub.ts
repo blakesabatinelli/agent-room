@@ -4,7 +4,7 @@ type Launcher = {
   ensureRunning(): Promise<{ started: boolean; log: string }>;
   startAtLoginEnabled(): Promise<boolean>;
   setStartAtLogin(enabled: boolean): Promise<boolean>;
-  /** 1.1: the Mac's folder chooser. Resolves to the chosen path, or null if cancelled. Not built into the native module yet, so the app checks for it. */
+  /** 1.1: the Mac's folder chooser. Resolves to the chosen path, or null if cancelled. Built into the native module (HubLauncher.m); older builds lack it, so the app checks for it. */
   chooseFolder?(): Promise<string | null>;
   /** 1.2: the hub's local pairing secret, read from ~/.agent-room/local-pair.secret. Resolves to null when the file is missing, unreadable or not private to this user. */
   localPairSecret?(): Promise<string | null>;

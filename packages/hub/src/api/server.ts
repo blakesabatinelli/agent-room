@@ -373,8 +373,12 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   app.put("/rooms/:id", async (req, reply) => {
     const r = store.getRoom((req.params as { id: string }).id);
     if (!r) return reply.code(404).send({ error: "Room not found." });
-    const b = z.object({ name: z.string().min(1).max(80).optional(), topic: z.string().max(250).optional() }).parse(req.body);
-    const next = { ...r, ...b }; store.saveRoom(next); return next;
+    const { folderGrantId, ...b } = z.object({ name: z.string().min(1).max(80).optional(), topic: z.string().max(250).optional(), folderGrantId: z.string().max(80).nullable().optional() }).parse(req.body);
+    if (folderGrantId !== undefined) { // room folders: set the room's default folder, or clear it with null; a refusal changes nothing
+      const f = orch.roomFolders.set(r.id, folderGrantId || null);
+      if (!f.ok) return reply.code(f.status).send({ error: f.reason });
+    }
+    const next = { ...(store.getRoom(r.id) ?? r), ...b }; store.saveRoom(next); return next;
   });
   app.delete("/rooms/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -411,7 +415,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     if (!store.getRoom(id)) return reply.code(404).send({ error: "Room not found." });
     const { text, folderGrantId } = z.object({ text: z.string().min(1).max(20000), folderGrantId: z.string().max(80).optional() }).parse(req.body);
     // 1.1: a goal on a granted folder. A grant that can't carry a goal is refused up front, never silently dropped.
-    if (folderGrantId) {
+    if (folderGrantId) { // "" = no folder for this message (room folders); undefined = the room's default
       const u = orch.goalSources.usable(folderGrantId, id);
       if (!u.ok) return reply.code(400).send({ error: u.reason });
     }

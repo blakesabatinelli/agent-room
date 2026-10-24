@@ -2029,3 +2029,7 @@ export interface TwoKeyRecord {
   approvalId?: string;
   decidedAt?: number;
 }
+
+// ---- Room folders
+/** A room's default folder: the id of a folder grant (readable, open to every agent, for this room or every room). New goals work on it unless the message says otherwise ("" = no folder). */
+export interface Room { folderGrantId?: string }

@@ -57,14 +57,16 @@ export class Hub {
 
   rooms = () => this.req<Room[]>("/rooms");
   createRoom = (name: string, topic?: string) => this.send<Room>("POST", "/rooms", { name, topic });
-  updateRoom = (id: string, patch: { name?: string; topic?: string }) => this.send<Room>("PUT", `/rooms/${id}`, patch);
+  /** `folderGrantId`: the room's default folder; null clears it. */
+  updateRoom = (id: string, patch: { name?: string; topic?: string; folderGrantId?: string | null }) => this.send<Room>("PUT", `/rooms/${id}`, patch);
   deleteRoom = (id: string) => this.send("DELETE", `/rooms/${id}`);
   dm = (agentId: string) => this.send<Room>("POST", `/rooms/dm/${agentId}`);
   readMark = (roomId: string) => this.req<{ at: number }>(`/rooms/${roomId}/read`);
   markRead = (roomId: string, at: number) => this.send<{ at: number }>("PUT", `/rooms/${roomId}/read`, { at });
   messages = (roomId: string, since = 0) => this.req<Message[]>(`/rooms/${roomId}/messages?since=${since}`);
   /** `folderGrantId` starts the goal on a granted folder (1.1); the hub answers 400 with the reason when that folder can't carry a goal. */
-  post = (roomId: string, text: string, folderGrantId?: string) => this.send("POST", `/rooms/${roomId}/messages`, folderGrantId ? { text, folderGrantId } : { text });
+  /** `folderGrantId`: undefined = the room's default folder, "" = no folder for this message, an id = that folder. */
+  post = (roomId: string, text: string, folderGrantId?: string) => this.send("POST", `/rooms/${roomId}/messages`, folderGrantId !== undefined ? { text, folderGrantId } : { text });
   pause = (roomId: string, paused: boolean) => this.send("POST", `/rooms/${roomId}/pause`, { paused });
   stop = (roomId: string) => this.send("POST", `/rooms/${roomId}/stop`);
   goals = (roomId: string) => this.req<Goal[]>(`/rooms/${roomId}/goals`);

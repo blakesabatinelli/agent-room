@@ -12,6 +12,8 @@ Agents do not get your whole disk. You grant folders, one at a time, in **Folder
 
 To work on a folder, pick it under **Work in folder** when you write a goal.
 
+**Room folders.** Open a room's settings (the gear) and use **Folders** to add a folder to that room. The first one you add becomes the room's default, and every goal you start in the room works on it unless you pick **No folder** under **Work in folder** for that message. Use **Make default** to switch, and **Remove from room** to take a folder away: a folder added to one room is removed, and a folder shared with every room only stops being this room's default. **Agents can propose changes** turns write on for the folder you add; it is off by default. On your phone, room info shows the same list. Add folders from the Mac app, because the folder is on the Mac. If a default folder stops working (for example it was changed to one agent), the room says so and starts the goal with no folder.
+
 - **Git repositories:** the work goes on a separate branch named `agent-room/<goal>`. Your own checkout is never touched.
 - **Other folders:** each task's changes come back to you as one approval with every file's full change shown.
 - **Read-only folders:** nothing is written back.

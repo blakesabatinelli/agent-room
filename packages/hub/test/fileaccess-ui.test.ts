@@ -411,7 +411,7 @@ test("Mac app: Folders is in the sidebar and the page map, approvals use the ful
   assert.match(read("App.tsx"), /folders: <FoldersScreen/);
   const client = read("api/client.ts");
   for (const m of ['"/folder-grants"', "`/folder-grants/${", '"/folder-grants/check"', '"PUT", `/folder-grants/${', '"/write-proposals"', "`/write-proposals/${"]) assert.ok(client.includes(m), `client calls ${m}`);
-  assert.match(client, /folderGrantId \? \{ text, folderGrantId \}/, "a goal can start on a folder");
+  assert.match(client, /folderGrantId !== undefined \? \{ text, folderGrantId \}/, "a goal can start on a folder (\"\" = no folder, nothing = the room's default)");
   const approvals = read("screens/ApprovalsScreen.tsx");
   assert.match(approvals, /fetchProposalForApproval/, "one proposal by the approval's proposalId, with the guarded fallbacks");
   assert.match(approvals, /isFileWriteApproval/);
@@ -433,7 +433,7 @@ test("Mac app: Folders is in the sidebar and the page map, approvals use the ful
   const room = read("screens/RoomScreen.tsx");
   assert.match(room, /Work in folder/);
   assert.match(room, /g\.agentId === "\*" && g\.read && \(!g\.roomId \|\| g\.roomId === roomId\)/);
-  assert.match(room, /hub\.post\(roomId, v, folder\?\.id\)/);
+  assert.match(room, /hub\.post\(roomId, v, folderId\)/, "undefined = the room default, empty = no folder, an id = that folder");
   const agents = read("screens/AgentsScreen.tsx");
   assert.match(agents, /Key hidden\./);
   assert.match(agents, /conn\.tokenHidden/);

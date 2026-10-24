@@ -4,6 +4,7 @@ import { Pressable, ScrollView, Text, View } from "react-native";
 import type { RoomDefinition } from "@agent-room/shared";
 import { useRoom } from "../state/store";
 import { Avatar, Button, Field, IconButton } from "./ui";
+import { RoomFolders } from "./RoomFolders"; // room folders
 import { radius, space, type as t, usePalette } from "../theme";
 
 const when = (ms?: number, zone?: string) => {
@@ -130,14 +131,16 @@ export function RoomSettings({ roomId, onClose }: { roomId: string; onClose: () 
               )) : <Text style={[t.small, { color: p.muted }]}>Nothing narrowed. Each agent has the tools it usually has.</Text>}
             </View>
 
+            <RoomFolders roomId={roomId} />
+
             <View style={{ gap: space(1.5) }}>
-              {h("Folders")}
+              {h("Folders ROOM.md allows")}
               {def.folders.length ? def.folders.map((f) => (
                 <View key={f.id} style={{ gap: 1 }}>
                   <Text style={[t.small, { color: f.missing ? p.danger : p.ink }]}>{f.label ?? f.id}{f.missing ? " (not granted)" : ""}</Text>
                   {f.path ? <Text selectable style={[t.tiny, { color: p.muted, fontFamily: "Menlo" }]}>{f.path}</Text> : null}
                 </View>
-              )) : <Text style={[t.small, { color: p.muted }]}>Any folder you have granted for this room.</Text>}
+              )) : <Text style={[t.small, { color: p.muted }]}>No limit. Any folder you have granted for this room.</Text>}
             </View>
 
             <View style={{ gap: space(2) }}>

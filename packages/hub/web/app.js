@@ -22,13 +22,13 @@
     grants: null, proposals: null, proposalsErr: "", reviewId: "", full: {}, fullErr: {}, fullLoading: {},
     gform: { path: "", label: "", roomId: "", agentId: "*", read: true, write: false, err: "", busy: false, override: null },
     // a goal can work in a granted folder: the grants this room can use, the one picked, and whether the picker is open
-    roomGrants: [], folderId: "", folderOpen: false,
+    roomGrants: [], folderId: null /* null = the room's default folder, "" = no folder, an id = that folder */, folderOpen: false,
     // 3.2 personas: the starter templates, the agent being edited and its form
     personas: { templates: [], id: "", form: null, err: "", busy: false },
     // 3.3 tasks: the room's tasks (helpers included), shown as a tree from the room header (`tasks` above is the room's tasks by id, for the goal card)
     taskList: [], taskRoom: "",
     // 4.3 standing rooms: the read-only room info (what ROOM.md says)
-    info: { roomId: "", def: null, err: "" },
+    info: { roomId: "", def: null, err: "", grants: null },
     // 4.4 forks: the fork on screen, its tab, a merge waiting for a second tap, and the diffs left open
     fork: { id: "", roomId: "", v: null, err: "", tab: "a", confirm: "", busy: false, open: {} },
   };
@@ -176,6 +176,8 @@
         const i = st.rooms.findIndex((r) => r.id === e.room.id);
         if (i >= 0) st.rooms[i] = e.room; else st.rooms.push(e.room);
         if (st.view === "rooms") renderRooms();
+        else if (st.view === "room") renderFolderPick(); // the room's default folder may have changed on the Mac
+        else if (st.view === "roominfo" && st.info.roomId === e.room.id) renderRoomInfo();
         break;
       }
       case "room_deleted":
@@ -246,7 +248,7 @@
   function go(view, roomId) {
     st.view = view;
     $("#jumpNew").hidden = true;
-    if (view === "room") { st.roomId = roomId; st.messages = []; st.goals = {}; st.tasks = {}; st.readAt = 0; st.positioned = ""; st.unread.delete(roomId); st.roomGrants = []; st.folderId = ""; st.folderOpen = false; }
+    if (view === "room") { st.roomId = roomId; st.messages = []; st.goals = {}; st.tasks = {}; st.readAt = 0; st.positioned = ""; st.unread.delete(roomId); st.roomGrants = []; st.folderId = null; st.folderOpen = false; }
     else st.roomId = "";
     render();
     if (view === "room") loadRoom(roomId).catch((e) => { if (e.message !== "unpaired") toast(e.message); });
@@ -482,7 +484,7 @@
   // 4.3 Room info: what the room's ROOM.md says. Read only here; the roster and schedule are edited on the Mac.
   async function openRoomInfo() {
     const roomId = st.roomId; if (!roomId) return;
-    Object.assign(st.info, { roomId, def: null, err: "" });
+    Object.assign(st.info, { roomId, def: null, err: "", grants: null });
     go("roominfo");
     try {
       const def = await api(`/rooms/${encodeURIComponent(roomId)}/definition`);
@@ -490,6 +492,35 @@
       st.info.def = def;
     } catch (e) { if (e.message === "unpaired") return; st.info.err = e.message; }
     if (st.view === "roominfo") renderRoomInfo();
+    await loadRoomFolders();
+  }
+
+  // Room folders: this room's own folders and the ones open to every room. The default is the room's folderGrantId.
+  async function loadRoomFolders() {
+    const roomId = st.info.roomId;
+    try {
+      const gs = await api(`/folder-grants?roomId=${encodeURIComponent(roomId)}`);
+      if (st.info.roomId !== roomId) return;
+      st.info.grants = gs;
+    } catch (e) { if (e.message === "unpaired") return; st.info.grants = st.info.grants || []; toast(`Can't load folders: ${e.message}`); }
+    if (st.view === "roominfo") renderRoomInfo();
+  }
+  async function roomFolderAction(btn) {
+    const roomId = st.info.roomId, id = btn.dataset.rfDefault || btn.dataset.rfRemove;
+    const g = (st.info.grants || []).find((x) => x.id === id); if (!g) return;
+    const room = st.rooms.find((r) => r.id === roomId);
+    const isDefault = !!room && room.folderGrantId === g.id;
+    if (btn.dataset.rfRemove && g.roomId === roomId && !confirm(`Remove ${g.label || g.path}? Agents lose access to it right away.`)) return;
+    btn.disabled = true;
+    try {
+      const putRoom = (folderGrantId) => api(`/rooms/${encodeURIComponent(roomId)}`, { method: "PUT", body: { folderGrantId } });
+      let fresh = null;
+      if (btn.dataset.rfDefault) fresh = await putRoom(g.id);
+      else if (g.roomId === roomId) await api(`/folder-grants/${encodeURIComponent(g.id)}`, { method: "DELETE" }); // this room's own grant is gone for everyone; the hub clears the default
+      else if (isDefault) fresh = await putRoom(null); // an all-rooms grant stays; only the default clears
+      if (fresh && fresh.id) { const i = st.rooms.findIndex((r) => r.id === fresh.id); if (i >= 0) st.rooms[i] = fresh; }
+      await loadRoomFolders();
+    } catch (e) { btn.disabled = false; if (e.message !== "unpaired") toast(e.message); }
   }
 
   function renderRoomInfo() {
@@ -509,7 +540,21 @@
       card("Tools in this room",
         ...(def.tools.length ? def.tools.map((x) => line(`${x.label}: ${x.level === "off" ? "off" : "asks first"}`, x.level === "off" ? "warn" : "")) : [line("Nothing narrowed. Each agent has the tools it usually has.")])),
       card("Folders",
-        ...(def.folders.length ? def.folders.map((f) => line(`${f.label || f.id}${f.missing ? " (not granted)" : ""}${f.path ? `\n${f.path}` : ""}`, f.missing ? "warn" : "")) : [line("Any folder you have granted for this room.")])),
+        line("Agents work on a copy of the room's default folder. Writes always come to you as changes to approve."),
+        ...(st.info.grants === null ? [line("Loading…")] : st.info.grants.length ? st.info.grants.map((g) => {
+          const isDefault = st.rooms.some((r) => r.id === st.info.roomId && r.folderGrantId === g.id);
+          const usable = g.agentId === "*" && g.read, own = g.roomId === st.info.roomId;
+          return h("div", { class: "rfolder" },
+            h("div", { class: "rfname", text: `${g.label || g.path.split("/").filter(Boolean).pop() || g.path}${isDefault ? " (default)" : ""}` }),
+            h("div", { class: "detail", text: g.path }),
+            h("div", { class: `detail${usable ? "" : " warn"}`, text: g.agentId !== "*" ? "Open to one agent only, so a goal can't start on it." : !g.read ? "Not readable, so a goal can't start on it." : `${g.write ? "Agents can propose changes" : "Read only"} · ${own ? "This room only" : "Every room"}` }),
+            h("div", { class: "actions pad" },
+              !isDefault && usable ? h("button", { class: "btn small plain", type: "button", "data-rf-default": g.id, text: "Make default" }) : null,
+              own || isDefault ? h("button", { class: "btn small plain", type: "button", "data-rf-remove": g.id, text: "Remove from room" }) : null));
+        }) : [line("No folders for this room yet.")]),
+        line("Add folders from the Mac app.")),
+      card("Folders ROOM.md allows",
+        ...(def.folders.length ? def.folders.map((f) => line(`${f.label || f.id}${f.missing ? " (not granted)" : ""}${f.path ? `\n${f.path}` : ""}`, f.missing ? "warn" : "")) : [line("No limit. Any folder you have granted for this room.")])),
       card("Schedule",
         ...(sc ? [
           line(sc.active ? (sc.nextRun ? `Next run ${zoned(sc.nextRun)}` : "No run coming up") : `Off: ${sc.problem || "check the schedule"}`, sc.active ? "" : "warn"),
@@ -1217,14 +1262,15 @@
     host.hidden = !show;
     if (!show) { host.replaceChildren(); return; }
     const name = (g) => g.label || g.path.split("/").filter(Boolean).pop() || g.path;
-    const sel = st.roomGrants.find((g) => g.id === st.folderId);
-    if (st.folderId && !sel) st.folderId = "";
+    if (st.folderId && !st.roomGrants.some((g) => g.id === st.folderId)) st.folderId = null; // the folder picked is gone: back to the default
+    const pickedId = st.folderId !== null ? st.folderId : room.folderGrantId || "";
+    const sel = st.roomGrants.find((g) => g.id === pickedId);
     const chip = (props, text, on) => h("button", { class: `fchip${on ? " on" : ""}`, type: "button", ...props, text });
     host.replaceChildren(
-      chip({ "data-folder-toggle": "1", "aria-expanded": st.folderOpen ? "true" : "false" }, sel ? `In folder: ${name(sel)}` : "Work in folder", !!sel),
+      chip({ "data-folder-toggle": "1", "aria-expanded": st.folderOpen ? "true" : "false" }, sel ? `In folder: ${name(sel)}` : st.folderId === "" && room.folderGrantId ? "No folder this time" : "Work in folder", !!sel),
       ...(st.folderOpen ? [h("div", { class: "fopts" },
         h("div", { class: "fnote", text: `Agents work on a copy.${sel ? (sel.write ? " What they change comes back to you to approve." : " It is read only, so nothing is written back.") : ""}` }),
-        h("div", { class: "frow" }, chip({ "data-folder": "" }, "No folder", !sel), ...st.roomGrants.map((g) => chip({ "data-folder": g.id, role: "radio", "aria-checked": g.id === st.folderId ? "true" : "false" }, `${name(g)}${g.write ? "" : " (read only)"}`, g.id === st.folderId))))] : []));
+        h("div", { class: "frow" }, chip({ "data-folder": "" }, "No folder", !sel), ...st.roomGrants.map((g) => chip({ "data-folder": g.id, role: "radio", "aria-checked": g.id === pickedId ? "true" : "false" }, `${name(g)}${g.write ? "" : " (read only)"}`, g.id === pickedId))))] : []));
   }
 
   // Colors go on through the DOM, not inline style attributes, so the page's CSP can forbid inline styles.
@@ -1237,8 +1283,8 @@
     $("#sendBtn").disabled = true;
     try {
       // 1.1: the picked folder goes with the message. A folder the hub refuses comes back as a 400 with its reason, shown as is.
-      await api(`/rooms/${st.roomId}/messages`, { method: "POST", body: st.folderId && !text.startsWith("/") ? { text, folderGrantId: st.folderId } : { text } });
-      $("#input").value = ""; grow(); renderPalette(); st.folderId = ""; st.folderOpen = false; renderFolderPick();
+      await api(`/rooms/${st.roomId}/messages`, { method: "POST", body: st.folderId !== null && !text.startsWith("/") ? { text, folderGrantId: st.folderId } : { text } }); // null = the room's default, "" = no folder
+      $("#input").value = ""; grow(); renderPalette(); st.folderId = null; st.folderOpen = false; renderFolderPick();
     }
     catch (e) { if (e.message !== "unpaired") toast(e.message); }
     finally { $("#sendBtn").disabled = false; }
@@ -1353,6 +1399,7 @@
       if (t.dataset.review) { st.reviewId = t.dataset.review; go("diff"); return; }
       if (t.dataset.reload === "proposals") { triedProposals.clear(); st.fullErr = {}; if (st.view === "approvals") renderApprovals(); else renderReview(); return; }
       if (t.dataset.grantRemove) { await removeGrant(t); return; }
+      if (t.dataset.rfDefault || t.dataset.rfRemove) { await roomFolderAction(t); return; }
       if (t.dataset.folderToggle) { st.folderOpen = !st.folderOpen; renderFolderPick(); return; }
       if (t.dataset.folder !== undefined) { st.folderId = t.dataset.folder; st.folderOpen = false; renderFolderPick(); return; }
       if (t.dataset.gformForce) { void addGrant(true); return; }

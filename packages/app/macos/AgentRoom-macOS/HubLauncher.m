@@ -192,6 +192,22 @@ RCT_EXPORT_METHOD(localPairSecret:(RCTPromiseResolveBlock)resolve rejecter:(RCTP
   resolve(secret ?: [NSNull null]);
 }
 
+// 1.1: the Mac's folder chooser (room folders, Folders screen). Resolves to the chosen folder's path, or null if the owner cancels.
+// The panel must run on the main queue; the path is handed to the hub, which checks it (protected folders are refused there).
+RCT_EXPORT_METHOD(chooseFolder:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseDirectories = YES;
+    panel.canChooseFiles = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.canCreateDirectories = YES;
+    panel.prompt = @"Choose";
+    [NSApp activateIgnoringOtherApps:YES];
+    if ([panel runModal] == NSModalResponseOK && panel.URL.path.length > 0) resolve(panel.URL.path);
+    else resolve([NSNull null]);
+  });
+}
+
 // 4.7: Sparkle. True only in a build that links it (the release build); the app shows "Check for updates" only then.
 RCT_EXPORT_METHOD(updaterAvailable:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   resolve(@(NSClassFromString(@"SPUStandardUpdaterController") != nil && [NSApp.delegate respondsToSelector:NSSelectorFromString(@"checkForUpdates:")]));

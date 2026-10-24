@@ -92,21 +92,23 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
   // Seeing the room marks it read up to the newest message, on every paired device.
   const newest = messages.at(-1)?.createdAt ?? 0;
   useEffect(() => { if (ready && roomId && newest) void hub?.markRead(roomId, newest).catch(() => {}); }, [ready, roomId, newest]);
-  useEffect(() => { setText(""); setDetails(false); setSettings(false); setForkId(undefined); setFolderId(""); setPickOpen(false); }, [roomId]);
+  useEffect(() => { setText(""); setDetails(false); setSettings(false); setForkId(undefined); setFolderId(undefined); setPickOpen(false); }, [roomId]);
   useEffect(() => { if (s.composerStamp) input.current?.focus(); }, [s.composerStamp]); // 3.1: "Start a goal" in the ⌘K palette
 
   // 1.1: a goal can work in a folder the owner granted. Only grants that can carry a goal are offered: open to every
   // agent, readable, and for this room (or every room). The hub checks again and says why if it refuses.
   const [grants, setGrants] = useState<FolderGrant[]>([]);
-  const [folderId, setFolderId] = useState("");
+  // Room folders: undefined = follow the room's default folder, "" = No folder for this message, an id = that folder.
+  const [folderId, setFolderId] = useState<string | undefined>(undefined);
   const [pickOpen, setPickOpen] = useState(false);
   useEffect(() => {
     let live = true;
     if (!hub || !roomId) { setGrants([]); return; }
     hub.folderGrants().then((all) => { if (live) setGrants(all.filter((g) => g.agentId === "*" && g.read && (!g.roomId || g.roomId === roomId))); }).catch(() => { if (live) setGrants([]); });
     return () => { live = false; };
-  }, [hub, roomId]);
-  const folder = grants.find((g) => g.id === folderId);
+  }, [hub, roomId, room?.folderGrantId, settings]); // read again when the default changes or the settings pane closes
+  const pickedId = folderId ?? room?.folderGrantId ?? "";
+  const folder = grants.find((g) => g.id === pickedId);
   const folderName = (g: FolderGrant) => g.label || g.path.split("/").filter(Boolean).pop() || g.path;
 
   // @mention autocomplete
@@ -150,7 +152,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
     if (cmdSel && cmdSel.name !== cmdQuery) return pickCommand(cmdSel.name);
     const v = text.trim(); if (!v || !hub || !roomId) return;
     setText(""); setHeight(22);
-    try { await hub.post(roomId, v, folder?.id); setFolderId(""); setPickOpen(false); }
+    try { await hub.post(roomId, v, folderId); setFolderId(undefined); setPickOpen(false); }
     catch (e) { s.setError((e as Error).message); setText(v); }   // a refused folder comes back with the hub's reason
   };
   const rate = async (taskId: string, score: number) => {
@@ -308,7 +310,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
               <Text style={[t.tiny, { color: p.muted }]}>Agents work on a copy of the folder.{folder && folder.write ? " What they change comes back to you as a change to approve." : " It is read only, so nothing is written back."}</Text>
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space(1.5) }}>
                 {[{ id: "", name: "No folder" }, ...grants.map((g) => ({ id: g.id, name: `${folderName(g)}${g.write ? "" : " (read only)"}` }))].map((o) => {
-                  const on = o.id === folderId;
+                  const on = o.id === pickedId;
                   return (
                     <Pressable key={o.id || "none"} accessibilityRole="radio" accessibilityState={{ selected: on }} onPress={() => { setFolderId(o.id); setPickOpen(false); }}
                       style={{ paddingHorizontal: space(3), paddingVertical: space(1), borderRadius: 99, borderWidth: 1, borderColor: on ? p.accent : p.lineStrong, backgroundColor: on ? p.tint : "transparent" }}>
@@ -324,7 +326,7 @@ export function RoomScreen({ onBack }: { onBack?: () => void }) {
             {!dmAgent && !steering && !reviewing && grants.length ? (
               <Pressable accessibilityRole="button" accessibilityLabel="Work in folder" accessibilityState={{ expanded: pickOpen }} onPress={() => setPickOpen((o) => !o)}
                 style={{ paddingHorizontal: space(2), paddingVertical: 2, borderRadius: radius.sm, borderWidth: 1, borderColor: folder ? p.accent : p.line, backgroundColor: folder ? p.tint : "transparent" }}>
-                <Text style={[t.tiny, { color: folder ? p.accent : p.muted, fontWeight: folder ? "700" : "400" }]}>{folder ? `In folder: ${folderName(folder)}` : "Work in folder"}</Text>
+                <Text style={[t.tiny, { color: folder ? p.accent : p.muted, fontWeight: folder ? "700" : "400" }]}>{folder ? `In folder: ${folderName(folder)}` : folderId === "" && room?.folderGrantId ? "No folder this time" : "Work in folder"}</Text>
               </Pressable>
             ) : null}
             {steering ? (

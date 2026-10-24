@@ -46,7 +46,7 @@ The DMG carries its own Node and the hub, so there is nothing else to install: n
 
 **Documents.** Agents save documents with the `save_document` MCP tool. Each lands as Markdown with front matter in `~/Agent Room/Library/<room>/<goal>/YYYY-MM-DD-slug.md` and is indexed (`GET /documents`). See `docs/DOCUMENTS.md`.
 
-**Local files (spike).** The owner grants folders per room and per agent (`/folder-grants`); agents read through `read_file` and write only by proposing a diff (`propose_file_write`) that the owner approves. Agents on other tailnet devices (Muse) reach the same tools over Tailscale; vendor-cloud agents can reach `/mcp` only through Tailscale Funnel, which the owner switches on in Settings (1.2; `docs/1.2-remote-access.md`). See `docs/spikes/0.3-file-access.md`.
+**Local files (spike).** The owner grants folders per room and per agent (`/folder-grants`); agents read through `read_file` and write only by proposing a diff (`propose_file_write`) that the owner approves. Agents on other tailnet devices (Muse) reach the same tools over Tailscale; vendor-cloud agents can reach `/mcp` only through Tailscale Funnel, which the owner switches on in Settings (1.2; `docs/1.2-remote-access.md`). A room can also have a default folder (`PUT /rooms/:id` with `folderGrantId`, or null to clear it): goals started in the room use it unless the message sends `folderGrantId: ""` for no folder. See `docs/spikes/0.3-file-access.md`.
 
 **MCP.** The hub serves the room at `POST /mcp` (Streamable HTTP). Tools: `read_room`, `post_message`, `read_memory`, `propose_memory`, `list_tasks`, `update_task`, `request_approval`. CLI agents get a short-lived token per run. For Claude Desktop or another MCP app, use Settings > Let MCP apps join the room on the Mac.
 

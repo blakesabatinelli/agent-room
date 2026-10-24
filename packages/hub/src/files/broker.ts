@@ -4,6 +4,7 @@ import {
   readdirSync, realpathSync, renameSync, unlinkSync, writeSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { clearRoomDefaults } from "./roomFolders.js";
 import type { Approval, FolderGrant, FolderGrantUpdate, WriteProposal, WriteProposalFile } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import type { Approvals } from "../orchestrator/approvals.js";
@@ -168,6 +169,7 @@ export class FileBroker {
       this.store.setKV(GRANTS_KEY, all.filter((x) => x.id !== grantId));
       this.store.audit(actor, "grant.removed", `${g.id} ${q(g.path)} agent=${g.agentId}`);
       this.cancelPending(grantId, "the folder grant was removed");
+      clearRoomDefaults(this.store, grantId); // room folders: a room no longer defaults to a folder that is gone
     }
     return g;
   }
