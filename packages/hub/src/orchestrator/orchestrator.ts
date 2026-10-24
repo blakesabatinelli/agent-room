@@ -16,7 +16,9 @@ import { addUsage, closeRecord, decide, fixedDecision, openRecord, type RouteDec
 import { quotaFor } from "../quota/index.js";
 import { isRateLimit } from "../quota/limits.js";
 import { quotaDecide, quotaLimited } from "../quota/router.js";
-import { addFailure, classifyFailure, parseFailureCategory, type FailureEvidence } from "./failures.js";
+import { addFailure, classifyFailure, isPlacementBlock, parseFailureCategory, type FailureEvidence } from "./failures.js";
+import { WORKSPACE_NEED, needsWorkspace, runsHere, whereText, withWorkspaceNeed } from "../placement/index.js"; // tasks that agents can actually do
+import { relativizeTask } from "../placement/paths.js";
 import { Library, defaultLibraryRoot } from "../library/library.js";
 import { FileBroker } from "../files/broker.js";
 import { GoalSources, branchFor } from "../files/goalSource.js"; // 1.1
@@ -27,7 +29,7 @@ import { restoreTaskContext, writeTaskContext } from "../control/context.js"; //
 import { CapacityGovernor } from "../capacity/governor.js";
 import { detectHardware } from "../capacity/hardware.js";
 import { cleanNeeds } from "../discovery/connectors.js"; // 1.3
-import { needsGate, needsMessage, type NeedsGate } from "../discovery/routing.js"; // 1.3
+import { needsGate, needsMessage, workspaceMessage, type NeedsGate } from "../discovery/routing.js"; // 1.3
 import { juryLine, jurySummary, recordOwnerRating, review as juryReview, type JuryHost } from "../jury/index.js"; // 2.2
 import { loadCommandIndex, plannerCommands } from "../commands/index.js"; // 2.6
 import { buildInvocation, parseCommand, unknownReply, type Invocation } from "../commands/invoke.js"; // 2.6
@@ -357,6 +359,9 @@ export class Orchestrator {
     const roles = new Set(["explorer", "researcher", "worker", "reviewer"]);
     const reqIds = new Set((this.store.getGoal(goal.id)?.contract?.requirements ?? []).map((r) => r.id));
     const keyToId = new Map(raw.map((r) => [r.key, id("task")]));
+    // An agent writes only inside its task folder: a task still told to write to /tmp or another absolute path (the planner didn't fix it when asked) is rewritten to a relative one.
+    const rewritten = raw.flatMap((r) => relativizeTask(r, goalFolder(this.opts.dataDir, goal.id)));
+    if (rewritten.length) this.log(goal.roomId, `Agents can only write inside their task folder, so ${[...new Set(rewritten.map((x) => `${x.from} became ${x.to}`))].slice(0, 3).join(", ")} in the plan.`);
     return raw.map((r) => {
       const criteria = normaliseCriteria(r.criteria, r.acceptance ?? "");
       const deps = (r.dependsOn ?? []).map((k) => keyToId.get(k)).filter(Boolean) as string[];
@@ -368,7 +373,7 @@ export class Orchestrator {
         role: (r.role && roles.has(r.role) ? r.role : "worker") as Role,
         files: (r.files ?? []).filter((f) => typeof f === "string" && f.trim()).map((f) => f.trim()),
         output: r.output?.trim() || undefined,
-        needs: cleanNeeds(r.needs), // 1.3: data sources this task needs; routing only considers agents that have them
+        needs: withWorkspaceNeed(cleanNeeds(r.needs), { workspace: r.workspace, files: r.files, criteria: r.criteria, output: r.output, taskType: r.taskType }), // 1.3: data sources this task needs; routing only considers agents that have them. "workspace": it works on the task folder, so only agents that run on this Mac get it
         covers: (r.covers ?? []).filter((c) => reqIds.has(c)),
         origin,
         dependsOn: deps.length ? deps : extraDeps,
@@ -984,15 +989,19 @@ export class Orchestrator {
     const agentIds = new Set(agents.map((a) => a.id));
     const reqsOf = (pl: Plan | null) => normaliseRequirements(pl?.contract?.requirements, pl?.contract?.deliverables ?? [], pl?.contract?.objective || text);
     // Check the plan before anyone works on it; hand problems back to the planner once.
-    let problems = validatePlan(raw, reqsOf(current), agentIds);
+    const gf = goalFolder(this.opts.dataDir, goal.id);
+    let problems = validatePlan(raw, reqsOf(current), agentIds, { goalFolder: gf });
     if (problems.length && current?.tasks?.length) {
       this.log(roomId, `Plan needs fixing before work starts: ${problems.join(" ")}`);
       this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", label: "planning", active: true });
       const fixed = await this.callJson<Plan>(planPrompt(text + folderNote, agents, this.store.listShared(roomId), notes, this.conversation(roomId), [], orch.name, problems, JSON.stringify(current), plannerCommands(loadCommandIndex(this.store), agents.map((a) => a.id), text), planNotes(this.store, this.resumes, agents, ready)), orch, signal); // 2.6, 2.3
       this.store.emit("event", { type: "working", roomId, agentId: "orchestrator", active: false });
       if (signal.aborted) return;
-      if (fixed?.tasks?.length) { current = fixed; raw = fixed.tasks; problems = validatePlan(raw, reqsOf(current), agentIds); }
+      if (fixed?.tasks?.length) { current = fixed; raw = fixed.tasks; problems = validatePlan(raw, reqsOf(current), agentIds, { goalFolder: gf }); }
     }
+    // A task that works on the task folder can't be owned by an agent that runs on another machine: routing would skip the owner anyway, so say "best available".
+    const away = new Set(agents.filter((a) => !runsHere(a)).map((a) => a.id));
+    for (const t of raw) if (t.owner && away.has(t.owner) && needsWorkspace({ needs: withWorkspaceNeed(cleanNeeds(t.needs), { workspace: t.workspace, files: t.files, criteria: t.criteria, output: t.output, taskType: t.taskType }) })) t.owner = undefined;
     const requirements = reqsOf(current);
     // Whatever is still wrong gets a safe mechanical repair instead of a dropped task or a stuck goal.
     if (raw.length > MAX_TASKS) raw = raw.slice(0, MAX_TASKS);
@@ -1238,12 +1247,44 @@ export class Orchestrator {
   }
 
   /**
+   * The accepted tasks (done) that already deliver every one of these requirements, or undefined when any is not covered, is unknown, or was
+   * marked unmet by the whole-goal check. "Already met" is what stops a replacement or a parallel task from redoing finished work.
+   */
+  private acceptedCover(goalId: string, covers: string[] | undefined, except: Set<string> = new Set()): Task[] | undefined {
+    if (!covers?.length) return undefined;
+    const reqs = this.store.getGoal(goalId)?.contract?.requirements ?? [];
+    const done = this.store.listTasks({ goalId }).filter((t) => t.status === "done" && !except.has(t.id));
+    const by: Task[] = [];
+    for (const c of covers) {
+      const req = reqs.find((x) => x.id === c);
+      const t = req && req.status !== "unmet" ? done.find((x) => x.covers?.includes(c)) : undefined;
+      if (!t) return undefined;
+      by.push(t);
+    }
+    return [...new Set(by)];
+  }
+
+  /**
    * Route around a dead end: replacement tasks for the stuck ones, keeping finished work.
    * Bounded by maxGoalReplans; past that, or if the planner says only the owner can decide, ask the owner.
    * Returns false when the goal is now waiting on the owner.
    */
   private async recoverGoal(goal: Goal, stuck: Task[], why: string, signal: AbortSignal): Promise<boolean> {
     const cfg = this.cfg();
+    // Don't redo finished work: every requirement the stuck tasks were meant to deliver is already met by an accepted task, so nothing replaces them.
+    const stuckSet = new Set(stuck.map((t) => t.id));
+    const covered = stuck.map((t) => this.acceptedCover(goal.id, t.covers, stuckSet));
+    if (stuck.length && covered.every(Boolean)) {
+      for (const t of stuck) {
+        if (OPEN(t)) { this.taskRuns.get(t.id)?.ctrl.abort(); t.status = "cancelled"; }
+        t.recovered = true; this.store.saveTask(t);
+        await this.discardWorktree(goal, t);
+      }
+      this.progress(goal.id, (x) => { x.stall = 0; });
+      this.log(goal.roomId, `Not replacing ${stuck.map((t) => `"${t.title}"`).join(", ")}: ${[...new Set(stuck.flatMap((t) => t.covers ?? []))].join(", ")} already met by ${[...new Set(covered.flatMap((c) => c!.map((t) => `"${t.title}"`)))].join(", ")}.`);
+      this.checkpoint(goal.id, { decision: `No replacement for ${stuck.map((t) => `"${t.title}"`).join(", ")}: already met by accepted work.` });
+      return true;
+    }
     const p = this.progress(goal.id);
     const unmet = () => {
       const covers = [...new Set(stuck.flatMap((t) => t.covers ?? []))];
@@ -1263,7 +1304,7 @@ export class Orchestrator {
     if (signal.aborted) return false;
     this.progress(goal.id, (x) => { x.goalReplans += 1; x.stall = 0; });
     if (r?.action === "ask_owner" && r.question) { this.waitForOwner(goal.id, r.question); return false; }
-    const raw = (r?.tasks ?? []).slice(0, 4);
+    let raw = (r?.tasks ?? []).slice(0, 4);
     // Live tasks still waiting on a stuck one move to the replacements.
     for (const t of stuck) {
       if (OPEN(t)) { this.taskRuns.get(t.id)?.ctrl.abort(); t.status = "cancelled"; }
@@ -1283,6 +1324,13 @@ export class Orchestrator {
     }
     // Replacements inherit what the stuck tasks delivered and what they depended on.
     for (const t of raw) if (!t.covers?.length) t.covers = [...new Set(stuck.flatMap((x) => x.covers ?? []))];
+    // A replacement for requirements an accepted task already meets is work nobody needs.
+    const dup = raw.filter((t) => this.acceptedCover(goal.id, t.covers, stuckSet));
+    if (dup.length) {
+      raw = raw.filter((t) => !dup.includes(t));
+      this.log(goal.roomId, `Skipped ${dup.map((t) => `"${t.title ?? "a replacement task"}"`).join(", ")}: the requirements it covered are already met by accepted work.`);
+      if (!raw.length) { this.checkpoint(goal.id, { decision: "Recovery skipped: replacement work was already done." }); return true; }
+    }
     repairDeps(raw);
     const doneIds = new Set(this.store.listTasks({ goalId: goal.id }).filter((t) => t.status === "done").map((t) => t.id));
     const inherited = [...new Set(stuck.flatMap((t) => t.dependsOn).filter((d) => doneIds.has(d)))];
@@ -1362,6 +1410,13 @@ export class Orchestrator {
       this.log(goal.roomId, `Final check: all ${reqs.length} requirements met.`);
       return false;
     }
+    // A gap for requirements an accepted task already meets (and the whole-goal check didn't mark unmet) is work nobody needs.
+    const redo = gaps.filter((t) => this.acceptedCover(goal.id, t.covers));
+    if (redo.length) {
+      gaps = gaps.filter((t) => !redo.includes(t));
+      this.log(goal.roomId, `Skipped ${redo.map((t) => `"${t.title ?? "a fix"}"`).join(", ")}: already met by accepted work.`);
+      if (!gaps.length) return false;
+    }
     gaps.forEach((t, i) => { t.key ||= `gap${i}`; t.dependsOn = []; });
     const added = this.buildTasks(goal, gaps, agents, "verify");
     added.forEach((t) => this.store.saveTask(t));
@@ -1403,14 +1458,29 @@ export class Orchestrator {
     const waiting = enabled.filter((a) => live.has(a.id) && !barred.has(a.id) && !free(a) && !tried.includes(a.id)); // busy, but with quota: worth waiting for if every idle agent is limited
     route ??= quotaDecide(this.store, idle, t.taskType, s.explorationRate, tried, this.opts.rand, waiting)
            ?? quotaDecide(this.store, idle, t.taskType, s.explorationRate, [], this.opts.rand, waiting);
-    if (!route) return undefined;
+    if (!route) { this.holdForWorkspace(t, gate, enabled, live); return undefined; }
     agent = route.agent;
     // 0.2: every pick is logged with each candidate's probability, before the work starts.
     t.routingId = openRecord(this.store, route, t, goalText).id;
-    if (gate) closeRecord(this.store, t.routingId, { needs: gate.needs, needsFilteredOut: gate.filteredOut }); // 1.3: who was left out for lacking the source
+    if (gate && (gate.needs.some((n) => n !== WORKSPACE_NEED) || gate.filteredOut.length)) closeRecord(this.store, t.routingId, { needs: gate.needs, needsFilteredOut: gate.filteredOut }); // 1.3: who was left out for lacking the source (or for not running on this Mac)
     this.busy.add(agent.id);
     this.governor.start(t.id, agent); // 1.5: released in drive() when the task ends
     return agent;
+  }
+
+  /**
+   * A task that works on the task folder, and every agent that runs on this Mac is off, signed out or still the only one that could take it.
+   * Say so once in the room instead of waiting in silence (or handing it to an agent that runs elsewhere). Kept in the task's history, so a restart doesn't repeat it.
+   */
+  private holdForWorkspace(t: Task, gate: NeedsGate | undefined, agents: AgentConfig[], live: Set<string>) {
+    if (!gate?.needs.includes(WORKSPACE_NEED) || gate.nobody.includes(WORKSPACE_NEED)) return; // nobody enabled: holdForNeeds already said so
+    const here = agents.filter((a) => runsHere(a) && gate.ok.has(a.id));
+    if (here.some((a) => live.has(a.id))) return; // one is just busy: the task waits its turn
+    const note = "Waiting for an agent that runs on this Mac.";
+    if ((t.history ?? []).some((h) => h.outcome === "blocked" && h.agentId === "hub" && h.note === note)) return;
+    this.addHistory(t, "hub", "blocked", note);
+    this.store.saveTask(t);
+    this.post(t.roomId, SYS, workspaceMessage(t.title, agents.filter((a) => !runsHere(a)), "unavailable"), "system", t.id);
   }
 
   /** 1.3: no agent can reach what this task needs. Tell the owner once (kept in the task's history, so a restart doesn't repeat it) and leave the task waiting; it starts by itself once an agent has the source. */
@@ -1575,7 +1645,7 @@ export class Orchestrator {
     const deps = this.store.listTasks({ goalId: goal.id }).filter((t) => task.dependsOn.includes(t.id));
     const notes = this.ownerNotes.get(goal.id) ?? [];
     const before = snapshot(work);
-    const prompt = withPersona(taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.rooms.privateFor(agent.id, goal.roomId), notes, this.enabledAgents(goal.roomId), agent.id, feedback, /* 4.3 */ { path: work, files: [...before.keys()], ledger: join(folder, "LEDGER.md"), note: this.goalSources.note(fresh) /* 1.1 */ }, this.ledgerText(fresh), this.decisionsFor(fresh), learnedBlock(this.store, this.control, agent, task.taskType) /* 2.1 */), this.store, this.control, agent, "task"); // 3.2: persona last, voice only
+    const prompt = withPersona(taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.rooms.privateFor(agent.id, goal.roomId), notes, this.enabledAgents(goal.roomId), agent.id, feedback, /* 4.3 */ runsHere(agent) ? { path: work, files: [...before.keys()], ledger: join(folder, "LEDGER.md"), note: this.goalSources.note(fresh) /* 1.1 */ } : undefined /* an agent on another machine has no task folder: text-only work */, this.ledgerText(fresh), this.decisionsFor(fresh), learnedBlock(this.store, this.control, agent, task.taskType) /* 2.1 */), this.store, this.control, agent, "task"); // 3.2: persona last, voice only
     let res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: work });
     let usage: RunUsage | undefined = res.usage, ms = res.durationMs, ranModel = res.model;
     // A rate limit or timeout says nothing about the agent's work: wait and retry, without spending an attempt.
@@ -1632,10 +1702,15 @@ export class Orchestrator {
       this.checkpoint(goal.id, { next: `Waiting on owner for "${task.title}".` });
       return;
     }
-    if (report.status === "blocked") {
-      route("blocked", this.tagFailure(task, agent.id, { kind: "blocked", report }, report.reason ?? "blocked"));
-      this.addHistory(task, agent.id, "blocked", report.reason ?? "blocked");
-      this.log(goal.roomId, `${agent.name} is blocked on "${task.title}": ${report.reason ?? "no reason given"}`, task.id, "task_update");
+    // An agent that says its sandbox or machine can't do this (often without a STATUS block at all) is blocked by where it runs, not by its work.
+    const placement = report.status !== "done" && isPlacementBlock(report.reason, body);
+    if (report.status === "blocked" || (report.status === "missing" && placement)) {
+      const why = report.reason ?? (placement ? firstLine(body) : "blocked");
+      route("blocked", this.tagFailure(task, agent.id, { kind: "blocked", report, text: body }, why));
+      this.addHistory(task, agent.id, "blocked", why);
+      this.log(goal.roomId, placement
+        ? `${agent.name} couldn't do "${task.title}" from where it runs${runsHere(agent) ? "" : ` (${whereText(agent)})`}: ${firstLine(why)}. That is a placement problem, not a quality one; the task moves to another agent.`
+        : `${agent.name} is blocked on "${task.title}": ${report.reason ?? "no reason given"}`, task.id, "task_update");
       return this.retryOrFail(goal, task, agent, "reassign", goalSignal);
     }
 
@@ -1730,7 +1805,7 @@ export class Orchestrator {
     const s = this.cfg();
     const sinceReplan = [...(task.history ?? [])].reverse();
     const cut = sinceReplan.findIndex((h) => h.outcome === "replan");
-    const fails = (cut < 0 ? sinceReplan : sinceReplan.slice(0, cut)).filter((h) => ["fail", "drift", "blocked"].includes(h.outcome)).length;
+    const fails = (cut < 0 ? sinceReplan : sinceReplan.slice(0, cut)).filter((h) => ["fail", "drift", "blocked"].includes(h.outcome) && h.agentId !== "hub").length; // the hub's own "waiting for ..." notes aren't the work failing
     if ((fails >= 2 || looping) && (task.replans ?? 0) < 1 && !signal.aborted && await this.replan(goal, task, signal)) return;
     if (task.attempts >= s.maxAttempts) {
       task.status = "failed"; this.store.saveTask(task);

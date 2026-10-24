@@ -33,6 +33,7 @@ The DMG carries its own Node and the hub, so there is nothing else to install: n
 - *Self-contained tasks.* Each task gets an objective, what it hands back, its boundaries, its inputs, and the decisions everyone follows. Choices an agent makes while working (`DECISIONS:` in its report) are passed to every later task.
 - *A progress ledger.* `LEDGER.md` in the goal folder is rewritten by the orchestrator after every change (agents read it, never edit it) and is restated at the end of every task prompt.
 - *Recovery instead of quiet failure.* Rate limits and timeouts are retried without spending an attempt. The same feedback twice triggers a new approach. A task that fails for good is replaced by another route to its requirements, and if nothing has been accepted for `stallLimit` reviews the stuck part is replanned. After `maxGoalReplans` the goal stops and asks you one question; your reply picks it back up.
+- *Tasks agents can actually do.* An agent writes only inside its task folder, so a plan that tells one to write to `/tmp` or another absolute path goes back to the planner, and a task that works on that folder goes only to an agent that runs on this Mac (an MCP agent counts as here when it connects from loopback; set `location` on the agent to override), while one on another machine, like Muse over Tailscale, gets text-only work. A replacement task is skipped when an accepted task already met its requirements, and an agent that says its sandbox or machine can't do the work is tagged `placement`, not a quality failure.
 - *Done means verified.* When every task passes, every check is re-run (to catch regressions), then a reviewer checks the whole goal against the requirements and the actual files. Gaps become fix tasks, for up to `maxVerifyRounds` rounds. Criteria two reviewers can't verify are flagged for you instead of looping.
 - *Bounded.* Each goal has a budget of `maxTaskRuns`; past it, it pauses and asks.
 
@@ -42,7 +43,7 @@ The DMG carries its own Node and the hub, so there is nothing else to install: n
 
 **Permissions.** Per-agent switches for web, files, shell, Gmail, Slack, Drive and Salesforce. For Claude Code they become `--allowedTools`/`--disallowedTools`, and enabled sensitive tools are routed through the hub's approval tool, so Claude Code pauses until you approve on your phone. Codex maps onto its sandbox modes; because `codex exec` can't pause mid-run, its sensitive actions rely on it calling `request_approval`. Every run, decision and change goes to the audit log.
 
-**Routing log.** Every routing pick is recorded with each candidate's pick probability, epsilon, the model that ran, tokens, cost, seconds, the outcome, the judge's score and, for work sent back, a failure tag (spec, misalignment, verification, other). Export it with `GET /routing/export.jsonl`.
+**Routing log.** Every routing pick is recorded with each candidate's pick probability, epsilon, the model that ran, tokens, cost, seconds, the outcome, the judge's score and, for work sent back, a failure tag (spec, misalignment, verification, placement, other). Export it with `GET /routing/export.jsonl`.
 
 **Documents.** Agents save documents with the `save_document` MCP tool. Each lands as Markdown with front matter in `~/Agent Room/Library/<room>/<goal>/YYYY-MM-DD-slug.md` and is indexed (`GET /documents`). See `docs/DOCUMENTS.md`.
 

@@ -485,11 +485,12 @@ export interface WriteProposal {
 // ---- 0.2 Routing decision log, 0.5 Failure tags
 
 /** Why a task came back: the MAST failure families (spec 42%, misalignment 37%, verification 21%), plus other. */
-export type FailureTag = "spec" | "misalignment" | "verification" | "other";
+export type FailureTag = "spec" | "misalignment" | "verification" | "placement" | "other";
 export const FAILURE_TAGS: { id: FailureTag; label: string; hint: string }[] = [
   { id: "spec", label: "Spec", hint: "The task or goal was unclear, incomplete or contradictory, so the agent blocked, asked, or built the wrong thing." },
   { id: "misalignment", label: "Misalignment", hint: "The agent drifted from its task, went out of scope, or contradicted other agents' work or the room's decisions." },
   { id: "verification", label: "Verification", hint: "The agent called it done when it wasn't: its own checks passed what the reviewer or a command failed, or it skipped checking." },
+  { id: "placement", label: "Placement", hint: "The agent could not do the task from where it runs: its sandbox or machine can't reach the folder or shell the task needs. A placement problem, not a quality one." },
   { id: "other", label: "Other", hint: "Crashes, timeouts, rate limits, or plain quality shortfalls that fit none of the above." },
 ];
 
@@ -2033,3 +2034,14 @@ export interface TwoKeyRecord {
 // ---- Room folders
 /** A room's default folder: the id of a folder grant (readable, open to every agent, for this room or every room). New goals work on it unless the message says otherwise ("" = no folder). */
 export interface Room { folderGrantId?: string }
+
+// ---- Tasks that agents can actually do
+/**
+ * Where an agent runs. `location` is the owner's setting ("here" = this Mac, "elsewhere" = another machine); unset means the hub decides:
+ * claude-code, codex, acp, command, openai-api and mock agents run here, an MCP agent runs here only when its MCP connections come from loopback.
+ * `connectsFrom` is where the hub last saw an MCP agent's connection come from (a Tailscale 100.x address or anything non-loopback = elsewhere).
+ */
+export interface AgentConfig {
+  location?: "here" | "elsewhere";
+  connectsFrom?: { address: string; loopback: boolean; at: number };
+}

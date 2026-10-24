@@ -748,3 +748,25 @@ test("GET /nightshift and the nightShift setting", async () => {
   assert.equal((await fetch(`${base}/nightshift/runs?night=tonight`, { headers: h })).status, 400);
   await app.close();
 });
+
+// ---------------------------------------------------------------- placement: agents that don't run on this Mac
+
+test("placement: a re-run of work on the task folder never goes to an agent that runs elsewhere; text-only work can", async () => {
+  const w = await world();
+  w.store.saveAgent({ ...w.store.getAgent("hermes")!, location: "elsewhere" }); // Hermes is on another machine, like Muse
+  const folderWork = addWork(w, "a", { needs: ["workspace"] }), textWork = addWork(w, "b");
+  w.at(NIGHT1);
+  const { started } = await w.ns.tick();
+  assert.equal(started, 3, "the folder task has one challenger (Codex), the text-only task two");
+  const done = rows(w);
+  assert.deepEqual(done.filter((t) => t.taskId === folderWork.taskId).map((t) => t.challenger.agentId), ["codex"]);
+  assert.deepEqual(done.filter((t) => t.taskId === textWork.taskId).map((t) => t.challenger.agentId).sort(), ["codex", "hermes"]);
+});
+
+test("placement: a task that needs a data source is still skipped by the night shift, the workspace need alone is not", async () => {
+  const w = await world();
+  addWork(w, "a", { needs: ["salesforce", "workspace"] });
+  w.at(NIGHT1);
+  assert.equal((await w.ns.tick()).started, 0);
+  assert.equal(rows(w).length, 0);
+});

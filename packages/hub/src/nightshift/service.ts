@@ -2,6 +2,7 @@ import type { AgentConfig, Goal, Judgment, NightShiftNight, NightShiftSettings, 
 import { attentionFor } from "../attention/index.js";
 import type { Store } from "../db/store.js";
 import { localModelsFor } from "../discovery/usage.js";
+import { WORKSPACE_NEED, needsWorkspace, runsHere } from "../placement/index.js"; // a re-run of folder work goes only to agents on this Mac
 import { resolveModelVersion } from "../orchestrator/versions.js";
 import { recordOutcome } from "../orchestrator/scoring.js";
 import type { GoalRef, TaskWorkspace, TaskWorkspaces } from "../orchestrator/worktree.js";
@@ -205,14 +206,15 @@ export class NightShift {
       const goal = store.getGoal(task.goalId);
       if (!goal) continue;
       if (!GOAL_OVER.has(goal.status)) { skip("goal still active"); continue; }
-      if (task.needs?.length || this.askedApproval(rec, task, now)) { skip("needs approvals or outside tools"); continue; }
+      if (task.needs?.some((n) => n !== WORKSPACE_NEED) || this.askedApproval(rec, task, now)) { skip("needs approvals or outside tools"); continue; }
       const src = getSource(store, task.id);
       if (!src?.baseCommit) { skip("starting state not saved"); continue; }
       if (!(await host.workspaces.hasCommit(host.ref(goal), src.baseCommit))) { skip(src.mode === "granted-git" ? "needs the owner's files" : "starting state gone"); continue; }
 
       const roster = await ready(task.roomId), everyone = await ready();
       const taken = done.get(task.id) ?? new Set<string>();
-      const others = roster.filter((a) => a.enabled && a.id !== original.id && !taken.has(a.id) && !this.tried.has(`${night.night}:${task.id}:${a.id}`));
+      // a re-run of a task that works on the task folder happens in a copy of it, so only an agent that runs on this Mac may take it
+      const others = roster.filter((a) => a.enabled && a.id !== original.id && !taken.has(a.id) && !this.tried.has(`${night.night}:${task.id}:${a.id}`) && (!needsWorkspace(task) || runsHere(a)));
       if (!others.length) { skip("every other agent has done it"); continue; }
       const free = others.filter((a) => !host.busy(a.id) && host.governor.admit(a) && !limited(a.id) && spare(a));
       if (!free.length) { skip("no agent with spare quota"); continue; }

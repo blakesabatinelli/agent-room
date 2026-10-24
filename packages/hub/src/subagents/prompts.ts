@@ -39,6 +39,7 @@ export function helperPrompt(b: HelperBrief): string {
     lines.push(
       `- You work in your own folder${b.folder ? ` (${b.folder})` : ""}, a copy of ${b.parentName}'s current work. Nothing you change reaches ${b.parentName} until they accept it, and they may drop it.`,
       b.files.length ? `You may create or change only: ${b.files.join(", ")}. Read anything else you need.` : `You may create or change the files this job needs. Keep the change small and say which files you touched.`,
+      `- Write only inside that folder, with relative paths. Never write to /tmp or another absolute path; ${b.parentName} gets your changes back when they accept them.`,
     );
   }
   lines.push(

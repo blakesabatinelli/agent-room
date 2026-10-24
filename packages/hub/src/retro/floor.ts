@@ -17,6 +17,7 @@ const lower = (s: string) => (s ? s[0].toLowerCase() + s.slice(1) : s);
 function lessonFor(tag: string, why: string, detail: string): string | undefined {
   const d = detail.replace(/\s+/g, " ").trim();
   if (tag === "other" && /^(run error|quality)$/.test(why)) return undefined; // crashes and rate limits say nothing about the agent's work
+  if (tag === "placement") return undefined; // where the agent runs, not how it works: no lesson to teach it
   if (tag === "verification" && /^claimed PASS/.test(why)) return `Verification: ${why}${d ? ` (${d.slice(0, 80)})` : ""}. Run the check and open the file before marking PASS.`;
   if (tag === "verification" && why === "no self-check") return "Verification: no STATUS block in the reply. End every reply with the STATUS block and check each criterion first.";
   if (tag === "misalignment") return `Misalignment: ${why === "drift" ? "drifted off the task or out of scope" : why}${d ? ` (${d.slice(0, 90)})` : ""}. Stay inside the task's scope and files.`;

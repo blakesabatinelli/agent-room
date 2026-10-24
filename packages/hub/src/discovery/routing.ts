@@ -1,6 +1,7 @@
 import { TOOLS, type AgentConfig, type Task } from "@agent-room/shared";
 import type { ControlFolder } from "../control/folder.js";
 import { canonicalConnector, coversNeed, reachOf } from "./connectors.js";
+import { WORKSPACE_NEED, runsHere, whereText } from "../placement/index.js"; // "workspace" is a need too: only an agent that runs on this Mac can use the task folder
 
 /**
  * 1.3 (AC6): routing by capability. A task that needs a data source ("salesforce", "gmail", "snowflake") may only go to an
@@ -23,6 +24,7 @@ export interface NeedsGate {
 
 /** Can this agent use `need` right now? `has`: its platform reaches it. `allowed`: the tool, if the Room has one for it, is on. */
 function check(a: AgentConfig, need: string, level: ((tool: string) => string | undefined) | undefined) {
+  if (need === WORKSPACE_NEED) return { has: runsHere(a), allowed: true };
   const roomTool = ROOM_TOOLS.has(need);
   const allowed = !roomTool || (level ? level(need) !== "off" : !!a.tools?.[need]);
   // An agent discovery has never looked at: the owner's switch is all there is to go on for the Room's own connectors.
@@ -59,8 +61,10 @@ const label = (need: string) => TOOLS.find((t) => t.id === need)?.label ?? need.
 export function needsMessage(gate: NeedsGate, taskTitle: string, agents: AgentConfig[]): string {
   const off = gate.switchedOff.filter((s) => !gate.nobody.includes(s.need));
   const parts: string[] = [];
-  if (gate.nobody.length) {
-    const what = gate.nobody.map(label).join(" and ");
+  if (gate.nobody.includes(WORKSPACE_NEED)) parts.push(workspaceMessage(taskTitle, agents.filter((a) => !runsHere(a))));
+  const sources = gate.nobody.filter((n) => n !== WORKSPACE_NEED);
+  if (sources.length) {
+    const what = sources.map(label).join(" and ");
     parts.push(`Nobody in the room can reach ${what}, which "${taskTitle}" needs. Connect it to one of your agents (for example as an MCP connector), then check again under Agents. This task waits until then.`);
   }
   if (off.length) {
@@ -69,6 +73,14 @@ export function needsMessage(gate: NeedsGate, taskTitle: string, agents: AgentCo
   }
   if (!parts.length) parts.push(`No agent can take "${taskTitle}" because of what it needs (${gate.needs.map(label).join(", ")}). This task waits.`);
   return parts.join("\n");
+}
+
+/** One plain line: the task works in its task folder and no agent that runs on this Mac can take it right now. */
+export function workspaceMessage(taskTitle: string, elsewhere: AgentConfig[], why: "none" | "unavailable" = "none"): string {
+  const away = elsewhere.length ? ` ${elsewhere.map((a) => `${a.name} runs on ${whereText(a)}`).join(", ")} and can't reach it.` : "";
+  return why === "none"
+    ? `"${taskTitle}" works in its task folder, and none of your agents that run on this Mac is switched on.${away} It waits until one is.`
+    : `"${taskTitle}" works in its task folder, and none of the agents that run on this Mac is available right now.${away} It starts as soon as one is.`;
 }
 
 /** A line for the planner: what an agent can reach, so it can name the right owner. Empty when nothing is known. */

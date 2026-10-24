@@ -17,8 +17,8 @@ import { RESUME_TUNING } from "./tuning.js";
  * The thresholds are documented in tuning.ts and written at the end of every RESUME.md.
  */
 
-const TAG_ORDER: FailureTag[] = ["verification", "spec", "misalignment", "other"];
-const REASON: Record<FailureTag, string> = { verification: " for verification", spec: " for unclear specs", misalignment: " for drifting off task", other: "" };
+const TAG_ORDER: FailureTag[] = ["verification", "spec", "misalignment", "placement", "other"];
+const REASON: Record<FailureTag, string> = { verification: " for verification", spec: " for unclear specs", misalignment: " for drifting off task", placement: "", other: "" };
 
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 const pct = (x: number) => Math.round(x * 100);
@@ -90,7 +90,7 @@ export function buildResume(store: Store, agentId: string, at = now()): AgentRes
   const firsts = new Map<string, RoutingRecord>();
   for (const r of graded) if (!firsts.has(r.taskId)) firsts.set(r.taskId, r);
   const accepted = [...firsts.values()].filter((r) => r.outcome === "accepted").length;
-  const failureMix: Record<FailureTag, number> = { spec: 0, misalignment: 0, verification: 0, other: 0 };
+  const failureMix: Record<FailureTag, number> = { spec: 0, misalignment: 0, verification: 0, placement: 0, other: 0 };
   for (const r of attempts) if (r.failureTag) failureMix[r.failureTag] += 1;
 
   const juries = listJuries(store).filter((j) => j.worker === agentId);

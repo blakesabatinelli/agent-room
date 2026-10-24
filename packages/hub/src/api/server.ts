@@ -50,6 +50,7 @@ import { isLive } from "../memory/model.js"; // 2.5
 import { A2A_FUNNEL_PATHS, a2aRemoteOpen, isA2aOpenPath } from "../interop/paths.js"; // 4.6
 import { a2aFunnelOn, registerInteropRoutes } from "../interop/routes.js"; // 4.6
 import { registerDistributionRoutes, type DistributionDeps } from "../distribution/routes.js"; // 4.7
+import { recordConnection } from "../placement/index.js"; // where an MCP agent connects from
 
 export interface ServerDeps {
   store: Store; orch: Orchestrator; approvals: Approvals; ownerName: string; restrictInterfaces?: boolean;
@@ -313,6 +314,8 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
       }
       return reply.code(401).send({ error: "Invalid MCP token." });
     }
+    // Where an external MCP agent connects from tells the hub whether it runs on this Mac (loopback) or elsewhere (Tailscale 100.x, a proxy, anything else).
+    if (grant.tokenId) recordConnection(store, grant.agentId, { address: remote ? from : req.socket.remoteAddress, proxied: remote });
     if (remote) store.audit(grant.agentId, "mcp.remote", `agent=${grant.agentId}${grant.tokenId ? ` key=${grant.tokenId}` : ""} ${rpcSummary(req.body)} from ${from}`);
     reply.hijack();
     await handleMcp(store, orch, grant, req.raw, reply.raw, req.body);
@@ -479,6 +482,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
       tier: z.union([z.literal(1), z.literal(2), z.literal(3)]),
     })).max(8).optional(),
     autoApprove: z.record(z.boolean()).optional(),
+    location: z.enum(["here", "elsewhere"]).optional(), // where the agent runs; unset = the hub decides (for an MCP agent, from where its connections come from)
   });
   app.get("/agents", async () => store.listAgents());
   app.get("/tools", async () => TOOLS);

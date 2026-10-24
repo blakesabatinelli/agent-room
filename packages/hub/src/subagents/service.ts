@@ -11,6 +11,7 @@ import { closeRecord, fixedDecision, openRecord, type RouteDecision } from "../o
 import { snapshot } from "../orchestrator/workspace.js";
 import { quotaDecide, quotaLimited } from "../quota/router.js";
 import { barredSet } from "../resume/probation.js";
+import { runsHere, whereText } from "../placement/index.js"; // helpers need a folder: only agents that run on this Mac
 import { id, now } from "../util.js";
 import { ChildSpaces } from "./childspace.js";
 import type { NativeEvent } from "./native.js";
@@ -204,7 +205,8 @@ export class Subagents {
     const store = this.store, host = this.host;
     const ready = await host.readyAgents(parent.roomId); // 4.4: the roster of the parent's room (a fork lane has its own)
     const barred = barredSet(store, ready); // agents on probation practise on copies; they take no real work
-    const usable = (a: AgentConfig) => a.id !== parentAgent.id && !host.busy(a.id) && !barred.has(a.id) && !quotaLimited(store, a.id);
+    // A helper works in a folder (its own copy of the parent's, or a throwaway one), so it goes only to an agent that runs on this Mac.
+    const usable = (a: AgentConfig) => a.id !== parentAgent.id && !host.busy(a.id) && !barred.has(a.id) && !quotaLimited(store, a.id) && runsHere(a);
     const want = (args.agent ?? "").trim().replace(/^@/, "");
     const named = want && want.toLowerCase() !== "any" ? want : "";
     const vendor = (args.vendor ?? "").trim();
@@ -214,6 +216,7 @@ export class Subagents {
       if (a.id === parentAgent.id) return { why: "That is you. A helper of the same agent is not started here; use your own subagent tool for that." };
       if (!a.enabled) return { why: `${a.name} is switched off.` };
       if (!ready.some((x) => x.id === a.id)) return { why: `${a.name} isn't connected right now.` };
+      if (!runsHere(a)) return { why: `${a.name} runs on ${whereText(a)} and can't use a folder here, which a helper needs. Ask an agent that runs on this Mac, or "any".` };
       if (vendor && !matchesVendor(a, vendor)) return { why: `${a.name} isn't a "${vendor}" agent.` };
       if (host.busy(a.id)) return { why: `${a.name} is busy with another task. Try another agent or "any".` };
       if (barred.has(a.id)) return { why: `${a.name} is still on probation and takes no real work.` };
@@ -224,10 +227,13 @@ export class Subagents {
     let pool = ready.filter(usable);
     if (vendor) {
       pool = pool.filter((a) => matchesVendor(a, vendor));
-      if (!pool.length) return { why: `No ${vendor} agent is free and connected right now.` };
+      if (!pool.length) {
+        const away = ready.filter((a) => !runsHere(a) && matchesVendor(a, vendor));
+        return { why: `No ${vendor} agent is free and connected right now.${away.length ? ` ${away.map((a) => a.name).join(", ")} runs on another machine and can't take a helper, which needs a folder here.` : ""}` };
+      }
     }
     pool = host.governor.preferForOverflow(pool);
-    if (!pool.length) return { why: "No other agent is free right now. Do it yourself, or try again in a moment." };
+    if (!pool.length) return { why: ready.some((a) => a.id !== parentAgent.id && !runsHere(a)) ? "No other agent that runs on this Mac is free right now (helpers need a folder, and the others run on another machine). Do it yourself, or try again in a moment." : "No other agent is free right now. Do it yourself, or try again in a moment." };
     const route = quotaDecide(store, pool, parent.taskType || "other", host.settings().explorationRate, [parentAgent.id], host.rand);
     if (!route) return { why: "No other agent is free right now." };
     return { agent: route.agent, route };

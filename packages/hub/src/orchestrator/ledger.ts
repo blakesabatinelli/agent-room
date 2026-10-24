@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { AgentConfig, Goal, GoalProgress, Requirement, Task } from "@agent-room/shared";
+import { relativeOf, taskWritePaths } from "../placement/paths.js"; // tasks write only inside their task folder
 
 /**
  * The orchestration layer's shared state, kept outside any one agent's context:
@@ -19,6 +20,8 @@ export interface RawPlanTask {
   output?: string; covers?: string[];
   /** 1.3: data sources or connectors this task needs ("salesforce", "gmail"). Cleaned in buildTasks. */
   needs?: unknown;
+  /** True when the task creates or changes files or runs commands in its task folder; false when it only hands back text. Unset: worked out from the task. */
+  workspace?: unknown;
 }
 
 export function newProgress(): GoalProgress { return { runs: 0, stall: 0, goalReplans: 0, verifyRounds: 0 }; }
@@ -35,7 +38,7 @@ export function normaliseRequirements(raw: unknown, deliverables: string[], obje
  * Structural problems the planner must fix before anyone starts. Each message is written so it can be
  * handed straight back to the planner.
  */
-export function validatePlan(tasks: RawPlanTask[], requirements: Requirement[], agentIds: Set<string>): string[] {
+export function validatePlan(tasks: RawPlanTask[], requirements: Requirement[], agentIds: Set<string>, opts: { goalFolder?: string } = {}): string[] {
   const errors: string[] = [];
   if (!tasks.length) return ["The plan has no tasks."];
   if (tasks.length > MAX_TASKS) errors.push(`The plan has ${tasks.length} tasks; merge it down to ${MAX_TASKS} or fewer. Don't drop any requirement.`);
@@ -47,6 +50,8 @@ export function validatePlan(tasks: RawPlanTask[], requirements: Requirement[], 
     if (!t.description || t.description.trim().length < 20) errors.push(`Task ${t.key} needs a self-contained description: what to do, with what inputs, and what to hand back.`);
     if (!t.output?.trim()) errors.push(`Task ${t.key} doesn't say what it hands back ("output": a file name or exact format).`);
     if (t.owner && !agentIds.has(t.owner)) errors.push(`Task ${t.key} is owned by "${t.owner}", which isn't one of the available agents.`);
+    // An agent can write only inside its task folder, so a task told to write to /tmp or another absolute path can't be done by any confined agent.
+    for (const p of taskWritePaths(t, opts.goalFolder)) errors.push(`Task ${t.key} is told to write to ${p}, outside its task folder. An agent can create and change files only inside its task folder, so use a relative path (for example "${relativeOf(p)}"); the hub brings accepted work back. Reading from a granted folder is fine.`);
     const crit = Array.isArray(t.criteria) ? t.criteria : [];
     if (!crit.length && !t.acceptance) errors.push(`Task ${t.key} has no acceptance criteria.`);
   }

@@ -2,6 +2,8 @@ import type { AgentConfig, AgentScore, Contract, GateReport, MemoryEntry, Requir
 import { REPORT_FORMAT, gateText, handle, profileText, profilesOf, roster } from "./contract.js";
 import { capabilityText } from "../discovery/routing.js"; // 1.3
 import { stripPersona } from "../jury/neutralize.js"; // 3.2: persona text never reaches a judge
+import { runsHere } from "../placement/index.js"; // where an agent runs: only agents on this Mac can use a task folder
+import { WRITE_RULE, WRITE_RULE_PLAN } from "../placement/paths.js";
 
 const TYPES = "writing | research | coding | analysis | data | other";
 const mem = (m: MemoryEntry[]) => m.map((x) => `- ${x.text}`).join("\n") || "- (none)";
@@ -19,7 +21,7 @@ function track(agents: AgentConfig[], resumes: ResumeNotes) {
   return agents.map((a) => {
     const s = (resumes.lines[a.id] ?? []).join("; "); // 2.3: the résumé's lines, not the raw score table
     const ps = profilesOf(a).map((p) => `${p.role} tier ${p.tier} (${profileText(p)})`).join("; ");
-    return `- ${handle(a)}: ${a.name} — profiles: ${ps}${capabilityText(a)}${s ? ` — track record: ${s}` : " — no track record yet"}`; // 1.3: capabilityText says what data sources it can reach
+    return `- ${handle(a)}: ${a.name} — profiles: ${ps}${capabilityText(a)}${runsHere(a) ? "" : " — runs on another machine: no task folder or shell, give it text-only work (answers, research, writing or reviews handed back in the reply)"}${s ? ` — track record: ${s}` : " — no track record yet"}`; // 1.3: capabilityText says what data sources it can reach
   }).join("\n");
 }
 
@@ -31,6 +33,7 @@ const PLAN_TASK_SCHEMA = `{"key":"t1","owner":"<agent id>","title":"...","role":
   "files":["files this task alone may create or change, e.g. research.md"],
   "criteria":["checkable statement", {"text":"statement a command can decide","check":"shell command"}],
   "needs":["data sources or connectors this task must read, e.g. salesforce, gmail, drive, slack, snowflake; [] when none"],
+  "workspace":true,
   "taskType":"research","dependsOn":[]}`;
 
 export const planPrompt = (goal: string, agents: AgentConfig[], memory: MemoryEntry[], ownerNotes: string[], conversation = "", /** 2.3: no longer shown (résumés replace the raw table); kept so callers needn't change */ _scores: AgentScore[] = [], lead?: string, problems: string[] = [], previous?: string, commands = "", /** 2.3: each agent's résumé lines, and who is on probation */ resumes: ResumeNotes = { lines: {} }) => `[[PLAN]]
@@ -79,6 +82,9 @@ How to plan:
 - A task that must read a data source (CRM, email, files in Drive, Slack, a warehouse) lists it in "needs" and goes to an
   agent whose line above says it can reach that source. Never give it to one that can't; if none can, still list the need.
   Use "needs": [] for work that needs no outside source.
+- ${WRITE_RULE_PLAN}
+- "workspace": true when the task creates or changes files or runs commands in its task folder; false when it only hands back text (an
+  answer, research, writing or a review whose material is in its description). Only agents that run on this Mac get workspace tasks.
 - Prefer the agent with the best track record for the task type; spread work only when it helps.
 ${lead ? `- ${lead} coordinates; don't give it every task.\n` : ""}- Roles: explorer to sweep many files for one answer, researcher for outside facts, worker to build,
   reviewer only for an independent check of hard-to-undo work. Don't use the strongest profile for routine work.
@@ -135,6 +141,7 @@ ${mem(priv)}
 ${learned ? `\n${learned}\n` : ""}${task.history?.length ? `\n# Earlier attempts at this task (don't repeat what failed)\n${task.history.slice(-6).map((h) => `- ${h.outcome.toUpperCase()} (${h.agentId}): ${h.note.slice(0, 300)}`).join("\n")}\n` : ""}${feedback ? `\n# Sent back\nYour previous attempt was returned. Fix exactly this: ${feedback}\n${task.result ? `What you handed back last time (start from it; don't throw good work away):\n"""\n${task.result.slice(0, 2500)}\n"""\n` : ""}` : ""}
 # Rules
 - Stay inside your scope. If the right answer needs work outside it, say so in REASON; don't do it.
+- ${folder ? WRITE_RULE : "You have no task folder on your machine: hand your work back as text in your reply, and don't write files."} If a step needs somewhere else, report STATUS: blocked and say which.
 - ${TAG_RULES(agents, self).replace(/\n/g, " ")}
 - The owner may steer while you work. Call get_updates between major steps and before you
   finish; anything it returns overrides earlier instructions.
@@ -281,7 +288,7 @@ ${tasks.filter((t) => t.status === "done").map((t) => `## ${t.title} (covers ${t
 ${files ? `\nThe deliverable files:\n"""\n${files}\n"""\n` : ""}
 Mark each requirement PASS only if the files (or replies, where no file was asked for) show it. For each
 gap, write one task that closes it: self-contained, small, with its own output and criteria, owned by one
-of: ${agents.map((a) => a.id).join(", ")}. ${round > 0 ? "This is a re-check after fixes: only list gaps that are still real." : ""}
+of: ${agents.map((a) => a.id).join(", ")}. ${WRITE_RULE_PLAN} ${round > 0 ? "This is a re-check after fixes: only list gaps that are still real." : ""}
 Reply with JSON only:
 {"requirements":{"G1":{"verdict":"PASS|FAIL","evidence":"short"}},
  "complete":true|false,
@@ -303,6 +310,8 @@ Attempts:
 ${(t.history ?? []).map((h) => `- ${h.outcome.toUpperCase()} by ${h.agentId}: ${h.note.slice(0, 300)}`).join("\n") || "- (none)"}`).join("\n\n")}
 
 Agents: ${agents.map((a) => a.id).join(", ")}
+
+${WRITE_RULE_PLAN}
 
 Choose one:
 - "retry": write replacement tasks that reach the same requirements a different way (smaller steps,

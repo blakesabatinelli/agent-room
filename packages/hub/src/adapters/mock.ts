@@ -29,6 +29,9 @@ function readContext(cwd: string): string | undefined {
  * to cut, which is unbounded under load. A run that is never joined gives up after 10 s, so a broken test fails on its assertions instead of hanging).
  * Every call also records the cwd it ran in (MockAdapter.calls[].cwd), so tests can see which worktree a task used.
  * wide (the plan is N independent tasks), needs (1.3: every planned task lists these data sources in its `needs`).
+ * workspace (true/false: every planned task says whether it works on its task folder), absPath (the first task is told to write to /tmp/vizio-cdp-baseline;
+ * the repair round fixes it unless absPathStays), recoverCovers (the recovery's replacement task covers these requirements), recoverWorkspace (it works on its task folder), blockedText (a task reply that
+ * says this, with no STATUS block, like an agent that can't do the work from where it runs).
  * retro (2.1: how a `[[RETRO]]` call is answered: "invalid" | "empty" | "ghost" | "positive"; see the branch below).
  * twokey (4.1: what this agent answers when asked to be the second key of a two-key action: a draft object (sent as JSON), or a string).
  */
@@ -107,10 +110,15 @@ export class MockAdapter implements Adapter {
       const needs = (st as { needs?: string[] }).needs;
       if (needs) for (const t of tasks as { needs?: string[] }[]) t.needs = needs;
       const bad = !!(st as { badPlan?: boolean }).badPlan && !p.includes("can't run as written");
-      for (const t of tasks as { key: string; output?: string; covers?: string[]; dependsOn?: string[] }[]) {
+      for (const t of tasks as { key: string; output?: string; covers?: string[]; dependsOn?: string[]; workspace?: boolean; description?: string }[]) {
         if (bad) { if (t.key === "b") t.dependsOn = ["zz"]; continue; }
         t.output = checks ? (t.key === "a" ? "research.md" : t.key === "b" ? "summary.md" : "review notes") : "the result, in the reply";
         t.covers = t.key === "a" || t.key === "w0" ? ["G1"] : t.key === "b" ? ["G2"] : ["G2"];
+        if (typeof (st as { workspace?: boolean }).workspace === "boolean") t.workspace = (st as { workspace?: boolean }).workspace;
+        if ((st as { absPath?: boolean }).absPath && t.key === "a" && !(p.includes("can't run as written") && !(st as { absPathStays?: boolean }).absPathStays)) {
+          t.output = "/tmp/vizio-cdp-baseline";
+          t.description += " Make a baseline copy and write it to /tmp/vizio-cdp-baseline.";
+        }
       }
       text = JSON.stringify({ mode: "plan",
         contract: { objective: "A short, sourced summary.", requirements: ["At least 3 sourced facts", "A summary under 200 words"],
@@ -145,7 +153,7 @@ export class MockAdapter implements Adapter {
       const ask = !!(st as { recoverAsk?: boolean }).recoverAsk;
       text = JSON.stringify(ask
         ? { action: "ask_owner", question: "Which audience is this for?" }
-        : { action: "retry", approach: "split into a smaller step", tasks: [{ key: "r1", owner: (st as { recoverOwner?: string }).recoverOwner ?? req.agent.id, title: "Smaller first step", description: "Do the narrowest version of the stuck work first, building on finished files.", output: "the result, in the reply", criteria: ["Narrow version is done"], taskType: "other", dependsOn: [] }] });
+        : { action: "retry", approach: "split into a smaller step", tasks: [{ key: "r1", ...((st as { recoverWorkspace?: boolean }).recoverWorkspace ? { workspace: true } : {}), ...((st as { recoverCovers?: string[] }).recoverCovers ? { covers: (st as { recoverCovers?: string[] }).recoverCovers } : {}), owner: (st as { recoverOwner?: string }).recoverOwner ?? req.agent.id, title: "Smaller first step", description: "Do the narrowest version of the stuck work first, building on finished files.", output: "the result, in the reply", criteria: ["Narrow version is done"], taskType: "other", dependsOn: [] }] });
     } else if (p.includes("[[REPLAN]]")) {
       text = JSON.stringify({ description: "Smaller step: gather the facts first, then check each one.", scope: "narrowed", criteria: ["At least 3 facts"], approach: "narrow and verify" });
     } else if (p.includes("[[STEER]]")) {
@@ -193,8 +201,9 @@ export class MockAdapter implements Adapter {
         writeFileSync(full, `${req.agent.name} wrote ${f}\n`);
       }
       const tag = st.tag ? `\n@${st.tag} can you double-check one number for me?` : "";
+      const blockedText = (st as { blockedText?: string }).blockedText;
       const block = st.noReport ? "" : `\nSTATUS: ${st.status ?? "done"}\n${ids.map((k) => `${k}: ${quality >= 0.6 ? "PASS" : "FAIL"} — see above`).join("\n")}\nOUT_OF_SCOPE: ${st.outOfScope ?? "none"}${(st as { decide?: string }).decide ? `\nDECISIONS: ${(st as { decide?: string }).decide}` : ""}${st.status ? "\nREASON: need the target audience" : ""}`;
-      text = `${req.agent.name} finished the task.${tag}\nMEMORY: ${req.agent.name} prefers concise output.${block}`;
+      text = blockedText ?? `${req.agent.name} finished the task.${tag}\nMEMORY: ${req.agent.name} prefers concise output.${block}`;
     } else {
       text = `${req.agent.name} finished the task.${st.tag ? `\n@${st.tag} what do you think?` : ""}\nMEMORY: ${req.agent.name} prefers concise output.`;
     }
