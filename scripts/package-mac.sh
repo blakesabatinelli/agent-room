@@ -151,8 +151,16 @@ if [ "$RELEASE" = 1 ]; then
   # Sparkle is a pod only in release builds (see the Podfile), and AR_SPARKLE=1 turns on the code that uses it.
   (cd "$MACOS" && AGENT_ROOM_SPARKLE=1 pod install)
   XCB_EXTRA=('GCC_PREPROCESSOR_DEFINITIONS=$(inherited) AR_SPARKLE=1')
-elif ! cmp -s "$MACOS/Podfile.lock" "$MACOS/Pods/Manifest.lock" 2>/dev/null; then
-  (cd "$MACOS" && pod install)
+else
+  # Native modules come from the app's package.json (autolinked by the Podfile), so pod install is needed when that list changes, not only
+  # when Podfile.lock does: a dependency added since the last pod install (react-native-webview, for the office) is otherwise left out of
+  # the app and the screen that uses it crashes.
+  POD_STAMP="$MACOS/Pods/.agent-room-fingerprint"
+  POD_FINGER="$(cat "$MACOS/Podfile" "$ROOT/packages/app/package.json" "$ROOT/pnpm-lock.yaml" "$ROOT/node_modules/react-native-macos/package.json" 2>/dev/null | shasum | cut -d' ' -f1)"
+  if ! cmp -s "$MACOS/Podfile.lock" "$MACOS/Pods/Manifest.lock" 2>/dev/null || [ "$(cat "$POD_STAMP" 2>/dev/null)" != "$POD_FINGER" ]; then
+    (cd "$MACOS" && pod install) || die "pod install failed for the Mac app. Copy the error above to Claude."
+    echo "$POD_FINGER" > "$POD_STAMP"
+  fi
 fi
 if ! xcodebuild -workspace "$MACOS/AgentRoom.xcworkspace" -scheme AgentRoom-macOS -configuration Release \
      -destination 'generic/platform=macOS' ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \

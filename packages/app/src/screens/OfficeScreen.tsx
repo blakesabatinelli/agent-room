@@ -1,10 +1,13 @@
 import { useShallow } from "zustand/react/shallow";
 import React, { useMemo, useState } from "react";
-import { Text, View } from "react-native";
+import { Text, UIManager, View } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 import { useRoom } from "../state/store";
 import { Button, Screen } from "../components/ui";
 import { space, type as t, usePalette } from "../theme";
+
+/** The web view is a native module: a build made before it was installed (pod install) doesn't have it, and drawing it there crashes the app. */
+const WEBVIEW_LINKED = (UIManager as { hasViewManagerConfig?: (name: string) => boolean }).hasViewManagerConfig?.("RNCWebView") ?? true;
 
 /**
  * 3.4 The office. The picture is drawn by the hub's own page (web/office.html, three.js with a 2D plan on small machines), shown here in a web view,
@@ -33,7 +36,11 @@ export function OfficeScreen() {
 
   return (
     <Screen title="Office" subtitle={room && !room.dmAgentId ? `#${room.name}` : "All rooms"} right={<Button small kind="plain" label="Reload" onPress={() => setNonce(nonce + 1)} />}>
-      {uri ? (
+      {!WEBVIEW_LINKED ? (
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: space(6) }}>
+          <Text style={[t.body, { color: p.muted, textAlign: "center" }]}>The office needs a part this build of the app doesn't have. Build the app again with scripts/package-mac.sh, then reopen it.</Text>
+        </View>
+      ) : uri ? (
         <WebView key={nonce} source={{ uri }} originWhitelist={[`${hub?.baseUrl ?? ""}*`]} injectedJavaScriptBeforeContentLoaded={start} onMessage={onMessage}
           style={{ flex: 1, backgroundColor: p.canvas }} />
       ) : (
