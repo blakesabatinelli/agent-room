@@ -347,7 +347,7 @@ test("the Mac app has an Office screen in a web view that opens the agent's DM",
   const screen = readFileSync(join(app, "src/screens/OfficeScreen.tsx"), "utf8");
   assert.match(screen, /from "react-native-webview"/);
   assert.match(screen, /m\.type === "openAgent"[\s\S]*openDm\(m\.agentId\)/);
-  assert.match(screen, /\/web\/office\.html\?\$\{q\}/);
+  assert.match(screen, /\/web\/office\.html\?embed=1\$\{roomQ\}/);
   assert.match(screen, /injectedJavaScriptBeforeContentLoaded/);
   assert.match(readFileSync(join(app, "src/App.tsx"), "utf8"), /office: <OfficeScreen \/>/);
   assert.match(readFileSync(join(app, "src/state/store.ts"), "utf8"), /export type Page = [^;]*"office"/);
