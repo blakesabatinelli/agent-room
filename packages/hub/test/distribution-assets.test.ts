@@ -82,7 +82,19 @@ test("4.7 release: entitlements are the documented minimum (no sandbox, outgoing
   assert.ok(!/network\.server/.test(app.replace(/<!--[\s\S]*?-->/g, "")));
   const node = read(`${MACOS}/AgentRoom-macOS/NodeRuntime.entitlements`);
   for (const k of ["allow-jit", "allow-unsigned-executable-memory", "disable-library-validation"]) assert.ok(node.includes(`com.apple.security.cs.${k}`), k);
-  for (const k of ["allow-jit ", "allow-unsigned-executable-memory", "disable-library-validation"]) assert.ok(node.slice(0, node.indexOf("<key>")).includes(k), `${k} is explained in the comment`);
+  const why = read(join(MACOS, "../../../docs/release.md"));
+  for (const k of ["allow-jit", "allow-unsigned-executable-memory", "disable-library-validation"]) assert.ok(why.includes(`\`${k}\``), `${k} is explained in docs/release.md`);
+});
+
+test("4.7 release: every plist and entitlements file is one codesign and Xcode can read (no comments in entitlements, no `--` inside any comment)", () => {
+  // codesign's entitlements parser (AMFIUnserializeXML) rejected a comment that said "--release": XML forbids "--" inside a comment.
+  const files = ["AgentRoom-macOS/Info.plist", "AgentRoom-macOS/AgentRoom.entitlements", "AgentRoom-macOS/NodeRuntime.entitlements"];
+  for (const f of files) {
+    const text = read(`${MACOS}/${f}`);
+    for (const m of text.matchAll(/<!--([\s\S]*?)-->/g)) assert.ok(!m[1].includes("--"), `${f}: a comment contains "--"`);
+    assert.equal((text.match(/<key>/g) ?? []).length, (text.match(/<\/key>/g) ?? []).length, `${f}: keys are balanced`);
+    if (f.endsWith(".entitlements")) assert.ok(!text.includes("<!--"), `${f}: entitlements carry no comments (the reasons live in docs/release.md)`);
+  }
 });
 
 // ---------- make-appcast.sh with a stand-in sign_update

@@ -224,7 +224,7 @@ if [ "$RELEASE" = 1 ]; then
   while IFS= read -r f; do
     is_macho "$f" && [ "$f" != "$RES/node" ] && sign_release "" "$f"
   done < <(find "$RES/Hub" -type f \( -name '*.node' -o -name '*.dylib' -o -name '*.so' -o -perm -u+x \) | deepest_first)
-  # 2: node itself, with the entitlements V8 needs (NodeRuntime.entitlements says why each one is there). The official build was signed and
+  # 2: node itself, with the entitlements V8 needs (docs/release.md, "Entitlements", says why each one is there). The official build was signed and
   # notarized by the Node.js project with its own entitlements; this prints them (from the copy in the app, before it is re-signed) so
   # they can be compared with ours.
   echo "Entitlements of the official Node build, for comparison with NodeRuntime.entitlements:"
