@@ -78,28 +78,36 @@ body[data-embedded] #back { display: none; }
 .lbl.st-waiting_approval { --stc: var(--amber); }
 .lbl.st-judged { --stc: var(--judge); }
 .lbl.st-offline { --stc: var(--o-off); }
-.lbl .tag { pointer-events: auto; display: flex; align-items: center; gap: 7px; padding: 3px 10px 3px 7px; border-radius: 8px; max-width: 220px;
-  background: var(--glass); border: 1px solid color-mix(in srgb, var(--agent) 55%, transparent); box-shadow: 0 0 14px color-mix(in srgb, var(--agent) 28%, transparent); }
-.lbl .sw { width: 9px; height: 9px; border-radius: 50%; background: var(--agent); box-shadow: 0 0 8px var(--agent); flex: none; }
-.lbl .who { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; line-height: 1.15; }
-.lbl .nm { font-family: var(--display); font-weight: 600; font-size: 13px; color: var(--strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
-.lbl .role { font-style: normal; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
-.lbl .role:empty { display: none; }
-.lbl .chip { pointer-events: auto; cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 3px 10px 3px 5px; border-radius: 99px; max-width: 270px;
-  background: color-mix(in srgb, var(--stc) 14%, var(--glass)); border: 1px solid color-mix(in srgb, var(--stc) 60%, transparent); color: var(--strong); font-size: 12px; }
-.lbl .ring { width: 16px; height: 16px; flex: none; transform: rotate(-90deg); }
-.lbl .ring .rb { fill: none; stroke: color-mix(in srgb, var(--stc) 25%, transparent); stroke-width: 3; }
-.lbl .ring .rf { fill: none; stroke: var(--stc); stroke-width: 3; stroke-linecap: round; }
-.lbl .ring.none .rf { display: none; }
-.lbl .ring.none .rb { fill: var(--stc); stroke: none; transform-origin: center; transform: scale(.45); }
-.lbl.st-working .ring.none .rb, .lbl.st-waiting_approval .ring.none .rb { animation: blink 1.2s ease-in-out infinite; }
-.lbl .txt { display: flex; gap: 6px; min-width: 0; white-space: nowrap; }
-.lbl .st { color: var(--stc); font-weight: 700; flex: none; }
-.lbl .tk { overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
-.lbl.st-idle .chip, .lbl.st-offline .chip { opacity: .8; }
-.lbl.status.sel .chip { border-color: var(--stc); box-shadow: 0 0 14px color-mix(in srgb, var(--stc) 45%, transparent); }
-.lbl.sel .tag { border-color: var(--agent); box-shadow: 0 0 0 1px var(--agent), 0 0 22px color-mix(in srgb, var(--agent) 55%, transparent); }
-.lbl .tag:focus-visible, .lbl .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* one card per agent: name and role, the status chip under them, a leader line down to the head */
+.lbl.card { pointer-events: auto; align-items: stretch; gap: 4px; padding: 5px 7px 6px; border-radius: 10px; max-width: 250px;
+  background: var(--glass); border: 1px solid color-mix(in srgb, var(--agent) 55%, transparent); box-shadow: 0 0 14px color-mix(in srgb, var(--agent) 24%, transparent); }
+.card .tag { display: flex; align-items: baseline; gap: 6px; min-width: 0; padding: 0 2px; text-align: left; }
+.card .sw { width: 8px; height: 8px; border-radius: 50%; background: var(--agent); box-shadow: 0 0 8px var(--agent); flex: none; align-self: center; }
+.card .nm { font-family: var(--display); font-weight: 600; font-size: 13px; color: var(--strong); white-space: nowrap; flex: none; }
+.card .role { font-style: normal; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.card .role:empty { display: none; }
+.card .chip { display: flex; align-items: center; gap: 5px; padding: 2px 8px 2px 3px; border-radius: 99px; min-width: 0; font-size: 11.5px; color: var(--strong); text-align: left;
+  background: color-mix(in srgb, var(--stc) 14%, transparent); border: 1px solid color-mix(in srgb, var(--stc) 55%, transparent); }
+.card .ring { width: 15px; height: 15px; flex: none; transform: rotate(-90deg); }
+.card .ring .rb { fill: none; stroke: color-mix(in srgb, var(--stc) 25%, transparent); stroke-width: 3; }
+.card .ring .rf { fill: none; stroke: var(--stc); stroke-width: 3; stroke-linecap: round; }
+.card .ring.none .rf { display: none; }
+.card .ring.none .rb { fill: var(--stc); stroke: none; transform-origin: center; transform: scale(.45); }
+.card.st-working .ring.none .rb, .card.st-waiting_approval .ring.none .rb { animation: blink 1.2s ease-in-out infinite; }
+.card .txt { display: flex; gap: 5px; min-width: 0; white-space: nowrap; }
+.card .st { color: var(--stc); font-weight: 700; flex: none; }
+.card .tk { overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+.card.st-idle .chip, .card.st-offline .chip { opacity: .8; }
+.card .lead { position: absolute; top: 100%; left: 50%; width: 2px; height: 8px; margin-left: -1px; pointer-events: none;
+  background: linear-gradient(var(--agent), color-mix(in srgb, var(--agent) 30%, transparent)); }
+.card .lead::after { content: ""; position: absolute; left: -2px; bottom: -3px; width: 6px; height: 6px; border-radius: 50%; background: var(--agent); box-shadow: 0 0 6px var(--agent); }
+/* crowded, or over a board: just the name, with the state as the dot's ring */
+.card.compact { padding: 2px 8px 2px 6px; border-radius: 99px; }
+.card.compact .role, .card.compact .chip { display: none; }
+.card.compact .sw { box-shadow: 0 0 0 2px var(--stc); }
+.card.sel { border-color: var(--agent); box-shadow: 0 0 0 1px var(--agent), 0 0 22px color-mix(in srgb, var(--agent) 55%, transparent); z-index: 2; }
+.card:hover { z-index: 3; }
+.card .tag:focus-visible, .card .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .lbl.more { padding: 1px 7px; border-radius: 99px; background: var(--glass); border: 1px solid var(--line-strong); font-weight: 700; font-size: 12px; pointer-events: none; }
 .lbl.goal { pointer-events: none; padding: 5px 12px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 10%, var(--glass)); border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
   box-shadow: 0 0 22px color-mix(in srgb, var(--accent) 30%, transparent); gap: 1px; max-width: 280px; text-align: center; }

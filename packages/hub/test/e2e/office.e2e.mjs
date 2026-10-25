@@ -86,7 +86,7 @@ try {
     const tags = await page.$$eval(".lbl[data-agent]", (els) => els.map((e) => [e.dataset.agent, e.querySelector(".nm").textContent, e.querySelector(".role").textContent]));
     assert.deepEqual(tags.map((l) => l[0]).sort(), ["atlas", "claude", "codex", "hermes", "muse"]);
     assert.deepEqual(tags.find((l) => l[0] === "hermes"), ["hermes", "Hermes", "Fact checker"]);
-    const chips = Object.fromEntries(await page.$$eval(".lbl.status[data-chip]", (els) => els.map((e) => [e.dataset.chip, [e.querySelector(".st").textContent, e.querySelector(".tk").textContent]])));
+    const chips = Object.fromEntries(await page.$$eval(".lbl.card[data-agent]", (els) => els.map((e) => [e.dataset.agent, [e.querySelector(".st").textContent, e.querySelector(".tk").textContent]])));
     assert.deepEqual(Object.fromEntries(o.state.agents.map((a) => [a.id, a.state])), { claude: "working", codex: "waiting_approval", hermes: "judged", muse: "idle", atlas: "offline" });
     assert.deepEqual(chips.claude, ["Working · 2 helpers", "Draft the board narrative"]);
     assert.deepEqual(chips.codex, ["Needs approval", "Save tables to the board folder"]);
@@ -94,7 +94,26 @@ try {
     assert.deepEqual(chips.muse, ["Idle", "Next: Design the cover and charts"]);
     assert.equal(chips.atlas[0], "Offline");
     assert.equal(o.desks.length, 5); assert.ok(o.desks.every((d) => d.x > 0 && d.y > 0 && d.x < 1100 && d.y < 760), "every desk is on screen");
-    ok("AC1: five desks with name tags (name and role) and status chips; working, waiting for approval, being judged, idle and offline are all shown");
+    ok("AC1: five desks, each with one card (name, role, status chip); working, waiting for approval, being judged, idle and offline are all shown");
+
+    // the cards belong to their agents: each sits just over its own head, and none covers a board's face unless it is selected or hovered
+    const insideQuad = (q, x, y) => { let s = 0; for (let i = 0; i < 4; i++) { const a = q[i], b = q[(i + 1) % 4], c = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x); if (c) { if (s && Math.sign(c) !== s) return false; s = Math.sign(c); } } return true; };
+    const checkCards = async (p, hotId = "") => {
+      const st = await office(p);
+      assert.equal(st.cards.length, 5);
+      for (const c of st.cards) {
+        assert.ok(c.headY - c.bottom >= 0 && c.headY - c.bottom <= 60, `${c.agentId}'s card sits just over its head (gap ${Math.round(c.headY - c.bottom)} px)`);
+        assert.ok(Math.abs(c.x - c.headX) <= 140, `${c.agentId}'s card is centred near its head`);
+        if (c.agentId === hotId) { assert.equal(c.compact, false, "the selected card is shown in full"); continue; }
+        const box = await p.$eval(`.lbl.card[data-agent="${c.agentId}"]`, (e) => { const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom }; });
+        const pts = [[box.l, box.t], [box.r, box.t], [box.l, box.b], [box.r, box.b], [(box.l + box.r) / 2, (box.t + box.b) / 2]];
+        if (!c.compact) for (const q of st.boardQuads) assert.ok(!pts.some(([x, y]) => insideQuad(q, x, y)), `${c.agentId}'s full card does not cover a board`);
+      }
+      return st;
+    };
+    const cs = await checkCards(page);
+    assert.ok(cs.cards.some((c) => !c.compact), "cards show in full where there is room");
+    ok(`cards: each sits over its own head with a leader line; ${cs.cards.filter((c) => c.compact).map((c) => c.agentId).join(", ") || "none"} shrink to the name pill to keep off the boards`);
 
     // the header: the room and the real counts
     assert.equal(await page.locator("#roomName").textContent(), "#board-update");
@@ -106,7 +125,7 @@ try {
     // AC2
     assert.equal(o.helpers.length, 2);
     assert.deepEqual(o.helpers.map((h) => [h.parent, h.readOnly, h.state]).sort(), [["claude", false, "working"], ["claude", true, "working"]]);
-    assert.ok(o.helpers.every((h) => Math.hypot(h.x - o.desks.find((d) => d.agentId === "claude").x, h.y - o.desks.find((d) => d.agentId === "claude").y) < 160), "helpers stand at the parent's desk");
+    assert.ok(o.helpers.every((h) => Math.hypot(h.x - o.desks.find((d) => d.agentId === "claude").x, h.y - o.desks.find((d) => d.agentId === "claude").y) < 200), "helpers stand at the parent's desk");
     ok("AC2: two helpers (one read-only) stand at the working agent's desk");
 
     // AC3, AC4, the task flow and the pedestal
@@ -147,8 +166,10 @@ try {
     assert.equal(new URL(page.url()).hash, "", "the hash is consumed");
     ok("AC5: 'Open thread' in the inspector opens that agent's DM room in the web app");
     await page.goBack(); await page.waitForFunction(() => window.__office?.ready);
-    await page.waitForSelector('.lbl.status[data-chip="codex"]');
-    await page.click('.lbl.status[data-chip="codex"] .chip'); await page.click("#insOpen");
+    await page.waitForSelector('.lbl.card[data-agent="codex"]');
+    await page.hover('.lbl.card[data-agent="codex"] .tag'); // a card under the pointer opens up even when it was crowded down to its name
+    await page.waitForFunction(() => !document.querySelector('.lbl.card[data-agent="codex"]').classList.contains("compact"));
+    await page.click('.lbl.card[data-agent="codex"] .chip'); await page.click("#insOpen");
     await page.waitForFunction(() => document.querySelector("#title")?.textContent === "Codex", null, { timeout: 10000 });
     assert.equal(await page.locator("#officeBtn").isVisible(), true, "a room has the Office button");
     ok("AC5: a status chip selects the agent too, and the room shows an Office button");
@@ -265,8 +286,10 @@ try {
     if (process.env.SHOTS !== "0") {
       const v = await open(still, { width: 1440, height: 900 }); await v.page.waitForTimeout(3000);
       await v.page.screenshot({ path: join(shots, "office-3d.png") });
+      await checkCards(v.page);
       await clickAgent(v.page, "claude"); await v.page.waitForTimeout(2000);
       await v.page.screenshot({ path: join(shots, "office-3d-inspector.png") });
+      await checkCards(v.page, "claude");
       assert.deepEqual(v.problems, []); assert.deepEqual(await csp(v.page), []);
       await v.ctx.close();
       // a short sequence about a second apart: a task is accepted and the next one assigned in between

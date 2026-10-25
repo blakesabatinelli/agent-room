@@ -10,7 +10,7 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const ease = (k) => 1 - Math.pow(1 - k, 3);
 
 /** Desks stand on an arc round the pedestal, facing it, on the side of the room the camera looks from. Desks are drawn DESK times life size. */
-const DESK = 1.3;
+const DESK = 1.3, FIG = 1.3; // figures are drawn FIG times larger again than their desks, so they read as characters
 function layoutFor(n) {
   const span = n <= 1 ? 0 : Math.min(3.6, 0.8 * (n - 1));
   const R = n <= 1 ? 4.6 : Math.max(4.6, ((n - 1) * 4.0) / span);
@@ -243,7 +243,7 @@ export function createScene(T, host) {
     const chair = new T.Group(); chair.position.set(0, 0, 0.92); g.add(chair);
     chair.add(box(0.62, 0.08, 0.58, metalM, 0, 0.5, 0), box(0.62, 0.32, 0.07, metalM, 0, 0.72, 0.3), box(0.06, 0.46, 0.06, metalM, 0, 0.25, 0), box(0.56, 0.04, 0.56, metalM, 0, 0.03, 0));
     chair.add(box(0.64, 0.02, 0.02, edgeM, 0, 0.89, 0.33));
-    const fig = makeFigure(agent.color); fig.group.position.set(0, 0, 0.9); fig.group.rotation.y = Math.PI; g.add(fig.group); // faces its monitor
+    const fig = makeFigure(agent.color, { scale: FIG }); fig.group.position.set(0, 0.55 * (1 - FIG), 0.9); fig.group.rotation.y = Math.PI; g.add(fig.group); // faces its monitor, hips on the seat
     // waiting for approval: an amber beacon on the desk, pulsing, with a turning light
     const beacon = new T.Group(); beacon.position.set(0.82, 0.84, 0.28); beacon.visible = false; g.add(beacon);
     const bulbM = basic(pal.amber.clone());
@@ -253,11 +253,11 @@ export function createScene(T, host) {
     for (const r of [0, Math.PI / 2]) { const pl = mesh(new T.PlaneGeometry(1.3, 0.2), beamM, 0.55, 0, 0); const holder = new T.Group(); holder.rotation.y = r; holder.add(pl); beam.add(holder); }
     const beaconGlow = glow(pal.amber, 1.6, 0.8); beaconGlow.position.y = 0.12; beacon.add(beaconGlow);
     // its work is being judged: a gavel and a scale orbit over its head, with a violet ring on the floor
-    const judge = new T.Group(); judge.position.set(0, 2.0, 0.9); judge.visible = false; g.add(judge);
+    const judge = new T.Group(); judge.position.set(0, 1.85, 0.9); judge.visible = false; g.add(judge); // orbits at head height, under the card
     const jm = basic(pal.judge.clone());
     const orbit = new T.Group(); judge.add(orbit);
-    const gavel = new T.Group(); gavel.position.set(0.48, 0, 0); gavel.add(box(0.045, 0.28, 0.045, jm, 0, -0.06, 0), box(0.2, 0.085, 0.085, jm, 0, 0.08, 0)); orbit.add(gavel);
-    const scale = new T.Group(); scale.position.set(-0.48, 0, 0);
+    const gavel = new T.Group(); gavel.position.set(0.66, 0, 0); gavel.add(box(0.045, 0.28, 0.045, jm, 0, -0.06, 0), box(0.2, 0.085, 0.085, jm, 0, 0.08, 0)); orbit.add(gavel);
+    const scale = new T.Group(); scale.position.set(-0.66, 0, 0);
     scale.add(box(0.03, 0.26, 0.03, jm, 0, 0, 0), box(0.34, 0.025, 0.025, jm, 0, 0.12, 0));
     for (const s of [-1, 1]) scale.add(mesh(new T.CylinderGeometry(0.075, 0.04, 0.035, 12), jm, s * 0.16, 0.0, 0));
     orbit.add(scale, glow(pal.judge, 0.9, 0.5));
@@ -266,8 +266,8 @@ export function createScene(T, host) {
     const helpers = [];
     agent.helpers.slice(0, 4).forEach((h, k) => {
       const hc = host.agentById(h.agentId)?.color || agent.color;
-      const f = makeFigure(hc, { scale: 0.62, seated: false });
-      f.group.position.set(1.55 + (k % 2) * 0.55, 0, -0.1 + Math.floor(k / 2) * 0.6); f.group.rotation.y = -0.7;
+      const f = makeFigure(hc, { scale: 0.8, seated: false });
+      f.group.position.set(1.6 + (k % 2) * 0.62, 0, -0.1 + Math.floor(k / 2) * 0.66); f.group.rotation.y = -0.7;
       f.group.userData.agentId = h.agentId || agent.id;
       if (h.readOnly) {
         const mag = new T.Group(); mag.position.set(-0.36, 0.95, -0.2);
@@ -628,22 +628,18 @@ export function createScene(T, host) {
   function flashDesk(d, color, strength) { d.flash = strength; d.flashCol.copy(color); }
 
   // =================================================================================================================
-  // labels: the name tag (name, role) and the status chip (live state, task, progress) float over each agent; DOM, so text stays crisp
+  // labels: one card per agent, just over its head: name and role, the status chip under them (live state, what it is about, a progress
+  // ring when the hub knows), and a leader line down to the head. DOM, so text stays crisp.
   // =================================================================================================================
   const SVGNS = "http://www.w3.org/2000/svg";
+  const HEAD_TOP = 2.2; // desk-local height of the top of a seated agent's head
+  const MAX_SHIFT = 46; // a card moves at most this far (px) from its head to make room
+  let cardHover = "";
   function label(k, make) { let el = labelEls.get(k); if (!el) { el = make(); labelsEl.append(el); labelEls.set(k, el); el._w = 0; } return el; }
-  /** The name tag, over the agent's head. */
-  function makeAgentLabel(id) {
-    const el = document.createElement("div"); el.className = "lbl"; el.dataset.agent = id;
+  function makeCard(id) {
+    const el = document.createElement("div"); el.className = "lbl card"; el.dataset.agent = id;
     const tag = document.createElement("button"); tag.type = "button"; tag.className = "tag";
-    tag.innerHTML = '<span class="sw"></span><span class="who"><b class="nm"></b><i class="role"></i></span>';
-    el.append(tag);
-    tag.onclick = () => host.onSelect(id);
-    return el;
-  }
-  /** The status chip, floating in front of the desk: the live state, what it is about, and a progress ring when the hub knows. */
-  function makeChipLabel(id) {
-    const el = document.createElement("div"); el.className = "lbl status"; el.dataset.chip = id;
+    tag.innerHTML = '<span class="sw"></span><b class="nm"></b><i class="role"></i>';
     const chip = document.createElement("button"); chip.type = "button"; chip.className = "chip";
     const ring = document.createElementNS(SVGNS, "svg"); ring.setAttribute("viewBox", "0 0 20 20"); ring.setAttribute("class", "ring");
     const bgc = document.createElementNS(SVGNS, "circle"); bgc.setAttribute("cx", "10"); bgc.setAttribute("cy", "10"); bgc.setAttribute("r", "7.5"); bgc.setAttribute("class", "rb");
@@ -651,28 +647,37 @@ export function createScene(T, host) {
     ring.append(bgc, fg);
     const txt = document.createElement("span"); txt.className = "txt"; txt.innerHTML = '<b class="st"></b><span class="tk"></span>';
     chip.append(ring, txt);
-    el.append(chip);
+    const lead = document.createElement("span"); lead.className = "lead";
+    el.append(tag, chip, lead);
+    tag.onclick = () => host.onSelect(id);
     chip.onclick = () => host.onSelect(id);
+    el.addEventListener("mouseenter", () => { cardHover = id; host.invalidate(); });
+    el.addEventListener("mouseleave", () => { if (cardHover === id) cardHover = ""; host.invalidate(); });
     return el;
+  }
+  /** Measures a card both ways (full, and the name pill it shrinks to when crowded or over a board). Only when its content changes. */
+  function measureCard(el) {
+    el.classList.remove("compact"); el._full = { w: el.offsetWidth, h: el.offsetHeight };
+    el.classList.add("compact"); el._mini = { w: el.offsetWidth, h: el.offsetHeight };
+    el.classList.toggle("compact", !!el._compact);
   }
   function updateLabels() {
     const st = host.getState(), live = new Set();
     for (const d of desks.values()) {
       const a = d.agent, k = `d:${a.id}`; live.add(k);
-      const el = label(k, () => makeAgentLabel(a.id)), ck = `c:${a.id}`; live.add(ck);
-      const ch = label(ck, () => makeChipLabel(a.id));
-      el.className = `lbl st-${a.state}${selected === a.id ? " sel" : ""}`; el.style.setProperty("--agent", "#" + d.neon.getHexString());
-      ch.className = `lbl status st-${a.state}${selected === a.id ? " sel" : ""}`;
+      const el = label(k, () => makeCard(a.id));
+      el.classList.remove(...[...el.classList].filter((c) => c.startsWith("st-"))); el.classList.add(`st-${a.state}`); el.classList.toggle("sel", selected === a.id);
+      el.style.setProperty("--agent", "#" + d.neon.getHexString());
       el.querySelector(".nm").textContent = a.name;
       el.querySelector(".role").textContent = a.role || "";
-      ch.querySelector(".st").textContent = host.stateWord(a) + (a.helpers.length ? ` · ${a.helpers.length} helper${a.helpers.length > 1 ? "s" : ""}` : "");
-      const tk = host.chipText(a); ch.querySelector(".tk").textContent = tk; ch.querySelector(".tk").hidden = !tk;
-      const p = a.task?.progress, fg = ch.querySelector(".rf");
-      ch.querySelector(".ring").classList.toggle("none", p === undefined);
-      ch.querySelector(".chip").setAttribute("aria-label", `${a.name}: ${host.stateWord(a)}${tk ? `, ${tk}` : ""}${p !== undefined ? `, ${Math.round(p * 100)}%` : ""}. Show details.`);
+      el.querySelector(".st").textContent = host.stateWord(a) + (a.helpers.length ? ` · ${a.helpers.length} helper${a.helpers.length > 1 ? "s" : ""}` : "");
+      const tk = host.chipText(a); el.querySelector(".tk").textContent = tk; el.querySelector(".tk").hidden = !tk;
+      const p = a.task?.progress, fg = el.querySelector(".rf");
+      el.querySelector(".ring").classList.toggle("none", p === undefined);
       fg.setAttribute("stroke-dasharray", `${Math.round((p ?? 0) * 100)} 100`);
       el.querySelector(".tag").setAttribute("aria-label", `${a.name}${a.role ? `, ${a.role}` : ""}: ${host.stateWord(a)}. Show details.`);
-      el._w = 0; ch._w = 0; // measure again
+      el.querySelector(".chip").setAttribute("aria-label", `${a.name}: ${host.stateWord(a)}${tk ? `, ${tk}` : ""}${p !== undefined ? `, ${Math.round(p * 100)}%` : ""}. Show details.`);
+      el._w = 0; // measure again
       if (d.overflow) { const mk = `m:${a.id}`; live.add(mk); const m = label(mk, () => { const s = document.createElement("div"); s.className = "lbl more"; return s; }); m.textContent = `+${d.overflow}`; }
     }
     if (st?.goal) {
@@ -689,49 +694,107 @@ export function createScene(T, host) {
     del.textContent = n ? `${n} approval${n > 1 ? "s" : ""} waiting` : "No approvals waiting"; del.classList.toggle("lit", n > 0); del._w = 0;
     for (const [k, el] of labelEls) if (!live.has(k)) { el.remove(); labelEls.delete(k); }
   }
-  /** Projects each label's anchor, then nudges overlapping ones apart (a few passes, top to bottom). */
+
+  /** The boards' faces on screen, as quadrilaterals, so cards can keep off their text. */
+  function boardQuads(proj) {
+    if (!boards) return [];
+    return [boards.mission, boards.flow].map((b) => [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => proj(b.grp.localToWorld(tmp2.set((sx * b.w) / 2, (sy * b.h) / 2, 0)))));
+  }
+  const inQuad = (q, x, y) => { let s = 0; for (let i = 0; i < 4; i++) { const a = q[i], b = q[(i + 1) % 4], c = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x); if (c !== 0) { if (s && Math.sign(c) !== s) return false; s = Math.sign(c); } } return true; };
+  /** Does the box (left, top, right, bottom) touch a board's face? */
+  function onBoard(quads, l, t, r, b) {
+    for (const q of quads) {
+      for (const [x, y] of [[l, t], [r, t], [l, b], [r, b], [(l + r) / 2, t], [(l + r) / 2, b], [l, (t + b) / 2], [r, (t + b) / 2], [(l + r) / 2, (t + b) / 2]]) if (inQuad(q, x, y)) return true;
+      if (q.some((p) => p.x >= l && p.x <= r && p.y >= t && p.y <= b)) return true;
+    }
+    return false;
+  }
+  const overlap = (A, B, pad = 4) => Math.min(A.x + A.w / 2, B.x + B.w / 2) - Math.max(A.x - A.w / 2, B.x - B.w / 2) > -pad && Math.min(A.y, B.y) - Math.max(A.y - A.h, B.y - B.h) > -pad;
+
+  /**
+   * Each card sits just over its agent's head. Crowded cards move up a little (never more than MAX_SHIFT) or shrink to the name pill;
+   * a card over a board's face shrinks to the pill unless it is selected or under the pointer.
+   */
   function placeLabels() {
-    const w = size.w, h = size.h, rect = canvas.getBoundingClientRect(), items = [];
+    const w = size.w, h = size.h, rect = canvas.getBoundingClientRect();
     const proj = (v) => { tmp.copy(v).project(camera); return { x: (tmp.x * 0.5 + 0.5) * w, y: (-tmp.y * 0.5 + 0.5) * h }; };
     const measure = (el) => { if (!el._w) { el._w = el.offsetWidth; el._h = el.offsetHeight; } return el; };
-    dbg.desks = []; dbg.helpers = [];
+    const quads = boardQuads(proj), cards = [], others = [];
+    dbg.desks = []; dbg.helpers = []; dbg.cards = [];
+    const PRI = { working: 2, waiting_approval: 2, judged: 2, idle: 1, offline: 0 };
     for (const d of desks.values()) {
       const el = labelEls.get(`d:${d.agent.id}`); if (!el) continue;
-      const p = proj(deskPoint(d, 0, 2.3, 0.9, tmp2)); items.push({ el: measure(el), x: p.x, y: p.y, pri: 3 });
-      const chl = labelEls.get(`c:${d.agent.id}`);
-      if (chl) { const q = proj(deskPoint(d, 0, 0, 1.45, tmp2)); measure(chl); items.push({ el: chl, x: q.x, y: q.y + chl._h, pri: 2 }); } // hangs below the desk
+      if (!el._w) { measureCard(el); el._w = 1; }
+      const head = proj(deskPoint(d, 0, HEAD_TOP, 0.9, tmp2)), hot = d.agent.id === selected || d.agent.id === hover || d.agent.id === cardHover;
+      cards.push({ el, id: d.agent.id, ax: head.x, ay: head.y, x: head.x, y: head.y - 9, compact: false, hot, pri: hot ? 3 : PRI[d.agent.state] ?? 1 });
       const c = proj(deskPoint(d, 0, 0.95, 0.2, tmp2));
       dbg.desks.push({ agentId: d.agent.id, state: d.agent.state, x: rect.left + c.x, y: rect.top + c.y, helpers: d.helpers.length });
-      d.helpers.forEach((hp) => { hp.group.getWorldPosition(tmp2); tmp2.y += 0.55; const q = proj(tmp2); dbg.helpers.push({ id: hp.data.id, parent: d.agent.id, agentId: hp.data.agentId, readOnly: hp.data.readOnly, state: hp.data.state, x: rect.left + q.x, y: rect.top + q.y }); });
-      const m = labelEls.get(`m:${d.agent.id}`); if (m) { const q = proj(deskPoint(d, 2.0, 1.4, 0.4, tmp2)); items.push({ el: measure(m), x: q.x, y: q.y, pri: 0 }); }
+      d.helpers.forEach((hp) => { hp.group.getWorldPosition(tmp2); tmp2.y += 0.7; const q = proj(tmp2); dbg.helpers.push({ id: hp.data.id, parent: d.agent.id, agentId: hp.data.agentId, readOnly: hp.data.readOnly, state: hp.data.state, x: rect.left + q.x, y: rect.top + q.y }); });
+      const m = labelEls.get(`m:${d.agent.id}`); if (m) { const q = proj(deskPoint(d, 2.0, 1.6, 0.4, tmp2)); others.push({ el: measure(m), x: q.x, y: q.y }); }
     }
-    const gl = labelEls.get("goal"); if (gl) { const q = proj(tmp2.set(0, 3.35, 0)); items.push({ el: measure(gl), x: q.x, y: q.y, pri: 1 }); }
-    const del = labelEls.get("door"); if (del && door) { const q = proj(door.anchor); items.push({ el: measure(del), x: q.x, y: q.y, pri: 1 }); dbg.door = { count: door.count, x: rect.left + q.x, y: rect.top + q.y, lit: door.count > 0 }; }
-    // boxes: anchored at the bottom centre. One whose anchor is off screen (zoomed in) is hidden rather than pinned to the edge.
-    for (const it of items) {
-      it.off = it.x < -20 || it.x > w + 20 || it.y < -20 || it.y > h + 60;
-      if (it.el._off !== it.off) { it.el._off = it.off; it.el.style.visibility = it.off ? "hidden" : ""; }
-      it.w = it.el._w; it.h = it.el._h; it.x = clamp(it.x, it.w / 2 + 6, w - it.w / 2 - 6); it.y = clamp(it.y, it.h + 6, h - 4);
+    const gl = labelEls.get("goal");
+    let goalBox = null;
+    if (gl) { // over the hologram; lower, across the beam, if that would cover a board
+      measure(gl); let q = proj(tmp2.set(0, 3.25, 0));
+      if (onBoard(quads, q.x - gl._w / 2, q.y - gl._h, q.x + gl._w / 2, q.y)) q = proj(tmp2.set(0, 1.9, 0));
+      goalBox = { el: gl, x: q.x, y: q.y }; others.push(goalBox);
     }
-    for (let k = items.length - 1; k >= 0; k--) if (items[k].off) items.splice(k, 1);
-    items.sort((a, b) => a.y - b.y);
-    for (let pass = 0; pass < 4; pass++) {
+    const del = labelEls.get("door");
+    if (del && door) { // over the door; lower down its front if that would cover a board
+      measure(del); const near = (v) => { const p = proj(v); p.x = clamp(p.x, del._w / 2 + 6, w - del._w / 2 - 6); return p; };
+      let q = near(door.anchor);
+      for (const y of [2.0, 0.6]) if (onBoard(quads, q.x - del._w / 2, q.y - del._h, q.x + del._w / 2, q.y)) q = near(tmp2.copy(door.anchor).setY(y).setZ(door.anchor.z + 0.4));
+      others.push({ el: del, x: q.x, y: q.y }); dbg.door = { count: door.count, x: rect.left + q.x, y: rect.top + q.y, lit: door.count > 0 };
+    }
+    for (const o of others) { o.w = o.el._w; o.h = o.el._h; o.x = clamp(o.x, o.w / 2 + 6, w - o.w / 2 - 6); o.y = clamp(o.y, o.h + 6, h - 4); o.fixed = true; o.pri = 9; o.ay = o.y + 9; }
+
+    const size2 = (c) => { const s = c.compact ? c.el._mini : c.el._full; c.w = s.w; c.h = s.h; };
+    const visible = [];
+    for (const c of cards) {
+      c.off = c.ax < -20 || c.ax > w + 20 || c.ay < -20 || c.ay > h + 80;
+      if (c.el._off !== c.off) { c.el._off = c.off; c.el.style.visibility = c.off ? "hidden" : ""; }
+      if (c.off) continue;
+      size2(c);
+      if (!c.hot && onBoard(quads, c.x - c.w / 2, c.y - c.h, c.x + c.w / 2, c.y)) { c.compact = true; size2(c); }
+      visible.push(c);
+    }
+    // crowding: the less important card (or, equal, the one further back) gives way: up a little, then down to its name.
+    // The goal's and the door's labels stay put; cards give way to them.
+    visible.push(...others);
+    visible.sort((a, b) => b.ay - a.ay); // front first: the front cards keep their place
+    for (let pass = 0; pass < 6; pass++) {
       let moved = false;
-      for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
-        const A = items[i], B = items[j];
-        const ox = Math.min(A.x + A.w / 2, B.x + B.w / 2) - Math.max(A.x - A.w / 2, B.x - B.w / 2), oy = Math.min(A.y, B.y) - Math.max(A.y - A.h, B.y - B.h);
-        if (ox > 0 && oy > 0) { // push the lower-priority one away, along the axis that needs less
-          const [mv, fixd] = A.pri < B.pri ? [A, B] : [B, A];
-          if (oy + 4 < ox) mv.y += (mv.y >= fixd.y ? 1 : -1) * (oy + 4); else mv.x += (mv.x >= fixd.x ? 1 : -1) * (ox + 4);
-          moved = true;
-        }
+      for (let i = 0; i < visible.length; i++) for (let j = 0; j < visible.length; j++) {
+        if (i === j) continue;
+        const A = visible[i], B = visible[j];
+        if (!overlap(A, B)) continue;
+        const mv = A.pri !== B.pri ? (A.pri < B.pri ? A : B) : (A.ay < B.ay ? A : B), fixd = mv === A ? B : A;
+        const want = mv.y - (fixd.y - fixd.h) + 4; // move up so its bottom clears the other's top
+        if (mv.fixed) continue;
+        if (mv.ay - 9 - (mv.y - want) <= MAX_SHIFT && mv.y - want - mv.h > 4) { mv.y -= want; moved = true; }
+        else if (!mv.compact && !mv.hot) { mv.compact = true; size2(mv); mv.y = mv.ay - 9; moved = true; }
+        else if (!fixd.compact && !fixd.hot && !fixd.fixed) { fixd.compact = true; size2(fixd); moved = true; }
       }
       if (!moved) break;
     }
-    for (const it of items) {
-      const t = `translate(${(it.x - it.w / 2).toFixed(1)}px,${(it.y - it.h).toFixed(1)}px)`;
-      if (it.el.dataset.t !== t) { it.el.style.transform = t; it.el.dataset.t = t; }
+    // a card that moved up onto a board shrinks too
+    for (let k = visible.length - 1; k >= 0; k--) if (visible[k].fixed) visible.splice(k, 1);
+    for (const c of visible) if (!c.hot && !c.compact && onBoard(quads, c.x - c.w / 2, c.y - c.h, c.x + c.w / 2, c.y)) { c.compact = true; size2(c); }
+    for (const c of visible) {
+      const left = clamp(c.x - c.w / 2, 6, w - c.w - 6), top = c.y - c.h;
+      if (c.el._compact !== c.compact) { c.el._compact = c.compact; c.el.classList.toggle("compact", c.compact); }
+      const t = `translate(${left.toFixed(1)}px,${top.toFixed(1)}px)`;
+      if (c.el.dataset.t !== t) { c.el.style.transform = t; c.el.dataset.t = t; }
+      const lead = c.el.lastElementChild, lh = Math.max(4, c.ay - c.y), lx = clamp(c.ax - left, 8, c.w - 8);
+      const ls = `${lh.toFixed(0)}|${lx.toFixed(0)}`;
+      if (lead._s !== ls) { lead._s = ls; lead.style.height = `${lh.toFixed(0)}px`; lead.style.left = `${lx.toFixed(0)}px`; }
+      dbg.cards.push({ agentId: c.id, compact: c.compact, x: rect.left + left + c.w / 2, top: rect.top + top, bottom: rect.top + c.y, headX: rect.left + c.ax, headY: rect.top + c.ay });
     }
+    for (const o of others) {
+      const t = `translate(${(o.x - o.w / 2).toFixed(1)}px,${(o.y - o.h).toFixed(1)}px)`;
+      if (o.el.dataset.t !== t) { o.el.style.transform = t; o.el.dataset.t = t; }
+    }
+    dbg.boardQuads = quads.map((q) => q.map((p) => ({ x: rect.left + p.x, y: rect.top + p.y })));
   }
 
   // =================================================================================================================
@@ -771,7 +834,7 @@ export function createScene(T, host) {
   // =================================================================================================================
   // camera: orthographic, isometric, a slow drift; drag to orbit a little, wheel or pinch to zoom, double-click to reset
   // =================================================================================================================
-  const HOME = { az: Math.PI / 4, el: 0.6, zoom: 1 };
+  const HOME = { az: Math.PI / 4, el: 0.64, zoom: 1 };
   // cx, cy centre the fitted room; px, py are the owner's pan (from zooming toward the pointer), in view units
   const view = { az: HOME.az, el: HOME.el, zoom: HOME.zoom, tAz: HOME.az, tEl: HOME.el, tZoom: HOME.zoom, drift: 0, userAt: -1e9, fit: 10, cx: 0, cy: 0, px: 0, py: 0, tpx: 0, tpy: 0 };
   const target = new T.Vector3(0, 1.4, 0);
@@ -784,15 +847,19 @@ export function createScene(T, host) {
     camera.left = -half * aspect + ox; camera.right = half * aspect + ox; camera.top = half + oy; camera.bottom = -half + oy;
     camera.updateProjectionMatrix(); camera.updateMatrixWorld(true);
   }
-  /** Finds the half-height that holds the whole room (floor corners, wall tops, labels' headroom), and centres it. */
+  /** Finds the half-height that holds what matters: the ring of desks with the agents' heads and cards, the boards and the door. The floor's far tips and the top of the walls may be cut. */
   function fitCamera() {
+    world.updateMatrixWorld(true);
     view.zoom = view.tZoom; view.px = view.tpx; view.py = view.tpy; view.cx = 0; view.cy = 0; view.fit = 10; placeCamera();
     const keepPx = view.px, keepPy = view.py; view.px = view.py = 0; placeCamera();
-    const { L, H } = lay, pts = [[-L, 0, -L], [L, 0, -L], [-L, 0, L], [L, 0, L], [-L, H, -L], [L, H, -L], [-L, H, L], [L, -0.5, L], [L, 3.2, L * 0.4], [L * 0.4, 3.2, L]].map((p) => new T.Vector3(...p));
+    const { R } = lay, ring = R + 2.7, pts = [];
+    for (let k = 0; k < 24; k++) { const a = (k / 24) * TAU; pts.push(new T.Vector3(Math.sin(a) * ring, -0.6, Math.cos(a) * ring), new T.Vector3(Math.sin(a) * R, 4.2, Math.cos(a) * R)); }
+    for (const b of boards ? [boards.mission, boards.flow] : []) for (const [sx, sy] of [[-1, 1], [1, 1], [-1, -1], [1, -1]]) pts.push(b.grp.localToWorld(new T.Vector3((sx * b.w) / 2, (sy * b.h) / 2 + (sy > 0 ? 0.25 : 0), 0)));
+    if (door) pts.push(door.anchor.clone().setY(door.anchor.y + 0.4));
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     const inv = camera.matrixWorldInverse;
     for (const p of pts) { p.applyMatrix4(inv); minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
-    const aspect = size.w / size.h, needH = (maxY - minY) / 2 * 1.04, needW = (maxX - minX) / 2 * 1.03;
+    const aspect = size.w / size.h, needH = (maxY - minY) / 2 * 1.04, needW = (maxX - minX) / 2 * 1.02;
     view.fit = Math.max(needH, needW / aspect);
     view.cx = (maxX + minX) / 2; view.cy = (maxY + minY) / 2;
     view.px = keepPx; view.py = keepPy;
@@ -890,7 +957,7 @@ export function createScene(T, host) {
       if (waiting) { d.beam.rotation.y = still ? 0.6 : t * 3.2; d.beaconGlow.material.opacity = still ? 0.8 : 0.45 + 0.5 * pulse; d.beaconGlow.scale.setScalar(1.2 + (still ? 0.3 : 0.5 * pulse)); d.bulbM.color.copy(pal.amber).multiplyScalar(0.75 + 0.25 * pulse); }
       // being judged: the gavel and the scale orbit; the gavel taps
       const judged = st === "judged"; d.judge.visible = judged; d.judgeRing.visible = judged;
-      if (judged) { d.orbit.rotation.y = still ? 0.5 : t * 1.1; d.orbit.children[0].rotation.z = still ? 0 : -Math.max(0, Math.sin(t * 5 + d.phase)) * 0.8; d.judgeRing.material.opacity = 0.35 + 0.35 * pulse; d.judge.position.y = 2.0 + (still ? 0 : Math.sin(t * 2) * 0.06); }
+      if (judged) { d.orbit.rotation.y = still ? 0.5 : t * 1.1; d.orbit.children[0].rotation.z = still ? 0 : -Math.max(0, Math.sin(t * 5 + d.phase)) * 0.8; d.judgeRing.material.opacity = 0.35 + 0.35 * pulse; d.judge.position.y = 1.85 + (still ? 0 : Math.sin(t * 2) * 0.06); }
       // selection and hover
       const sel = selected === a.id, hov = hover === a.id;
       d.sel.material.opacity = sel ? 0.75 + 0.25 * Math.sin(t * 3) : hov ? 0.4 : 0;
