@@ -16,6 +16,8 @@ import { listFiles } from "../orchestrator/workspace.js";
 import { routingJsonl } from "../orchestrator/routing.js";
 import { listShifts, versionRows } from "../orchestrator/versions.js"; // 2.4
 import { quotaFor } from "../quota/index.js";
+import { usageLeft } from "../quota/usage.js"; // usage left per agent
+import { deleteRoom } from "../rooms/delete.js"; // delete a room
 import { runProc } from "../adapters/proc.js";
 import { PathDenied, GrantRefused } from "../files/paths.js";
 import { McpTokens } from "../mcp/tokens.js";
@@ -388,13 +390,10 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   });
   app.delete("/rooms/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const channels = store.listRooms().filter((r) => !r.dmAgentId);
-    const r = store.getRoom(id);
-    if (!r) return reply.code(404).send({ error: "Room not found." });
-    if (!r.dmAgentId && channels.length <= 1) return reply.code(400).send({ error: "Keep at least one channel." });
-    orch.stopRoom(id); store.deleteRoom(id); store.audit("owner", "room.deleted", r.name);
-    store.emit("event", { type: "room_deleted", roomId: id });
-    return { ok: true };
+    const force = ["1", "true"].includes(String((req.query as { force?: string } | undefined)?.force ?? ""));
+    const out = await deleteRoom(store, orch, id, force); // rooms/delete.ts: refuses while work is going unless forced, sweeps the room's rows
+    if (!out.ok) return reply.code(out.status).send({ error: out.error });
+    return { ok: true, counts: out.counts };
   });
   // Where the owner has read up to in each room. Shared by every paired device.
   const readMarks = () => store.getKV<Record<string, number>>("read_marks", {});
@@ -776,6 +775,8 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   app.get("/quota/settings", async () => quota.settings());
   app.put("/quota/settings", async (req) => quota.saveSettings(z.object({ freeMargin: z.number(), expiryBonus: z.number(), nearLimit: z.number() }).partial().parse(req.body)));
   app.get("/quota/report", async (req) => quota.report(z.object({ days: z.coerce.number().min(1).max(365).default(7) }).parse(req.query ?? {}).days));
+  // Usage left: per enabled agent, a plain view over the same quota computations (windows, headroom, learned limits, reported resets).
+  app.get("/agents/usage", async () => usageLeft(store, quota));
 
   // ---------- memory
   app.get("/memory", async (req) => {

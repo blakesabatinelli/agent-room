@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { EventEmitter } from "node:events";
 import type {
   AgentConfig, AgentScore, VersionScore, Approval, AuditEntry, Goal, LibraryDoc, MemoryEntry, MemoryProposal,
-  Message, OrchestratorSettings, Room, RoutingRecord, ServerEvent, Task,
+  Message, OrchestratorSettings, Room, RoomDeleteCounts, RoutingRecord, ServerEvent, Task,
 } from "@agent-room/shared";
 import { SETTING_DEFAULTS } from "@agent-room/shared";
 import { id, now } from "../util.js";
@@ -111,7 +111,40 @@ export class Store extends EventEmitter {
   dmRoom(agentId: string, name: string) {
     return this.listRooms().find((r) => r.dmAgentId === agentId) ?? this.createRoom(name, { dmAgentId: agentId });
   }
-  deleteRoom(roomId: string) { this.stmt("DELETE FROM rooms WHERE id=?").run(roomId); }
+  /**
+   * Remove a room and everything scoped to it: its goals, tasks, messages, routing rows, approvals, documents, memory and memory proposals,
+   * and, for the tables other modules create on first use, goal steps, reply turns, forks and night-shift sources. The room's fork lanes go with it.
+   * One transaction. Touches only the database: nothing on disk, and the usage ledger, scores, lessons, juries and two-key records (history about
+   * agents, not about the room) stay. Returns what was removed.
+   */
+  deleteRoom(roomId: string): RoomDeleteCounts {
+    const has = (t: string) => !!this.stmt("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(t);
+    const run = (sql: string, ...args: unknown[]) => this.stmt(sql).run(...(args as never[])).changes;
+    const goals = "SELECT id FROM goals WHERE room_id=?";
+    return this.db.transaction((): RoomDeleteCounts => {
+      const c: RoomDeleteCounts = { goals: 0, tasks: 0, messages: 0, routing: 0, approvals: 0, documents: 0, replyTurns: 0, goalSteps: 0, memory: 0, proposals: 0, forks: 0, writeProposals: 0, rooms: 0 };
+      for (const lane of this.listRooms().filter((r) => r.forkOf === roomId)) for (const [k, n] of Object.entries(this.deleteRoom(lane.id))) c[k as keyof RoomDeleteCounts] += n;
+      if (has("goal_steps")) c.goalSteps += run(`DELETE FROM goal_steps WHERE goal_id IN (${goals})`, roomId);
+      if (has("nightshift_sources")) run(`DELETE FROM nightshift_sources WHERE goal_id IN (${goals})`, roomId);
+      c.routing += run(`DELETE FROM routing WHERE goal_id IN (${goals}) OR json_extract(data,'$.roomId')=?`, roomId, roomId);
+      c.approvals += run("DELETE FROM approvals WHERE json_extract(data,'$.roomId')=?", roomId);
+      c.proposals += run("DELETE FROM proposals WHERE json_extract(data,'$.roomId')=?", roomId);
+      c.memory += run("DELETE FROM memory WHERE room_id=?", roomId);
+      c.documents += run("DELETE FROM documents WHERE room_id=?", roomId);
+      c.tasks += run("DELETE FROM tasks WHERE room_id=?", roomId);
+      c.goals += run("DELETE FROM goals WHERE room_id=?", roomId);
+      c.messages += run("DELETE FROM messages WHERE room_id=?", roomId);
+      if (has("reply_turns")) c.replyTurns += run("DELETE FROM reply_turns WHERE room_id=?", roomId);
+      if (has("forks")) c.forks += run("DELETE FROM forks WHERE room_id=?", roomId);
+      const wp = this.getKV<{ roomId?: string }[]>("write_proposals", []); // pending file write-backs asked for in this room
+      const mine = wp.filter((p) => p.roomId === roomId);
+      if (mine.length) { this.setKV("write_proposals", wp.filter((p) => p.roomId !== roomId)); c.writeProposals += mine.length; }
+      const marks = this.getKV<Record<string, number>>("read_marks", {});
+      if (roomId in marks) { delete marks[roomId]; this.setKV("read_marks", marks); }
+      c.rooms += run("DELETE FROM rooms WHERE id=?", roomId);
+      return c;
+    })();
+  }
 
   // ---- agents
   saveAgent(a: AgentConfig) { this.put("agents", { id: a.id, data: JSON.stringify(a) }); this.emitEvent({ type: "agent", agent: a }); }
