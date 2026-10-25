@@ -83,6 +83,13 @@ test("QA: every var(--x) in the phone app's CSS is defined in light, in dark (sy
       return css.slice(i, j);
     };
     const defined = (b: string) => new Set([...b.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]));
+    const fallback0 = (name: string) => new RegExp(`var\\(${name},`).test(css);
+    if (file === "office.css") { // 3.4b: the office is dark first; data-theme="light" is its variant
+      const base = defined(block(/(^|\n):root \{/)), lightVariant = defined(block(/:root\[data-theme="light"\]/));
+      for (const v of used) if (!fallback0(v)) assert.ok(base.has(v), `${file}: ${v} is used but not defined`);
+      for (const v of lightVariant) assert.ok(base.has(v), `${file}: the light variant redefines ${v}, which the dark base never defines`);
+      continue;
+    }
     const light = defined(block(/(^|\n):root \{/));
     const darkSystem = defined(block(/@media \(prefers-color-scheme: dark\)/));
     const darkChosen = defined(block(/:root\[data-theme="dark"\]/));

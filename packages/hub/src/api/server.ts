@@ -139,6 +139,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     // 3.4: the office page, its script and style, and the pinned three.js build it imports (the CSP only allows our own origin)
     ["office.html", "text/html; charset=utf-8"], ["office.js", "text/javascript; charset=utf-8"], ["office.css", "text/css; charset=utf-8"],
     ["vendor/three.module.min.js", "text/javascript; charset=utf-8"],
+    ["office-scene.js", "text/javascript; charset=utf-8"], // 3.4b: the 3D floor, loaded only when the office is drawn in 3D
     ["fork.js", "text/javascript; charset=utf-8"], // 4.4: the fork view (two sides, the blind comparison, merge)
   ] as const) {
     try { webFiles.set(name, { type, body: readFileSync(new URL(name, webDir)) }); } catch { /* missing asset: that route 404s */ }
@@ -704,7 +705,7 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   registerReportRoutes(app, store); // 2.7: GET /reports/scorecard, /reports/ledger, /reports/kill-review, GET /attention
   registerNightShiftRoutes(app, store, orch.nightshift); // 4.5: GET /nightshift, /nightshift/runs, /nightshift/head-to-head
   registerRoomRoutes(app, () => ({ store, control: () => orch.control, files: orch.files, standing: orch.standing })); // 4.3: GET and PUT /rooms/:id/definition
-  registerOfficeRoutes(app, store); // 3.4: GET /office?roomId=
+  registerOfficeRoutes(app, store, () => orch.control); // 3.4: GET /office?roomId= (3.4b: personas come from the control folder)
   registerDistributionRoutes(app, store, { dataDir: orch.dataDir, ...distribution }); // 4.7: GET /version, /privacy, /telemetry/preview, /crashes
   registerForkRoutes(app, store, () => orch.forks); // 4.4: POST /goals/fork, GET /forks, GET /forks/:id, POST /forks/:id/merge
   registerPolicyRoutes(app, { policy: () => orch.policy, store, approvals }); // 4.2: GET /policy, rules accept/edit/delete, GET and POST /leases, POST /approvals/:id/lease

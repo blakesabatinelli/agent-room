@@ -1,5 +1,8 @@
-import type { AgentConfig, Approval, Goal, OfficeAgent, OfficeAgentState, OfficeGoal, OfficeHelper, OfficeRequirement, OfficeState, ServerEvent, Task } from "@agent-room/shared";
+import type { AgentConfig, AgentScore, Approval, Goal, Message, OfficeAgent, OfficeAgentState, OfficeGoal, OfficeHelper, OfficeRequirement, OfficeState, ServerEvent, Task } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
+import type { ControlFolder } from "../control/folder.js";
+import { isStarterPersona, readPersona } from "../persona/index.js";
+import { agentDetail, officeCounts, planNodes, plainLine, shortTitle, type PersonaLine } from "./floor.js";
 
 /**
  * 3.4 The office: what each agent is doing, derived from the same live state as the room.
@@ -19,6 +22,8 @@ const OPEN: Task["status"][] = ["pending", "assigned", "running", "review", "rev
 const ACTIVE_GOAL: Goal["status"][] = ["running", "awaiting_approval", "planning", "paused"];
 /** A working event that was never closed (a crashed run) stops counting after this long. */
 const STALE_WORKING_MS = 30 * 60_000;
+/** 3.4b: how far back each room's messages are read for outputs and monitors. */
+const MESSAGES_PER_ROOM = 80;
 
 export interface OfficeInput {
   agents: AgentConfig[];
@@ -29,6 +34,10 @@ export interface OfficeInput {
   working: Record<string, Record<string, string>>;
   roomId?: string;
   now?: number;
+  /** 3.4b: recent messages in the office's rooms (for each agent's outputs and monitor), scores (for typical run time) and persona lines. */
+  messages?: Message[];
+  scores?: AgentScore[];
+  personas?: Record<string, PersonaLine>;
 }
 
 function helperState(t: Task): OfficeHelper["state"] {
@@ -37,7 +46,7 @@ function helperState(t: Task): OfficeHelper["state"] {
   return "idle";
 }
 
-function whiteboard(goals: Goal[], tasks: Task[]): OfficeGoal | undefined {
+function whiteboard(goals: Goal[], tasks: Task[], agentIds: Set<string>): OfficeGoal | undefined {
   const live = goals.filter((g) => g.status !== "superseded");
   const newest = (a: Goal, b: Goal) => b.createdAt - a.createdAt;
   const active = live.filter((g) => ACTIVE_GOAL.includes(g.status)).sort((a, b) => ACTIVE_GOAL.indexOf(a.status) - ACTIVE_GOAL.indexOf(b.status) || newest(a, b));
@@ -50,7 +59,10 @@ function whiteboard(goals: Goal[], tasks: Task[]): OfficeGoal | undefined {
   const progress = goal.status === "done" ? 1
     : reqs.length ? reqs.filter((r) => r.status === "met").length / reqs.length
     : own.length ? own.filter((t) => t.status === "done").length / own.length : 0;
-  return { id: goal.id, objective: goal.contract?.objective || goal.text, status: goal.status, requirements: reqs, progress: Math.round(progress * 100) / 100 };
+  const nodes = planNodes(tasks.filter((t) => t.goalId === goal.id && !isSubagent(t as OfficeTask)), agentIds); // 3.4b: the task-flow board
+  const next = goal.state?.nextAction?.trim();
+  return { id: goal.id, objective: goal.contract?.objective || goal.text, status: goal.status, requirements: reqs, progress: Math.round(progress * 100) / 100,
+    title: shortTitle(goal.text || goal.contract?.objective || ""), tasks: nodes, ...(next ? { nextAction: plainLine(next, 160) } : {}) };
 }
 
 export function buildOfficeState(i: OfficeInput): OfficeState {
@@ -75,6 +87,12 @@ export function buildOfficeState(i: OfficeInput): OfficeState {
     helpersOf.set(deskAgent, list);
   }
 
+  const now = i.now ?? Date.now();
+  const goal = whiteboard(i.goals, tasks, new Set(i.agents.map((a) => a.id)));
+  const planned = tasks.filter((t) => !isSubagent(t));
+  const messages = (i.messages ?? []).filter((m) => inRoom(m.roomId));
+  const scoreOf = (agentId: string, taskType: string) => i.scores?.find((s) => s.agentId === agentId && s.taskType === taskType);
+
   const agents: OfficeAgent[] = i.agents.map((a) => {
     const own = tasks.filter((t) => t.assignee === a.id && !isSubagent(t));
     const asking = pending.find((p) => p.agentId === a.id);
@@ -87,10 +105,13 @@ export function buildOfficeState(i: OfficeInput): OfficeState {
     else if (judged) { state = "judged"; taskTitle = judged.title; }
     else if (running || chat !== undefined) { state = "working"; taskTitle = running?.title ?? chat; }
     else state = "idle";
-    return { id: a.id, name: a.name, color: a.color, avatar: a.avatar || (a.name || "?")[0].toUpperCase(), state, ...(taskTitle ? { taskTitle } : {}), helpers: helpersOf.get(a.id) ?? [] };
+    // 3.4b: the task behind the state (a task waiting for the owner's input explains an idle desk), and the inspector's detail
+    const current = state === "offline" ? undefined : state === "waiting_approval" ? (running ?? judged) : state === "judged" ? judged : running ?? own.find((t) => t.status === "waiting");
+    const detail = agentDetail({ agentId: a.id, current, tasks: planned, byId, nodes: goal?.tasks ?? [], messages, pending, score: current ? scoreOf(a.id, current.taskType) : undefined, persona: i.personas?.[a.id], now });
+    return { id: a.id, name: a.name, color: a.color, avatar: a.avatar || (a.name || "?")[0].toUpperCase(), state, ...(taskTitle ? { taskTitle } : {}), helpers: helpersOf.get(a.id) ?? [], ...detail };
   });
 
-  return { at: i.now ?? Date.now(), ...(i.roomId ? { roomId: i.roomId } : {}), agents, goal: whiteboard(i.goals, tasks), pendingApprovals: pending.length };
+  return { at: now, ...(i.roomId ? { roomId: i.roomId } : {}), agents, goal, pendingApprovals: pending.length, counts: officeCounts(agents.length, goal?.tasks ?? [], pending) };
 }
 
 /** Keeps the `working` events (they are not stored anywhere) and builds the office from them and the store. */
@@ -98,7 +119,7 @@ export class OfficeTracker {
   private working = new Map<string, Map<string, { label: string; at: number }>>();
   private readonly listener = (e: ServerEvent) => this.apply(e);
 
-  constructor(private store: Store, private clock: () => number = Date.now) { store.on("event", this.listener); }
+  constructor(private store: Store, private clock: () => number = Date.now, private control: () => ControlFolder | undefined = () => undefined) { store.on("event", this.listener); }
   dispose() { this.store.off("event", this.listener); }
 
   /** Feed one live event. Only `working` changes what the tracker holds; everything else is read from the store when asked. */
@@ -116,6 +137,18 @@ export class OfficeTracker {
     return out;
   }
 
+  /** Each agent's persona role, and the first line of its bio when it has more than the starter text. */
+  private personas(): Record<string, PersonaLine> {
+    const out: Record<string, PersonaLine> = {};
+    for (const a of this.store.listAgents()) {
+      const p = readPersona(this.store, this.control(), a.id);
+      if (!p) continue;
+      const about = isStarterPersona(p) ? "" : plainLine(p.body.split(/\r?\n/).find((l) => l.trim() && !l.trim().startsWith("#")) ?? "", 140);
+      out[a.id] = { ...(p.role ? { role: plainLine(p.role, 80) } : {}), ...(about ? { about } : {}) };
+    }
+    return out;
+  }
+
   state(roomId?: string): OfficeState {
     const rooms = roomId ? [roomId] : this.store.listRooms().map((r) => r.id);
     return buildOfficeState({
@@ -125,6 +158,10 @@ export class OfficeTracker {
       approvals: this.store.listApprovals("pending"),
       working: this.workingNow(),
       roomId, now: this.clock(),
+      // 3.4b: what the inspector and the monitors show
+      messages: rooms.flatMap((id) => this.store.listMessages(id, MESSAGES_PER_ROOM)),
+      scores: this.store.listScores(),
+      personas: this.personas(),
     });
   }
 }

@@ -2045,3 +2045,52 @@ export interface AgentConfig {
   location?: "here" | "elsewhere";
   connectsFrom?: { address: string; loopback: boolean; at: number };
 }
+// ---- 3.4b Office, live operations floor
+/** Something an agent produced lately, for the office inspector: an accepted task, a task sent back, or a message it posted. */
+export interface OfficeOutput { at: number; kind: "accepted" | "sent_back" | "message"; text: string; taskId?: string }
+/** A pending approval this agent is waiting on. */
+export interface OfficeApprovalItem { id: string; tool: string; action: string; detail: string; createdAt: number }
+/** The task that explains an agent's state, with what the hub knows about how far along it is. */
+export interface OfficeAgentTask {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  attempts: number;
+  /** When the current attempt was claimed. */
+  startedAt?: number;
+  /**
+   * 0..1 when known: the share of the task's criteria passed in its latest report or judgment (`criteria`), or the time spent
+   * over this agent's usual time for this task type, capped at 0.95 (`typical_time`). Left out when the hub has neither.
+   */
+  progress?: number;
+  progressFrom?: "criteria" | "typical_time";
+  /** One plain line on where the task is: "First attempt", "Waiting for the judge", "Revising: ...". */
+  step: string;
+  /** Unfinished tasks it depends on, and approvals it waits for. */
+  blockedBy: string[];
+}
+export interface OfficeAgent {
+  /** The persona's role line (3.2), else the hub's default. */
+  role?: string;
+  /** The first line of the persona's bio, when it has one. */
+  about?: string;
+  task?: OfficeAgentTask;
+  /** The next task in plan order that is this agent's and has not started. */
+  next?: string;
+  /** Newest first, at most 5. */
+  outputs?: OfficeOutput[];
+  /** The last lines this agent posted in the room, oldest first, for its monitor. */
+  log?: string[];
+  approvals?: OfficeApprovalItem[];
+}
+/** One of the goal's planned tasks on the task-flow board, in plan order. `judgeId` is the agent that judged its last attempt, when one did. */
+export interface OfficeTaskNode { id: string; title: string; status: TaskStatus; assignee?: string; dependsOn: string[]; attempts: number; updatedAt: number; judgeId?: string }
+export interface OfficeGoal {
+  /** A short title for the pedestal: the goal's first line, clipped at a word. */
+  title?: string;
+  tasks?: OfficeTaskNode[];
+  nextAction?: string;
+}
+/** The office header: agents on the floor, the goal's tasks, those in progress, and blockers (failed, waiting for the owner, or held by a pending approval). */
+export interface OfficeCounts { agents: number; tasks: number; inProgress: number; blockers: number }
+export interface OfficeState { counts?: OfficeCounts }

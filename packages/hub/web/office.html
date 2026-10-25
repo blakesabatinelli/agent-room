@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="light dark">
-<meta name="theme-color" content="#ffffff">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#070c12">
 <link rel="icon" type="image/png" sizes="32x32" href="/web/favicon-32.png">
 <link rel="stylesheet" href="/web/office.css">
 <title>Office - Agent Room</title>
@@ -12,29 +12,47 @@
 <body>
 <header id="bar">
   <a id="back" class="icon" href="/" aria-label="Back to the room">‹</a>
-  <div id="title">Office</div>
+  <div id="heading">
+    <div id="title"><span id="roomName">Office</span><span class="sep"> // </span><span>Office</span></div>
+    <div id="counts"></div>
+  </div>
+  <span id="live" class="live" title="Live connection"><span id="dot" class="dot"></span><span id="liveText">Connecting</span></span>
   <div id="modes" role="group" aria-label="View">
     <button id="mode3d" type="button" aria-pressed="false">3D</button>
     <button id="mode2d" type="button" aria-pressed="false">2D</button>
   </div>
+  <button id="full" class="chip" type="button" aria-pressed="false" hidden>Full screen</button>
   <button id="power" class="chip" type="button" aria-pressed="false" title="Stops the animation to save battery">Low power</button>
-  <span id="dot" class="dot" title="Live connection"></span>
 </header>
 <div id="note" role="status" hidden></div>
-<main id="main">
-  <div id="stage" hidden>
-    <canvas id="scene" role="img" aria-label="The office, in 3D"></canvas>
-    <div id="labels"></div>
-  </div>
-  <div id="plan" hidden></div>
-</main>
-<footer id="legend" aria-label="Legend">
-  <span class="key st-working">Working</span>
-  <span class="key st-waiting_approval">Needs approval</span>
-  <span class="key st-judged">Being judged</span>
-  <span class="key st-idle">Idle</span>
-  <span class="key st-offline">Offline</span>
-</footer>
+<div id="body">
+  <main id="main">
+    <div id="stage" hidden>
+      <canvas id="scene" role="img" aria-label="The office, in 3D"></canvas>
+      <div id="labels"></div>
+      <div id="hint">Drag to turn · scroll to zoom · double-click to reset</div>
+    </div>
+    <div id="plan" hidden></div>
+    <footer id="legend" aria-label="Legend">
+      <span class="key st-working">Working</span>
+      <span class="key st-waiting_approval">Needs approval</span>
+      <span class="key st-judged">Being judged</span>
+      <span class="key st-idle">Idle</span>
+      <span class="key st-offline">Offline</span>
+    </footer>
+  </main>
+  <aside id="inspector" hidden aria-label="Agent details">
+    <div class="ins-head">
+      <span id="insAvatar" class="avatar"></span>
+      <div class="ins-name"><b id="insName"></b><span id="insState" class="state"></span></div>
+      <button id="insClose" class="icon" type="button" aria-label="Close details">×</button>
+    </div>
+    <p id="insRole" class="role"></p>
+    <p id="insAbout" class="about"></p>
+    <div id="insBody"></div>
+    <button id="insOpen" class="primary" type="button">Open thread</button>
+  </aside>
+</div>
 <p id="summary" class="sr" aria-live="polite"></p>
 <script type="module" src="/web/office.js"></script>
 </body>
