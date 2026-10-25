@@ -398,7 +398,7 @@ function echoing(ctx: Ctx) {
 
 test("AC2: judges never see the persona: jury, single-judge fallback and jury off, even when the worker echoes the block", async () => {
   const modes: [string, () => Ctx, (c: Ctx) => void][] = [
-    ["jury", fourFamilies, () => {}],
+    ["jury", fourFamilies, (c) => c.store.setSettings({ ...c.store.getSettings(), judging: "full" })], // Speed: the jury is now opt-in
     ["fallback (too few families)", setup, () => {}],
     ["jury off", fourFamilies, (c) => c.store.setSettings({ ...c.store.getSettings(), jury: { enabled: false } })],
   ];
@@ -424,6 +424,7 @@ test("AC2: judges never see the persona: jury, single-judge fallback and jury of
 
 test("AC2: a whole goal: no judge, rewriter, planner, verifier, memory or retro prompt carries any persona", async () => {
   const ctx = fourFamilies();
+  ctx.store.setSettings({ ...ctx.store.getSettings(), judging: "full" }); // Speed: exercise the full jury so the NEUTRALIZE rewriter runs
   await describeAll(ctx);
   MockAdapter.calls.length = 0;
   const goal = await ctx.orch.runGoal(ctx.room.id, "Summarize the venue TV market");

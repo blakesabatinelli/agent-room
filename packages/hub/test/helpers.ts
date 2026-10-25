@@ -15,14 +15,14 @@ export const HW = {
   large: { totalGB: 64, freeGB: 40, cores: 16, appleSilicon: true, chip: "Apple M3 Max", machine: "Mac Studio" } as HardwareInfo,
 };
 
-export function setup(opts: { rand?: () => number; retryDelayMs?: number; gitBin?: string; hardware?: HardwareInfo; freeGB?: () => number } = {}) {
+export function setup(opts: { rand?: () => number; retryDelayMs?: number; gitBin?: string; hardware?: HardwareInfo; freeGB?: () => number; defer?: (fn: () => void) => void; onDefer?: (label: string) => void } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "ar-"));
   const store = new Store(join(dir, "t.db"));
   seed(store, true);
   const approvals = new Approvals(store, 2000);
   const hw = opts.hardware ?? HW.large;
   const governor = new CapacityGovernor(store, hw, { freeGB: opts.freeGB ?? (() => hw.freeGB) });
-  const orch = new Orchestrator(store, approvals, { dataDir: dir, mcpUrl: () => undefined, rand: opts.rand ?? (() => 0.99), retryDelayMs: opts.retryDelayMs ?? 1, gitBin: opts.gitBin, libraryDir: join(dir, "Library"), governor });
+  const orch = new Orchestrator(store, approvals, { dataDir: dir, mcpUrl: () => undefined, rand: opts.rand ?? (() => 0.99), retryDelayMs: opts.retryDelayMs ?? 1, gitBin: opts.gitBin, libraryDir: join(dir, "Library"), governor, defer: opts.defer, onDefer: opts.onDefer });
   const room = store.listRooms()[0];
   return { dir, store, approvals, orch, room, governor };
 }

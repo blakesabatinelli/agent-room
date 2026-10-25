@@ -122,6 +122,8 @@ export class Quota {
     this.ledger.record({ ...base, tokensIn: 0, tokensOut: 0, runs: 1, rateLimited: true, resetAt, predicted });
     this.mutate(sub.id, (s) => (rl.kind === "quota" ? applyQuotaHit(s, win, { tokens: used.tokens, runs: used.runs }, quotaReset!, now) : applyBurst(s, resetAt, now)));
     this.store.audit("hub", "quota.limited", `${sub.label}: ${rl.kind} limit${predicted ? " (predicted)" : ""}, out until ${new Date(resetAt).toISOString()}`);
+    this.store.emit("quota", { subscriptionId: sub.id, limited: true }); // Speed: invalidate the cached usage strip
+
   }
 
   private mutate(subId: string, f: (s: Subscription) => Subscription) {
@@ -129,6 +131,7 @@ export class Quota {
   }
   private clearLimited(subId: string) {
     this.mutate(subId, (s) => { const { limitedUntil: _u, limitedWindow: _w, limitedAt: _a, ...rest } = s.learned ?? {}; return { ...s, learned: rest }; });
+    this.store.emit("quota", { subscriptionId: subId, limited: false }); // Speed: a lifted limit invalidates the cached usage strip
   }
 
   /** True while a task can still be moved to another agent after a rate limit (bounded, so a day of 429s can't loop forever). */

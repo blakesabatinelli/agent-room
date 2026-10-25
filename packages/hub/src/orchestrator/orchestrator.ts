@@ -32,6 +32,7 @@ import { detectHardware } from "../capacity/hardware.js";
 import { cleanNeeds } from "../discovery/connectors.js"; // 1.3
 import { needsGate, needsMessage, workspaceMessage, type NeedsGate } from "../discovery/routing.js"; // 1.3
 import { familyOf, juryLine, jurySummary, recordOwnerRating, review as juryReview, type JuryHost } from "../jury/index.js"; // 2.2
+import { Deferrer } from "./defer.js"; // Speed: deferred post-bookkeeping
 import { loadCommandIndex, plannerCommands } from "../commands/index.js"; // 2.6
 import { buildInvocation, parseCommand, unknownReply, type Invocation } from "../commands/invoke.js"; // 2.6
 import { learnedBlock, runRetro } from "../retro/index.js"; // 2.1
@@ -81,6 +82,10 @@ export interface OrchestratorOptions {
   governor?: CapacityGovernor;
   /** 2.5: memory keeper options (tests inject a fake home folder for the context-file export). */
   memory?: KeeperOptions;
+  /** Speed: schedule deferred post-bookkeeping (default queueMicrotask). A test injects a collector to prove ordering. */
+  defer?: (fn: () => void) => void;
+  /** Speed: observe when a deferred bookkeeping task runs (its label), for tests. */
+  onDefer?: (label: string) => void;
 }
 
 type PlanTask = RawPlanTask;
@@ -149,6 +154,8 @@ export class Orchestrator {
   twoKey: TwoKey;
   /** Durable goals: the step log (`goal_steps`) every step that changes a goal is written to, and what recover() reads after a restart. */
   durable: Durable;
+  /** Speed: schedules non-critical post-bookkeeping (memory harvest, tag routing, status writes) to run after the agent's words reach the room. */
+  private deferred: Deferrer;
 
   /** 1.2: the hub's data folder (the API server keeps local-pair.secret there). */
   get dataDir(): string { return this.opts.dataDir; }
@@ -191,6 +198,7 @@ export class Orchestrator {
     this.policy = new PolicyEngine({ store, approvals, control: () => this.control, rooms: this.rooms, attention: this.attention });
     this.turns = new ReplyTurns(store);
     this.durable = new Durable(store); // durable goals
+    this.deferred = new Deferrer(opts.defer, opts.onDefer); // Speed: post-bookkeeping off the streaming path
     // 4.3: the calendar trigger for standing rooms (started by main.ts with orch.standing.start()).
     this.standing = new StandingRooms({
       store, control: () => this.control, attention: this.attention,
@@ -474,6 +482,12 @@ export class Orchestrator {
     if (cmd === "/resume") return this.setPaused(roomId, false);
     if (cmd === "/stop") return this.stopRoom(roomId);
     if (cmd === "/digest") { this.attention.digestNow(roomId); return msg; } // 2.7: the evening digest, now
+    if (/^\/jury(\s|$)/.test(cmd)) { // Speed: escalate this room's running goal to the full 3-judge jury
+      const g = this.activeGoal(roomId);
+      if (g) { g.fullJury = true; this.store.saveGoal(g); this.store.audit("owner", "jury.escalated", `"${g.text.slice(0, 80)}": full jury`); this.post(roomId, SYS, "Switched this goal to the full jury: new reviews use three cross-vendor judges.", "system"); }
+      else this.post(roomId, SYS, "Nothing is running to review. The next goal you start here will judge fast; send /jury once it is running to use the full jury.", "system");
+      return msg;
+    }
     if (/^\/fork(\s|$)/.test(cmd)) { void this.forks.fromCommand(roomId, text); return msg; } // 4.4: /fork [goal] [| rosterA: ...] [| rosterB: ...]
     if (this.slashCommand(roomId, text)) return msg; // 2.6: /<agent>:<command> args, or an unknown /command
 
@@ -759,7 +773,8 @@ export class Orchestrator {
     if (turn.messageId) {
       // The agent already posted its reply with the MCP tool during this turn: its final answer is not posted a second time.
       this.turns.end(turn, "answered");
-      if (res.ok && res.text.trim()) this.harvestMemory(agent.id, roomId, res.text);
+      // Speed: memory harvest is non-critical; keep it off the reply path.
+      if (res.ok && res.text.trim()) this.deferred.after("reply:harvest", () => this.harvestMemory(agent.id, roomId, res.text));
       return this.store.listMessages(roomId).find((x) => x.id === turn.messageId)?.text ?? res.text;
     }
     if (!res.ok) {
@@ -771,9 +786,10 @@ export class Orchestrator {
     const m = this.post(roomId, this.agentAuthor(agent), res.text, "agent", undefined, false, hop);
     this.turns.replied(turn, m.id, "answer");
     this.turns.end(turn, "answered");
-    this.harvestMemory(agent.id, roomId, res.text);
+    // Speed: the agent's words are in the room now; memory harvest and onward tag routing run after, not before the post.
+    this.deferred.after("reply:harvest", () => this.harvestMemory(agent.id, roomId, res.text));
     // Don't bounce straight back to whoever asked: the reply already goes to them.
-    this.routeTags(m, hop, asker ? [asker.id] : []);
+    this.deferred.after("reply:routeTags", () => this.routeTags(m, hop, asker ? [asker.id] : []));
     return res.text;
   }
 
@@ -1731,11 +1747,16 @@ export class Orchestrator {
     }
     const posted = resumed ? this.postedSince(task.id, agent.id, resumed.run.startedAt) : false; // durable goals: a reply posted before the restart is not posted again
     const m = posted ? undefined : this.post(goal.roomId, this.agentAuthor(agent), body, "agent", task.id);
-    if (!posted) this.harvestMemory(agent.id, goal.roomId, body, goal.id);
-    if (m) this.routeTags(m, 0);
-    if (!posted) this.store.saveMemory({ id: id("mem"), scope: "private", ownerAgentId: agent.id, roomId: goal.roomId,
-      text: `Did "${task.title}" for goal "${goal.text.slice(0, 80)}".`, sourceAgentId: agent.id, confidence: 1, createdAt: now(),
-      source: { kind: "goal", id: goal.id, agentId: agent.id, at: now() }, memKind: "status" /* 2.5 */ });
+    // Speed: the agent's words are in the room now. Memory harvest, onward tag routing and the status-memory write are
+    // non-critical bookkeeping, so they run after the post rather than between the agent and the room. The durable
+    // run_finished record above (ordered before judging) and everything judging depends on stay inline.
+    if (!posted) {
+      this.deferred.after("task:harvest", () => this.harvestMemory(agent.id, goal.roomId, body, goal.id));
+      this.deferred.after("task:statusMemory", () => this.store.saveMemory({ id: id("mem"), scope: "private", ownerAgentId: agent.id, roomId: goal.roomId,
+        text: `Did "${task.title}" for goal "${goal.text.slice(0, 80)}".`, sourceAgentId: agent.id, confidence: 1, createdAt: now(),
+        source: { kind: "goal", id: goal.id, agentId: agent.id, at: now() }, memKind: "status" /* 2.5 */ }));
+    }
+    if (m) this.deferred.after("task:routeTags", () => this.routeTags(m, 0));
 
     // The agent itself says it can't finish: don't judge, act on it.
     if (report.status === "needs_input") {
@@ -2001,13 +2022,28 @@ export class Orchestrator {
   }
 
   /**
+   * Speed: how heavily to judge this task. "fast" (the default) = one cross-vendor judge, no rewrite. "full" = the
+   * 3-judge jury. High-stakes tasks (ones that went through two-key, or a verify-round re-check) and goals/tasks the
+   * owner escalated with /jury always get the full jury, even in fast mode. The owner can also set the whole room to full.
+   */
+  private juryMode(task: Task): "fast" | "full" {
+    if ((this.cfg().judging ?? "fast") === "full") return "full";
+    if (task.fullJury || this.store.getGoal(task.goalId)?.fullJury) return "full"; // owner asked (/jury)
+    if (task.origin === "verify") return "full";                                   // high-stakes: a verify-round re-check
+    if (this.twoKey.list({ taskId: task.id, limit: 1 }).length) return "full";     // high-stakes: went through two-key
+    return "fast";
+  }
+
+  /**
    * 2.2 HOOK: blind cross-vendor jury. The reply is neutralised and three judges from other model families grade it;
    * with too few families ready (or the jury switched off) this is the single rotating judge it always was (judgeOne).
+   * Speed: by default a normal task gets one cross-vendor judge (juryMode); the full jury is kept for high-stakes work.
    */
   private async judge(task: Task, worker: AgentConfig, contract: Contract | undefined, notes: string[], signal: AbortSignal, changed: string[] = [], files = "", previousFeedback?: string, notJudge?: string): Promise<Judgment> {
     // 4.3: judges come from the room's roster. Only when a jury can't be formed inside it are others used, and then it is recorded (outsideRoster).
     const host = (limit: boolean): JuryHost => ({ store: this.store, readyAgents: () => this.readyAgents(limit ? task.roomId : undefined), call: (a, p, o) => this.call(a, p, o), callJson: (p, a, sig, r) => this.callJson(p, a, sig, r), governor: this.governor, quotaLimited: (aid) => quotaLimited(this.store, aid) });
-    const input = { task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge };
+    const input = { task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge, mode: this.juryMode(task) }; // Speed: fast judging by default
+
     const bounded = !!this.rooms.rosterIds(task.roomId);
     let r = await juryReview(host(bounded), input);
     if (bounded && "fallback" in r) { const wide = await juryReview(host(false), input); if ("judgment" in wide) r = wide; }

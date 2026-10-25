@@ -19,18 +19,20 @@ import { installCrashHandlers } from "./distribution/crash.js"; // 4.7
 import { sendPendingCrashes } from "./distribution/reporting.js"; // 4.7
 import { UpdateChecker, startTelemetryTimer } from "./distribution/schedule.js"; // 4.7
 import { appVersion } from "./distribution/version.js"; // 4.7
-import { hubPath, knownCliDirs, loginShellPath } from "./env/shellPath.js";
+import { cachedShellPath, hubPath, knownCliDirs } from "./env/shellPath.js";
+import { takeHubLock } from "./main/hublock.js";
 
 // Apps launched from Finder get a thin PATH; make sure the agent CLIs are findable.
 const home = homedir();
-// The owner's own PATH (from their login shell) plus the usual install folders, so `claude`, `codex` and the rest are found from a Finder launch.
-process.env.PATH = hubPath(process.env.PATH, process.env.AGENT_ROOM_DEMO === "1" ? undefined : loginShellPath(), knownCliDirs(home));
-
 const dataDir = process.env.AGENT_ROOM_DATA ?? join(homedir(), ".agent-room");
 const port = Number(process.env.AGENT_ROOM_PORT ?? 4747);
 const demo = process.env.AGENT_ROOM_DEMO === "1";
 const ownerName = process.env.AGENT_ROOM_OWNER ?? "Blake";
 mkdirSync(dataDir, { recursive: true });
+// The owner's own PATH (from their login shell) plus the usual install folders, so `claude`, `codex` and the rest are found from a Finder launch.
+// Speed: the login-shell PATH is cached to <dataDir>/shell-path.json so a restart doesn't pay the ~5s shell probe; it is refreshed in the background.
+const shellPath = demo ? undefined : cachedShellPath({ file: join(dataDir, "shell-path.json"), onRefresh: (p) => { process.env.PATH = hubPath(process.env.PATH, p, knownCliDirs(home)); } });
+process.env.PATH = hubPath(process.env.PATH, shellPath, knownCliDirs(home));
 // Work from the data folder, not the folder the hub was started in. Updating the app replaces its bundle, which deletes the folder an older hub
 // is still running in; every program it then starts without a folder of its own inherits a folder that no longer exists, and Codex refuses to
 // start ("Error loading configuration: No such file or directory").
@@ -42,6 +44,12 @@ process.chdir(dataDir);
   let scriptMtimeMs = 0;
   try { scriptMtimeMs = Math.round(statSync(script).mtimeMs); } catch { /* run from source */ }
   try { writeFileSync(join(dataDir, "hub.json"), JSON.stringify({ pid: process.pid, script, scriptMtimeMs, startedAt: Date.now() }) + "\n", { mode: 0o600 }); } catch { /* best effort */ }
+}
+// Single-hub guard: if another live hub already drives this data folder, don't run a second set of orchestrator loops against the same DB. Exit cleanly; the launcher restarts a hub it replaced.
+{
+  const lock = takeHubLock({ file: join(dataDir, "hub.lock"), port });
+  console.log(lock.message);
+  if (!lock.ok) process.exit(0);
 }
 // 4.7: an uncaught exception or unhandled rejection is written (scrubbed) to <data>/crashes/ and the hub exits; launchd or the app starts it again.
 installCrashHandlers({ dataDir, version: appVersion() });

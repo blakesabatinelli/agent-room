@@ -17,6 +17,7 @@ import { routingJsonl } from "../orchestrator/routing.js";
 import { listShifts, versionRows } from "../orchestrator/versions.js"; // 2.4
 import { quotaFor } from "../quota/index.js";
 import { usageLeft } from "../quota/usage.js"; // usage left per agent
+import { UsageCache } from "../quota/usage-cache.js"; // Speed: cache the usage strip
 import { deleteRoom } from "../rooms/delete.js"; // delete a room
 import { runProc } from "../adapters/proc.js";
 import { PathDenied, GrantRefused } from "../files/paths.js";
@@ -776,7 +777,10 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   app.put("/quota/settings", async (req) => quota.saveSettings(z.object({ freeMargin: z.number(), expiryBonus: z.number(), nearLimit: z.number() }).partial().parse(req.body)));
   app.get("/quota/report", async (req) => quota.report(z.object({ days: z.coerce.number().min(1).max(365).default(7) }).parse(req.query ?? {}).days));
   // Usage left: per enabled agent, a plain view over the same quota computations (windows, headroom, learned limits, reported resets).
-  app.get("/agents/usage", async () => usageLeft(store, quota));
+  // Speed: the live strip polls this, so the computed response is cached for ~15s. A rate-limit/usage change invalidates it (store "quota" event).
+  const usageCache = new UsageCache((now) => usageLeft(store, quota, now));
+  store.on("quota", () => usageCache.invalidate());
+  app.get("/agents/usage", async () => usageCache.get());
 
   // ---------- memory
   app.get("/memory", async (req) => {

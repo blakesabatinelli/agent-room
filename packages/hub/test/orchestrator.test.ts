@@ -723,7 +723,8 @@ test("retries: a rate limit moves the task to another agent without spending an 
 
 test("reviews: criteria nobody can verify are escalated once, then flagged instead of looping", async () => {
   const { store, orch, room } = setup();
-  for (const id of ["claude", "codex"]) { const a = store.getAgent(id)!; a.settings.unsure = true; store.saveAgent(a); }
+  // Speed: fast judging may draw the single judge from any cross-vendor family, so every judge has to be unsure for this scenario.
+  for (const id of ["claude", "codex", "hermes"]) { const a = store.getAgent(id)!; a.settings.unsure = true; store.saveAgent(a); }
   MockAdapter.calls.length = 0;
   const goal = await orch.runGoal(room.id, "Summarize the venue TV market");
   const tasks = store.listTasks({ goalId: goal.id }).filter((t) => t.origin === "plan");

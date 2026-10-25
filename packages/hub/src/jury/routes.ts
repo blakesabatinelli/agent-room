@@ -16,7 +16,7 @@ export function registerJuryRoutes(app: FastifyInstance, store: Store) {
     return {
       calibration: calibrationOf(store),
       juries: all.length,
-      byKind: { jury: all.filter((j) => j.kind === "jury").length, second: all.filter((j) => j.kind === "second").length, fallback: all.filter((j) => j.kind === "fallback").length },
+      byKind: { jury: all.filter((j) => j.kind === "jury").length, second: all.filter((j) => j.kind === "second").length, fallback: all.filter((j) => j.kind === "fallback").length, fast: all.filter((j) => j.kind === "fast").length },
       splits: all.filter((j) => j.split).length,
       fallbackReasons: all.filter((j) => j.kind === "fallback").reduce<Record<string, number>>((m, j) => { const k = j.reason ?? "unknown"; m[k] = (m[k] ?? 0) + 1; return m; }, {}),
     };

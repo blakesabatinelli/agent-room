@@ -359,6 +359,8 @@ export const SETTING_DEFAULTS = {
   maxAgentHops: 4, claimTimeoutMinutes: 3, driftStrikes: 2,
   planApproval: "big" as "always" | "big" | "never", autoRunChecks: false, autoResume: true,
   stallLimit: 4, maxGoalReplans: 2, maxVerifyRounds: 2, maxTaskRuns: 40,
+  judging: "fast" as "fast" | "full", // Speed: one cross-vendor judge per normal task; full jury on request or for high-stakes tasks
+
   memoryTtlDays: { fact: 90, preference: 365, status: 14 }, memoryExportBytes: 4096, // 2.5
   probationRuns: 5, // 2.3
   subagents: { maxDepth: 2, budgetPerGoal: 6, maxParallel: 3 }, // 3.3 (D8)
@@ -1076,8 +1078,8 @@ export interface JuryRecord {
   taskId: string;
   goalId: string;
   at: number;
-  /** jury = several families; second = the extra reviewer after an UNSURE; fallback = one judge, the reason says why. */
-  kind: "jury" | "second" | "fallback";
+  /** jury = several families; second = the extra reviewer after an UNSURE; fallback = one judge, the reason says why; fast = one cross-vendor judge chosen by fast-judging default. */
+  kind: "jury" | "second" | "fallback" | "fast";
   reason?: string;
   /** Asked for a local judge but none could be used. */
   noLocal?: string;
@@ -2297,3 +2299,14 @@ export interface RoomDeleteCounts {
   replyTurns: number; goalSteps: number; memory: number; proposals: number; forks: number; writeProposals: number; rooms: number;
 }
 export interface RoomDeleteResponse { ok: true; counts: RoomDeleteCounts }
+
+// ---- Speed: lighter judging by default
+/**
+ * OrchestratorSettings.judging. "fast" (default): one cross-vendor judge per normal task, no neutral rewrite.
+ * "full": the 3-judge blind jury on every task (what it used to do). Either way, high-stakes tasks (two-key, a
+ * verify-round re-check) and goals the owner escalated with /jury still get the full jury.
+ */
+export interface OrchestratorSettings { judging?: "fast" | "full" }
+/** Owner asked for the full jury on this goal/task even in fast mode (set by /jury, or detected high-stakes). */
+export interface Goal { fullJury?: boolean }
+export interface Task { fullJury?: boolean }

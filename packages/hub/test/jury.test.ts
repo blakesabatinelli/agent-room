@@ -18,9 +18,12 @@ const ORIGINAL = `${PB}\nPERSONA-SECRET: you are Pixel, a cheerful pirate.\n${PE
 
 const calls = (kind: string) => MockAdapter.calls.filter((c) => c.kind === kind);
 
+/** Speed: judging now defaults to fast (one cross-vendor judge). These tests exercise the full jury, so they opt into it. */
+const full = (ctx: Ctx): Ctx => { ctx.store.setSettings({ ...ctx.store.getSettings(), judging: "full" }); return ctx; };
+
 /** The three seeded agents (anthropic, openai, nous) plus a local Bonsai and a Gemini: five families. */
 function fiveFamilies(setupOpts: Parameters<typeof setup>[0] = {}): Ctx {
-  const ctx = setup(setupOpts);
+  const ctx = full(setup(setupOpts));
   const base = ctx.store.getAgent("claude")!;
   ctx.store.saveAgent({ ...base, id: "bonsai", name: "Bonsai", provider: "local", settings: { quality: 0.8, model: "bonsai-8b", locality: "local-model" }, canBeOrchestrator: false });
   ctx.store.saveAgent({ ...base, id: "gemini", name: "Gemini", provider: "google", settings: { quality: 0.8, model: "gemini-3-pro" }, canBeOrchestrator: false });
@@ -271,7 +274,7 @@ test("a unanimous accept, and a tied verdict (2 judges) both resolve; reassign c
 });
 
 test("fewer than three families besides the worker's: one rotating judge, recorded as a fallback with the reason", async () => {
-  const ctx = setup(); // the default three mock agents: anthropic, openai, nous
+  const ctx = full(setup()); // the default three mock agents: anthropic, openai, nous
   MockAdapter.calls.length = 0;
   const j = await judge(ctx, review(ctx));
   assert.equal(j.jury!.kind, "fallback");
@@ -360,7 +363,7 @@ test("UNSURE from the whole jury still escalates and ends flagged, not looping",
 });
 
 test("existing single-judge behaviour holds with only the default agents", async () => {
-  const ctx = setup();
+  const ctx = full(setup());
   const goal = await ctx.orch.runGoal(ctx.room.id, "Summarize the venue TV market");
   assert.equal(goal.status, "done");
   const tasks = ctx.store.listTasks({ goalId: goal.id });
@@ -401,7 +404,7 @@ test("AC3: rating a judgment records each judge's and the jury's distance, and k
 });
 
 test("AC3: a same-family single judge is tracked apart, for the 'cross-vendor judges are worse than the user' check", async () => {
-  const ctx = setup();
+  const ctx = full(setup());
   ctx.store.saveAgent({ ...agent(ctx, "claude"), id: "claude2", name: "Claude Two" });
   ctx.store.setSettings({ ...ctx.store.getSettings(), judgeRotation: ["claude"] });
   for (const id of ["codex", "hermes"]) ctx.store.saveAgent({ ...agent(ctx, id), enabled: false });

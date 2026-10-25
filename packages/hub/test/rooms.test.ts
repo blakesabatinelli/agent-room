@@ -269,6 +269,7 @@ test("roster: a jury that can't be formed inside the roster is formed from outsi
   const c = await mk(t, { prep: (x) => {
     for (const [idn, provider] of [["gemini", "google"], ["mistral", "mistral"]] as const) x.store.saveAgent({ id: idn, name: idn, provider, adapter: "mock", enabled: true, color: "#123456", settings: {}, tools: { web: true } });
   } });
+  c.store.setSettings({ ...c.store.getSettings(), judging: "full" }); // Speed: this test is about forming the full jury across rosters
   const g = await c.orch.runGoal(c.general.id, "Research the topic and write the summary");
   const base = c.store.listTasks({ goalId: g.id })[0];
   await roomFile(c, "pipeline", { roster: ["claude", "codex"] });

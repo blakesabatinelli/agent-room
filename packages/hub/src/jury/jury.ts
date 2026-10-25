@@ -45,6 +45,11 @@ export interface JuryInput {
   previousFeedback?: string;
   /** The judge(s) that already reviewed it: one id, or the comma-joined ids of a jury (this is then the extra reviewer). */
   notJudge?: string;
+  /**
+   * Speed: "fast" (the default) uses one cross-vendor judge and no neutral rewrite; "full" convenes the 3-judge jury.
+   * The orchestrator forces "full" for high-stakes tasks and when the owner escalates. Absent is treated as "full".
+   */
+  mode?: "fast" | "full";
 }
 
 export type JuryOutcome =
@@ -183,11 +188,15 @@ export async function review(host: JuryHost, input: JuryInput): Promise<JuryOutc
   const workerFamily = familyOf(worker, localModels);
   const prior = (input.notJudge ?? "").split(",").map((x) => x.trim()).filter(Boolean);
   const second = prior.length > 1; // the first review was a jury: this is the extra reviewer for an UNSURE
+  // Speed: fast mode grades normal tasks with one cross-vendor judge and no neutral rewrite. A single out-of-family
+  // judge has no cross-family self-preference to launder, so the rewrite is skipped (the persona is still scrubbed
+  // mechanically below). requireLocal is dropped so a cloud judge is preferred over spinning up a local model.
+  const fast = input.mode === "fast" && !second;
   const ready = await host.readyAgents();
   const governor = host.governor;
   const sel = selectJudges({
-    ready, worker, workerFamily, localModels, settings: cfg, rotation: s.judgeRotation, exclude: prior,
-    size: second ? 1 : cfg.size, limited: host.quotaLimited, admit: (a) => governor?.admit(a) ?? true,
+    ready, worker, workerFamily, localModels, settings: fast ? { ...cfg, requireLocal: false } : cfg, rotation: s.judgeRotation, exclude: prior,
+    size: second || fast ? 1 : cfg.size, limited: host.quotaLimited, admit: (a) => governor?.admit(a) ?? true,
   });
 
   const base = { taskId: task.id, goalId: task.goalId, worker: worker.id, workerFamily };
@@ -216,8 +225,10 @@ export async function review(host: JuryHost, input: JuryInput): Promise<JuryOutc
   };
   if (sel.fallback) return fallback(sel.fallback, sel.noLocal);
 
-  // 1. Neutral text.
-  const neutral = await neutralText(host, input, workerFamily, ready, localModels, sel.judges, input.signal);
+  // 1. Neutral text. Fast mode scrubs the persona mechanically (no model call); the full jury rewrites it to a neutral voice.
+  const neutral = fast
+    ? { n: await neutralize(task.result ?? "", task, { worker }), rewriter: "mechanical" }
+    : await neutralText(host, input, workerFamily, ready, localModels, sel.judges, input.signal);
   const view: Task = { ...task, result: neutral.n.text };
   const prompt = judgePrompt(view, input.contract, input.notes, input.changed, input.files, input.previousFeedback);
 
@@ -240,7 +251,7 @@ export async function review(host: JuryHost, input: JuryInput): Promise<JuryOutc
   const split = reads.length > 1 && isSplit(reads.map((r) => r.verdict));
   const reasons = [reads.length < sel.judges.length ? `${reads.length} of ${sel.judges.length} judges answered` : "", neutral.n.note ? `rewriter: ${neutral.n.note}` : ""].filter(Boolean).join("; ");
   const rec: JuryRecord = {
-    id: id("jur"), at: now(), kind: second ? "second" : "jury", ...(reasons ? { reason: reasons } : {}), ...(sel.noLocal && !second ? { noLocal: sel.noLocal } : {}),
+    id: id("jur"), at: now(), kind: fast ? "fast" : second ? "second" : "jury", ...(reasons ? { reason: reasons } : {}), ...(sel.noLocal && !second ? { noLocal: sel.noLocal } : {}),
     ...base, rewriter: neutral.rewriter, ...(neutral.n.note ? { rewriterNote: neutral.n.note } : {}),
     judges: reads.map((j) => ({ agentId: j.agentId, family: j.family, local: j.local, model: j.model, score: j.score, verdict: j.verdict, criteria: verdictsOf(j.criteria) })),
     aggregate: { score: agg.score, verdict: agg.verdict, criteria: verdictsOf(agg.criteria), ...(agg.drift ? { drift: agg.drift } : {}) },
@@ -270,6 +281,7 @@ export function juryLine(j: Pick<Judgment, "jury"> | undefined): string {
   if (!info) return "";
   const mark = (v: Judgment["verdict"]) => (v === "accept" ? "✓" : "✗");
   if (info.kind === "fallback") return `1 judge${info.reason ? ` (no jury: ${info.reason})` : ""}`;
+  if (info.kind === "fast") { const j0 = info.judges[0]; return j0 ? `1 cross-vendor judge: ${mark(j0.verdict)} ${Math.round(j0.score * 100)} [${j0.family}]` : "1 judge"; }
   const who = info.judges.map((x) => `${x.family} ${mark(x.verdict)} ${Math.round(x.score * 100)}`).join(", ");
   return `${info.judges.length} judges: ${info.judges.map((x) => mark(x.verdict)).join(" ")} (agree ${Math.round(info.agreement.majority * 100)}%) [${who}]`;
 }
