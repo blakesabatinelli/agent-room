@@ -7,7 +7,8 @@
   const st = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
-    view: "rooms",          // rooms | room | tasks | roominfo | fork | approvals | diff | permissions | folders | control | policy | subscriptions | remote | personas | persona | resumes | scorecard | appearance | trace | issues | pair
+    // "rooms" is the simple home (greeting, a goal box, room cards, what's in progress). Everything past the everyday few sits behind "advanced".
+    view: "rooms",          // rooms (home) | room | advanced | usage | tasks | roominfo | fork | approvals | diff | permissions | folders | control | policy | subscriptions | remote | personas | persona | resumes | scorecard | appearance | trace | issues | pair
     settings: null, // the owner's settings (PUT /settings), for the night shift switch
     tools: [], control: null, policy: null, quota: [], remote: null, firstPass: null, memExport: [], resumes: null, probationCount: 0,
     scorecard: null, scWeek: "this", ledger: null, attention: null, // 2.7
@@ -34,6 +35,9 @@
     // Trace and Issues: the goal trace on screen (and where Back goes), and the recurring problems
     trace: { goalId: "", from: "room", roomId: "", data: null, err: "", open: {} },
     issues: { data: null, err: "", count: 0 },
+    // Simple by default: usage left per agent (GET /agents/usage) for the live strip, the agent whose usage detail is open and where that opened from,
+    // and the last room worked in (so the home goal box knows where to start).
+    usage: null, usageAgent: "", usageFrom: "rooms", lastRoomId: "",
   };
 
   // ---------- helpers
@@ -160,17 +164,18 @@
         break;
       }
       case "task": case "subagent": upsertTask(e.task); break; // 3.3 (the Tasks screen) and 3.1 (the verdict chips and the goal card)
-      case "goal": st.goals[e.goal.id] = e.goal; if (e.goal.roomId === st.roomId) { renderMessages(); renderComposerState(); } if (e.goal.fork && e.goal.fork.id === st.fork.id) refreshFork(); break; // 4.4
+      case "goal": st.goals[e.goal.id] = e.goal; if (e.goal.roomId === st.roomId) { renderMessages(); renderComposerState(); } if (st.view === "rooms") renderRooms(); if (e.goal.fork && e.goal.fork.id === st.fork.id) refreshFork(); break; // 4.4
       case "working": {
         const w = (st.working[e.roomId] ||= {});
         if (e.active) w[e.agentId] = e.label || ""; else delete w[e.agentId];
         if (e.roomId === st.roomId) renderComposerState();
+        renderStrip(); if (st.view === "rooms") renderRooms(); // the live strip and the home cards follow what is running
         break;
       }
       case "approval": {
         st.approvals = st.approvals.filter((a) => a.id !== e.approval.id);
         if (e.approval.status === "pending") st.approvals.unshift(e.approval);
-        renderBadge(); if (st.view === "approvals") renderApprovals();
+        renderBadge(); renderStrip(); if (st.view === "approvals") renderApprovals(); else if (st.view === "rooms") renderRooms();
         if (st.view === "diff" && st.reviewId === e.approval.id && e.approval.status !== "pending") go("approvals"); // decided elsewhere (the Mac)
         break;
       }
@@ -208,13 +213,28 @@
       const [rooms, agents, approvals] = await Promise.all([api("/rooms"), api("/agents"), api("/approvals?status=pending")]);
       st.rooms = rooms; st.agents = Object.fromEntries(agents.map((a) => [a.id, a])); st.approvals = approvals;
       connectWs(); render(); loadControl().catch(() => {}); loadPolicy().catch(() => {});
-      loadIssues().catch(() => {}); // the count under Settings
+      loadIssues().catch(() => {}); // the count under Advanced
+      loadUsage().catch(() => {}); // the live strip: what each agent has left
+      loadHomeGoals().catch(() => {}); // running goals and each room's one line, for the home
       openFromHash(); // 3.4: the office page links back here with #room=<id>
-      // 1.5: what the hub found about its computer, one line under Settings
-      api("/capacity").then((c) => { st.capacity = c; if (st.view === "rooms") renderRooms(); }).catch(() => {});
-      api("/settings").then((s) => { st.settings = s; if (st.view === "rooms") renderRooms(); }).catch(() => {}); // 4.5: the night shift switch
-      api("/resumes").then((r) => { st.probationCount = r.filter((x) => x.probation.on).length; if (st.view === "rooms") renderRooms(); }).catch(() => {}); // 2.3: "2 on probation" under Résumés
+      // 1.5: what the hub found about its computer, one line under Advanced
+      api("/capacity").then((c) => { st.capacity = c; if (st.view === "advanced") renderAdvanced(); }).catch(() => {});
+      api("/settings").then((s) => { st.settings = s; if (st.view === "advanced") renderAdvanced(); }).catch(() => {}); // 4.5: the night shift switch
+      api("/resumes").then((r) => { st.probationCount = r.filter((x) => x.probation.on).length; if (st.view === "advanced") renderAdvanced(); }).catch(() => {}); // 2.3: "2 on probation" under Résumés
     } catch (err) { if (err.message !== "unpaired") toast(`Can't reach the hub: ${err.message}`); }
+  }
+
+  // The live strip's usage, and a refresh on a timer so the chips stay close to real.
+  async function loadUsage() {
+    try { st.usage = await api("/agents/usage"); renderStrip(); if (st.view === "usage") renderUsage(); }
+    catch (e) { if (e.message === "unpaired") throw e; }
+  }
+  // Goals across the owner's rooms, so the home can show what is in progress and give each room its one line.
+  async function loadHomeGoals() {
+    const channels = st.rooms.filter((r) => !r.dmAgentId);
+    const lists = await Promise.all(channels.map((r) => api(`/rooms/${r.id}/goals`).catch(() => [])));
+    for (const list of lists) for (const g of list) st.goals[g.id] = g;
+    if (st.view === "rooms") renderRooms();
   }
 
   // 3.4: the office page opens an agent's thread by sending the phone back with #room=<id>.
@@ -231,8 +251,9 @@
     try {
       const [rooms, approvals] = await Promise.all([api("/rooms"), api("/approvals?status=pending")]);
       st.rooms = rooms; st.approvals = approvals; renderBadge();
+      loadUsage().catch(() => {}); // the strip keeps up
       if (st.view === "room" && st.roomId) await loadRoom(st.roomId, true);
-      else if (st.view === "rooms") renderRooms();
+      else if (st.view === "rooms") { await loadHomeGoals(); renderRooms(); }
       else if (st.view === "approvals") renderApprovals();
     } catch { /* offline; the socket will retry */ }
   }
@@ -252,10 +273,11 @@
   function go(view, roomId) {
     st.view = view;
     $("#jumpNew").hidden = true;
-    if (view === "room") { st.roomId = roomId; st.messages = []; st.goals = {}; st.tasks = {}; st.readAt = 0; st.positioned = ""; st.unread.delete(roomId); st.roomGrants = []; st.folderId = null; st.folderOpen = false; }
+    if (view === "room") { st.roomId = roomId; st.lastRoomId = roomId; st.messages = []; st.goals = {}; st.tasks = {}; st.readAt = 0; st.positioned = ""; st.unread.delete(roomId); st.roomGrants = []; st.folderId = null; st.folderOpen = false; }
     else st.roomId = "";
     render();
     if (view === "room") loadRoom(roomId).catch((e) => { if (e.message !== "unpaired") toast(e.message); });
+    if (view === "rooms") loadHomeGoals().catch(() => {}); // a fresh read of what is in progress whenever the home comes up
   }
 
   function render() {
@@ -277,10 +299,14 @@
     if (st.view === "fork") $("#title").textContent = "Fork"; // 4.4
     if (st.view === "trace") $("#title").textContent = "Trace";
     if (st.view === "issues") $("#title").textContent = "Issues";
+    if (st.view === "advanced") $("#title").textContent = "Advanced"; // simple by default: everything past the everyday few
+    if (st.view === "usage") $("#title").textContent = st.agents[st.usageAgent]?.name ? `${st.agents[st.usageAgent].name} usage` : "Usage";
     $("#jumpBtn").hidden = st.view === "pair";
-    renderGoal();
+    renderGoal(); renderStrip();
     if (st.view === "pair") return renderPair();
     if (st.view === "rooms") return renderRooms();
+    if (st.view === "advanced") return renderAdvanced();
+    if (st.view === "usage") return renderUsage();
     if (st.view === "approvals") return renderApprovals();
     if (st.view === "diff") return renderReview();
     if (st.view === "folders") return renderFolders();
@@ -357,20 +383,62 @@
     paintColors();
   }
 
+  // The simple home: a greeting, one box to say what you want done, what is in progress, the rooms and agents as cards, and the way in to Advanced.
+  const greeting = () => { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"; };
+  // A room's one line: its live goal, or who is working, or that there is something new, or its topic.
+  function roomLine(r) {
+    const g = ARView.pickGoal(Object.values(st.goals).filter((x) => x.roomId === r.id));
+    const live = g && ["running", "planning", "awaiting_approval", "paused"].includes(g.status);
+    if (live) return (g.contract && g.contract.objective) || g.text;
+    const busy = Object.keys(st.working[r.id] || {}).map((id) => st.agents[id]?.name).filter(Boolean);
+    if (busy.length) return `${busy.join(" and ")} working`;
+    if (st.unread.has(r.id)) return "New messages";
+    return r.topic || "Quiet";
+  }
   function renderRooms() {
     const channels = st.rooms.filter((r) => !r.dmAgentId).sort((a, b) => a.name.localeCompare(b.name));
     const dms = st.rooms.filter((r) => r.dmAgentId).sort((a, b) => roomName(a).localeCompare(roomName(b)));
-    const row = (r) => {
-      const a = r.dmAgentId ? st.agents[r.dmAgentId] : null;
-      const lead = a ? `<span class="lead">${avatar(a)}</span>` : `<span class="lead"><span class="mark${st.unread.has(r.id) ? " new" : ""}"></span></span>`;
-      return `<button class="row" data-room="${esc(r.id)}">${lead}<span class="name">${esc(roomName(r))}</span>${r.paused ? '<span class="sub">paused</span>' : ""}${st.unread.has(r.id) ? '<span class="unread"></span>' : ""}</button>`;
+    // Running or waiting goals, across every room, newest first.
+    const inProgress = Object.values(st.goals)
+      .filter((g) => ["running", "planning", "awaiting_approval"].includes(g.status) || (g.status === "paused" && g.state && g.state.waitingOnOwner))
+      .sort((a, b) => b.createdAt - a.createdAt);
+    const seenRoom = new Set();
+    const progCard = (g) => {
+      if (seenRoom.has(g.roomId)) return ""; seenRoom.add(g.roomId);
+      const r = st.rooms.find((x) => x.id === g.roomId); if (!r) return "";
+      const m = ARView.goalCardModel(g, []);
+      return `<button class="row hcard" data-room="${esc(g.roomId)}"><span class="hbody"><span class="name">${esc((g.contract && g.contract.objective) || g.text)}</span>`
+        + `<span class="hwhat">${esc(roomName(r))} · ${esc(m.state.label)}${m.total ? ` · ${m.met} of ${m.total} met` : ""}</span></span>`
+        + `<span class="chip ${m.state.tone}">${esc(m.state.label)}</span></button>`;
     };
-    $("#view").innerHTML = st.rooms.length
-      ? `${channels.length ? `<div class="section">Rooms</div>${channels.map(row).join("")}` : ""}
-         ${dms.length ? `<div class="section">Agents</div>${dms.map(row).join("")}` : ""}`
-      : `<div class="empty">No rooms yet. Make one on the Mac.</div>`;
+    const roomCard = (r) => `<button class="row hcard" data-room="${esc(r.id)}"><span class="lead"><span class="mark${st.unread.has(r.id) ? " new" : ""}"></span></span>`
+      + `<span class="hbody"><span class="name">${esc(roomName(r))}${r.paused ? " (paused)" : ""}</span><span class="hwhat">${esc(roomLine(r))}</span></span>`
+      + `${st.unread.has(r.id) ? '<span class="unread"></span>' : ""}</button>`;
+    const dmCard = (r) => { const a = st.agents[r.dmAgentId];
+      return `<button class="row hcard" data-room="${esc(r.id)}"><span class="lead">${avatar(a)}</span><span class="hbody"><span class="name">${esc(roomName(r))}</span></span>${st.unread.has(r.id) ? '<span class="unread"></span>' : ""}</button>`;
+    };
+    const n = st.approvals.length;
+    $("#view").innerHTML = `<div class="home">
+        <div class="greet">${greeting()}${st.ownerName ? `, ${esc(st.ownerName)}` : ""}.</div>
+        <form id="homeGoal" class="goalbox">
+          <textarea id="goalText" rows="2" placeholder="What do you want to get done?" autocomplete="off" enterkeyhint="send"></textarea>
+          <button class="btn" type="submit" aria-label="Start">Start</button>
+        </form>
+        ${inProgress.length ? `<div class="section">In progress</div>${inProgress.map(progCard).join("")}` : ""}
+        <div class="section">Rooms</div>${channels.map(roomCard).join("")}
+        <button class="row addrow" data-new-room="1"><span class="hash">+</span><span class="name">New room</span></button>
+        ${dms.length ? `<div class="section">Agents</div>${dms.map(dmCard).join("")}` : ""}
+        <div class="section">More</div>
+        <button class="row" data-nav="approvals"><span class="hash">✓</span><span class="name">Approvals</span>${n ? `<span class="sub">${n} waiting</span>` : ""}</button>
+        <button class="row" data-nav="advanced"><span class="hash">⋯</span><span class="name">Advanced</span></button>
+      </div>`;
+    paintColors();
+  }
+
+  // Everything past the everyday few. Each screen still works; it is reached from here instead of being the first thing you see.
+  function renderAdvanced() {
     const nCtl = st.control ? st.control.notices.length : 0;
-    $("#view").innerHTML += `<div class="section">Settings</div><button class="row" data-nav="permissions"><span class="hash">⚙︎</span><span class="name">Permissions</span></button>
+    $("#view").innerHTML = `<button class="row" data-nav="permissions"><span class="hash">⚙︎</span><span class="name">Permissions</span></button>
       <button class="row" data-nav="folders"><span class="hash">▤</span><span class="name">Folders</span></button>
       <button class="row" data-nav="resumes"><span class="hash">☰</span><span class="name">Résumés</span>${st.probationCount ? `<span class="sub">${st.probationCount} on probation</span>` : ""}</button>
       <button class="row" data-nav="remote"><span class="hash">⇄</span><span class="name">Remote access</span></button>
@@ -383,6 +451,46 @@
       <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>
       ${st.settings ? nightShiftRow() : ""}${st.capacity ? `<div class="capline">${esc(st.capacity.summary)}</div>` : ""}`;
     paintColors();
+  }
+
+  // The live strip: what is running, approvals waiting, and each agent's usage left. Calm and glanceable; one line of chips when nothing is happening.
+  const USAGE_TONE = { plenty: "ok", unlimited: "ok", getting_low: "warn", almost_out: "danger", out: "danger", learning: "neutral" };
+  function renderStrip() {
+    const host = $("#strip");
+    const show = (st.view === "rooms" || st.view === "room") && !!st.token;
+    host.hidden = !show;
+    if (!show) { host.replaceChildren(); return; }
+    const running = [];
+    for (const [roomId, agents] of Object.entries(st.working)) for (const [agentId, label] of Object.entries(agents)) running.push({ roomId, agentId, label });
+    const n = st.approvals.length;
+    const chips = (st.usage?.agents || []).map((a) =>
+      h("button", { class: `uchip`, type: "button", "data-usage": a.agentId, "aria-label": `${a.agentName}: ${a.statusText}` },
+        h("span", { class: `udot ${USAGE_TONE[a.status] || "neutral"}` }), h("span", { class: "uname", text: a.agentName }), h("span", { class: "ustat", text: a.statusText })));
+    const kids = [];
+    if (running.length) kids.push(h("div", { class: "strip-run" }, ...running.slice(0, 3).map((r) => {
+      const a = st.agents[r.agentId];
+      return h("span", { class: "runitem" }, h("span", { class: "runpulse", "aria-hidden": "true" }), h("span", { class: "runtext", text: `${a?.name || r.agentId}${r.label ? ` · ${r.label}` : " working"}` }));
+    }), running.length > 3 ? h("span", { class: "runtext", text: `+${running.length - 3} more` }) : null));
+    if (n) kids.push(h("button", { class: "strip-appr", type: "button", "data-strip-approvals": "1" },
+      h("span", { class: "chip warn", text: `${n} to approve` }), h("span", { class: "runtext", text: "Tap to review" })));
+    if (chips.length) kids.push(h("div", { class: "strip-use" }, ...chips));
+    host.replaceChildren(...kids.filter(Boolean));
+    paintColors();
+  }
+
+  // One agent's usage in full: each subscription it can run on, with the 5-hour and weekly windows.
+  function renderUsage() {
+    const a = (st.usage?.agents || []).find((x) => x.agentId === st.usageAgent);
+    if (!a) { $("#view").innerHTML = `<div class="empty">Loading…</div>`; return; }
+    const windowRow = (w) => {
+      const pct = w.percentLeft;
+      return `<div class="qrow"><span class="qlbl">${esc(w.label)}</span><div class="qbar${pct !== undefined && pct <= 15 ? " hot" : ""}"><i data-pct="${pct === undefined ? 0 : pct}"></i></div></div>`
+        + `<div class="qnote">${w.learning ? "Learning the limit" : `${pct}% left`} · ${w.usedRuns} run${w.usedRuns === 1 ? "" : "s"} used</div>`;
+    };
+    const sub = (s) => `<div class="qsub"><div class="qhead"><span class="qname">${esc(s.name)}</span><span class="qtag${["almost_out", "out"].includes(s.status) ? " warn" : ""}">${esc(s.statusText)}</span></div>${windowRow(s.fiveHour)}${windowRow(s.weekly)}</div>`;
+    $("#view").innerHTML = `<div class="card"><div class="what">${esc(a.agentName)}</div><div class="detail">${esc(a.statusText)}</div></div>`
+      + (a.subscriptions.length ? a.subscriptions.map(sub).join("") : `<div class="empty">No subscription covers this agent yet.</div>`);
+    for (const el of document.querySelectorAll("#view [data-pct]")) el.style.width = `${el.dataset.pct}%`;
   }
 
   // 4.5 Night shift: spare quota re-runs the day's finished tasks on other agents, graded blind. Off until switched on here or on the Mac.
@@ -574,6 +682,9 @@
         ] : [line("Nothing scheduled.")])),
       ...(def.inScope.length || def.outOfScope.length ? [card("Scope", ...def.inScope.map((x) => line(`• ${x}`)), def.outOfScope.length ? line(`Out of scope: ${def.outOfScope.join("; ")}`) : null)] : []),
       ...(def.notices.length ? [card("Notes on the file", ...def.notices.map((n) => line(n.message, "warn")))] : []),
+      card("Delete room",
+        line("Remove this room and everything in it. This cannot be undone."),
+        h("div", { class: "actions pad" }, h("button", { class: "btn small danger", type: "button", "data-del-room": st.info.roomId, text: "Delete room" }))),
     );
     paintColors();
   }
@@ -600,7 +711,7 @@
   async function loadControl() {
     try {
       st.control = await api("/control/status");
-      if (st.view === "control") renderControl(); else if (st.view === "rooms") renderRooms();
+      if (st.view === "control") renderControl(); else if (st.view === "advanced") renderAdvanced();
     } catch (e) { if (e.message === "unpaired") throw e; /* older hub without control files */ }
   }
 
@@ -646,7 +757,7 @@
   async function loadPolicy() {
     try {
       st.policy = await api("/policy");
-      if (st.view === "policy") renderPolicy(); else if (st.view === "rooms") renderRooms();
+      if (st.view === "policy") renderPolicy(); else if (st.view === "advanced") renderAdvanced();
     } catch (e) { if (e.message === "unpaired") throw e; /* older hub without approval rules */ }
   }
 
@@ -827,7 +938,7 @@
       const r = await api("/issues");
       st.issues.data = r; st.issues.err = ""; st.issues.count = r.issues.length;
     } catch (e) { if (e.message === "unpaired") throw e; st.issues.err = e.message; }
-    if (st.view === "issues") renderIssues(); else if (st.view === "rooms") renderRooms();
+    if (st.view === "issues") renderIssues(); else if (st.view === "advanced") renderAdvanced();
   }
   function renderIssues() {
     const r = st.issues.data;
@@ -1450,6 +1561,44 @@
   function paintColors() { for (const el of document.querySelectorAll("[data-color]")) { const t = tile(el.dataset.color); el.style.background = t.bg; el.style.color = t.ink; } }
 
   // ---------- actions
+  // Delete a room (from its info screen). The hub refuses while work is going (400); then offer to stop it and delete anyway (force).
+  async function deleteRoomAction(roomId, force) {
+    const r = st.rooms.find((x) => x.id === roomId);
+    const name = r ? roomName(r) : "this room";
+    if (!force && !confirm(`Delete ${name}? This removes the room and everything in it, and cannot be undone.`)) return;
+    try {
+      await api(`/rooms/${encodeURIComponent(roomId)}${force ? "?force=1" : ""}`, { method: "DELETE" });
+      // the room_deleted event drops it and leaves this screen; nothing more to do here
+    } catch (e) {
+      if (e.message === "unpaired") return;
+      if (!force && /still going|work is/i.test(e.message) && confirm(`${e.message}\n\nStop the work and delete ${name} anyway?`)) return deleteRoomAction(roomId, true);
+      toast(e.message);
+    }
+  }
+
+  // "New room" on the home: ask for a name, make it, and open it.
+  async function newRoom() {
+    const name = (prompt("Name the new room") || "").trim();
+    if (!name) return;
+    try { const r = await api("/rooms", { method: "POST", body: { name } }); if (!st.rooms.some((x) => x.id === r.id)) st.rooms.push(r); go("room", r.id); }
+    catch (e) { if (e.message !== "unpaired") toast(e.message); }
+  }
+
+  // The home goal box: say what you want done and it starts in the room you last worked in (or the first room). With no rooms, offer to make one.
+  async function startGoalFromHome(text) {
+    text = text.trim(); if (!text) return;
+    const channels = st.rooms.filter((r) => !r.dmAgentId);
+    let target = channels.find((r) => r.id === st.lastRoomId) || channels[0];
+    if (!target) {
+      const name = (prompt("Name a room to start this in") || "").trim();
+      if (!name) return;
+      try { target = await api("/rooms", { method: "POST", body: { name } }); if (!st.rooms.some((x) => x.id === target.id)) st.rooms.push(target); }
+      catch (e) { if (e.message !== "unpaired") toast(e.message); return; }
+    }
+    go("room", target.id);
+    sendMessage(text); // starts the goal in that room; the hub plans from here
+  }
+
   async function sendMessage(text) {
     text = text.trim(); if (!text || !st.roomId) return;
     $("#sendBtn").disabled = true;
@@ -1567,6 +1716,12 @@
         return;
       }
       if (t.dataset.nav === "appearance") { go("appearance"); return; }
+      if (t.dataset.nav === "advanced") { go("advanced"); return; } // simple by default: the full list sits here
+      if (t.dataset.nav === "approvals") { go("approvals"); return; }
+      if (t.dataset.stripApprovals) { go("approvals"); return; } // the live strip's approvals pill
+      if (t.dataset.usage) { st.usageAgent = t.dataset.usage; st.usageFrom = st.view === "usage" ? st.usageFrom : st.view; go("usage"); void loadUsage(); return; } // a usage chip opens the detail
+      if (t.dataset.newRoom) { void newRoom(); return; }
+      if (t.dataset.delRoom) { void deleteRoomAction(t.dataset.delRoom); return; }
       if (t.dataset.room) return go("room", t.dataset.room);
       if (t.dataset.openFork) { void openFork(t.dataset.openFork); return; } // 4.4
       if (t.dataset.nav === "permissions") {
@@ -1715,6 +1870,13 @@
     }
   });
   document.addEventListener("submit", (e) => { if (e.target.id === "grantForm") { e.preventDefault(); void addGrant(); } });
+  // The home goal box: Start, or Enter on a keyboard.
+  document.addEventListener("submit", (e) => { if (e.target.id === "homeGoal") { e.preventDefault(); const i = $("#goalText"); const v = i.value; i.value = ""; void startGoalFromHome(v); } });
+  document.addEventListener("keydown", (e) => {
+    if (e.target?.id === "goalText" && e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) {
+      e.preventDefault(); const i = $("#goalText"); const v = i.value; i.value = ""; void startGoalFromHome(v);
+    }
+  });
   // 3.2: the persona form keeps what is typed; picking a template fills role, tone and bio (nothing is saved until Save)
   document.addEventListener("input", (e) => { const k = e.target.dataset?.pform; if (k && k !== "template" && st.personas.form) st.personas.form[k] = e.target.value; });
   document.addEventListener("change", (e) => {
@@ -1733,7 +1895,7 @@
       const cur = st.settings || await api("/settings");
       const saved = await api("/settings", { method: "PUT", body: { nightShift: { ...(cur.nightShift || {}), enabled: el.checked } } });
       st.settings = { ...cur, ...saved };
-      if (st.view === "rooms") renderRooms();
+      if (st.view === "advanced") renderAdvanced();
     } catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
   });
 
@@ -1746,7 +1908,7 @@
     catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
   });
 
-  $("#back").onclick = () => (st.view === "trace" ? (st.trace.from === "issues" ? void openIssues() : go("room", st.trace.roomId)) : st.view === "tasks" ? go("room", st.taskRoom) : st.view === "roominfo" ? go("room", st.info.roomId) : st.view === "fork" ? go("room", st.fork.roomId) : go(st.view === "diff" ? "approvals" : st.view === "persona" ? "personas" : "rooms"));
+  $("#back").onclick = () => (st.view === "trace" ? (st.trace.from === "issues" ? void openIssues() : go("room", st.trace.roomId)) : st.view === "tasks" ? go("room", st.taskRoom) : st.view === "roominfo" ? go("room", st.info.roomId) : st.view === "fork" ? go("room", st.fork.roomId) : st.view === "usage" ? go(st.usageFrom === "room" && st.lastRoomId ? "room" : st.usageFrom, st.usageFrom === "room" ? st.lastRoomId : undefined) : go(st.view === "diff" ? "approvals" : st.view === "persona" ? "personas" : "rooms"));
   $("#tasksBtn").onclick = () => void openTasks(); // 3.3
   $("#infoBtn").onclick = () => void openRoomInfo(); // 4.3
   $("#jumpNew").onclick = () => {

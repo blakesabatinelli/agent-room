@@ -36,6 +36,8 @@ export function RoomSettings({ roomId, onClose }: { roomId: string; onClose: () 
   const [err, setErr] = useState<string>();
   const [note, setNote] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const [delStage, setDelStage] = useState<"idle" | "confirm" | "force">("idle"); // delete a room: a second tap confirms; a busy room offers stop-and-delete
+  const [delErr, setDelErr] = useState<string>();
   const dirty = useRef(false);
   const everyone = agents.map((a) => a.id);
 
@@ -81,6 +83,20 @@ export function RoomSettings({ roomId, onClose }: { roomId: string; onClose: () 
       const r = await hub.openRoomFile(roomId);
       setNote(r.ok ? `Opened ${r.path}` : `Open it from here: ${r.path}`);
     } catch (e) { setErr((e as Error).message); }
+  };
+
+  // Delete this room. The hub refuses while work is going (400); then offer to stop it and delete anyway (force).
+  const remove = async (force: boolean) => {
+    if (!hub) return;
+    if (!force && delStage !== "confirm") { setDelStage("confirm"); setDelErr(undefined); return; }
+    try {
+      await hub.deleteRoom(roomId, force);
+      onClose(); // the room_deleted event drops it and the store moves to another room
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (!force && /still going|work is/i.test(msg)) { setDelStage("force"); setDelErr(msg); return; }
+      setDelErr(msg); setDelStage("idle");
+    }
   };
 
   const h = (text: string) => <Text style={[t.heading, { color: p.inkStrong }]}>{text}</Text>;
@@ -190,6 +206,17 @@ export function RoomSettings({ roomId, onClose }: { roomId: string; onClose: () 
               </View>
             ) : null}
             {note && !changed ? <Text selectable style={[t.small, { color: p.ok }]}>{note}</Text> : null}
+
+            <View style={{ gap: space(2), marginTop: space(4), borderTopWidth: 1, borderColor: p.line, paddingTop: space(4) }}>
+              {h("Delete room")}
+              <Text style={[t.tiny, { color: p.muted }]}>Remove this room and everything in it. This cannot be undone.</Text>
+              {delErr ? <Text accessibilityRole="alert" style={[t.small, { color: p.danger }]}>{delErr}</Text> : null}
+              <View style={{ flexDirection: "row" }}>
+                {delStage === "force"
+                  ? <Button kind="danger" small label="Stop work and delete" onPress={() => void remove(true)} />
+                  : <Button kind="danger" small label={delStage === "confirm" ? "Really delete this room?" : "Delete room"} onPress={() => void remove(false)} />}
+              </View>
+            </View>
           </>
         )}
       </ScrollView>

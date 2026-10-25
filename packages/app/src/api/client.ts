@@ -60,7 +60,8 @@ export class Hub {
   createRoom = (name: string, topic?: string) => this.send<Room>("POST", "/rooms", { name, topic });
   /** `folderGrantId`: the room's default folder; null clears it. */
   updateRoom = (id: string, patch: { name?: string; topic?: string; folderGrantId?: string | null }) => this.send<Room>("PUT", `/rooms/${id}`, patch);
-  deleteRoom = (id: string) => this.send("DELETE", `/rooms/${id}`);
+  /** `force` stops any running work first (the hub answers 400 without it while work is going). */
+  deleteRoom = (id: string, force = false) => this.send<{ ok: boolean; counts: import("@agent-room/shared").RoomDeleteCounts }>("DELETE", `/rooms/${id}${force ? "?force=1" : ""}`);
   dm = (agentId: string) => this.send<Room>("POST", `/rooms/dm/${agentId}`);
   readMark = (roomId: string) => this.req<{ at: number }>(`/rooms/${roomId}/read`);
   markRead = (roomId: string, at: number) => this.send<{ at: number }>("PUT", `/rooms/${roomId}/read`, { at });
@@ -109,6 +110,8 @@ export class Hub {
   /** 2.2: how far juries and single judges are from your spot ratings. */
   juryStats = () => this.req<{ calibration: JuryCalibration; juries: number; splits: number }>("/jury/stats");
 
+  /** Usage left per agent, for the live strip (a view over the quota numbers; nothing is measured here). */
+  usage = () => this.req<import("@agent-room/shared").UsageLeftResponse>("/agents/usage");
   quota = () => this.req<SubscriptionStatus[]>("/quota/subscriptions");
   saveQuota = (subs: Subscription[]) => this.send<SubscriptionStatus[]>("PUT", "/quota/subscriptions", subs);
 

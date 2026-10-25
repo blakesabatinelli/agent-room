@@ -16,6 +16,8 @@ import { PolicyScreen } from "./screens/PolicyScreen"; // 4.2
 import { IssuesScreen } from "./screens/IssuesScreen"; // Trace and Issues
 import { OnboardingScreen } from "./screens/OnboardingScreen";
 import { OfficeScreen } from "./screens/OfficeScreen"; // 3.4
+import { HomeScreen } from "./screens/HomeScreen"; // simple by default: the calm landing
+import { LiveStrip } from "./components/LiveStrip"; // simple by default: what's running, approvals, usage
 import { Sidebar } from "./components/Sidebar";
 import { Button } from "./components/ui";
 import { CommandPalette } from "./components/CommandPalette"; // 3.1
@@ -57,13 +59,21 @@ export default function App() {
   const back = wide ? undefined : () => setShowList(true);
   // Every screen the app has. The ⌘K palette offers exactly these (3.4 adds "office" here).
   const pages: Record<Page, React.ReactNode> = {
+    home: <HomeScreen />, // simple by default
     agents: <AgentsScreen onBack={back} />, approvals: <ApprovalsScreen />, memory: <MemoryScreen />,
     permissions: <PermissionsScreen />, folders: <FoldersScreen />, settings: <SettingsScreen />,
     scorecard: <ScorecardScreen />, resumes: <ResumesScreen />, office: <OfficeScreen />, // 3.4
     policy: <PolicyScreen />, // 4.2
     issues: <IssuesScreen />, // Trace and Issues
   };
-  const main = view.kind === "room" ? <RoomScreen onBack={back} /> : pages[view.page];
+  // The live strip sits above the conversation and the home, in both.
+  const showStrip = view.kind === "room" || (view.kind === "page" && view.page === "home");
+  const main = (
+    <View style={{ flex: 1 }}>
+      {showStrip ? <LiveStrip /> : null}
+      <View style={{ flex: 1 }}>{view.kind === "room" ? <RoomScreen onBack={back} /> : pages[view.page]}</View>
+    </View>
+  );
 
   return (
     <SafeAreaView {...({ keyDownEvents: [{ key: "k", metaKey: true }], onKeyDown: () => togglePalette() } as object)} style={{ flex: 1, backgroundColor: wide ? p.canvas : p.sidebar }}>
@@ -81,7 +91,7 @@ export default function App() {
         </View>
       ) : showList ? <Sidebar onNavigate={() => setShowList(false)} /> : (
         <View style={{ flex: 1, backgroundColor: p.canvas }}>
-          {view.kind === "page" && view.page !== "agents" ? (
+          {view.kind === "page" && view.page !== "agents" && view.page !== "home" ? (
             <Pressable onPress={() => setShowList(true)} style={{ padding: space(3) }}><Text style={[t.small, { color: p.link }]}>‹ Back</Text></Pressable>
           ) : null}
           {main}

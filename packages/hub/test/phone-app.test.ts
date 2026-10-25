@@ -180,7 +180,10 @@ test("4.5: the phone app's Settings has a Night shift switch with one line of ex
   const { app, base, token, store } = await boot();
   t.after(() => app.close());
   const page = phoneApp(base, token);
-  await until(() => page.view().includes("Night shift"), "the rooms list with its Settings rows");
+  // Night shift now lives behind Advanced (simple by default), reached the same way the owner would.
+  await until(() => page.view().includes("Advanced"), "the home with its Advanced entry");
+  await page.tap({ nav: "advanced" });
+  await until(() => page.view().includes("Night shift"), "the Advanced screen with its Night shift row");
   const row = /<label class="perm">(?:(?!<\/label>)[\s\S])*Night shift[\s\S]*?<\/label>/.exec(page.view())?.[0] ?? "";
   assert.ok(row, "a switch row");
   assert.match(row, /<input type="checkbox" role="switch" class="switch" aria-label="Night shift" data-setting="nightShift">/, "off by default, and not checked");
@@ -196,7 +199,9 @@ test("4.5: turning the switch on and off is saved with PUT /settings, keeps the 
   const set = await fetch(`${base}/settings`, { method: "PUT", headers: auth, body: JSON.stringify({ nightShift: { from: "22:00", to: "05:30", maxRunsPerNight: 7 } }) });
   assert.equal(set.status, 200);
   const page = phoneApp(base, token);
-  await until(() => page.view().includes("Night shift"), "the Night shift row");
+  await until(() => page.view().includes("Advanced"), "the home with its Advanced entry");
+  await page.tap({ nav: "advanced" });
+  await until(() => page.view().includes("Night shift"), "the Night shift row under Advanced");
 
   const on = await page.flip({ setting: "nightShift" }, true);
   assert.deepEqual(store.getSettings().nightShift, { from: "22:00", to: "05:30", maxRunsPerNight: 7, enabled: true });
@@ -218,7 +223,9 @@ test("4.5: a save the hub can't take puts the switch back and says so", { timeou
   const { app, base, token, store } = await boot();
   t.after(() => app.close().catch(() => undefined)); // (closed again below, before the tap)
   const page = phoneApp(base, token);
-  await until(() => page.view().includes("Night shift"), "the Night shift row");
+  await until(() => page.view().includes("Advanced"), "the home with its Advanced entry");
+  await page.tap({ nav: "advanced" });
+  await until(() => page.view().includes("Night shift"), "the Night shift row under Advanced");
   await app.close(); // the hub goes away before the tap
   const input = await page.flip({ setting: "nightShift" }, true);
   assert.equal(input.checked, false, "back to off");
@@ -260,6 +267,55 @@ test("QA: the Tasks screen opens from a room, fills in live, and the room keeps 
 test("QA: the folder picker draws nothing but its own buttons (no stray text where an empty slot was)", () => {
   const src = appJs.slice(appJs.indexOf("  function renderFolderPick()"), appJs.indexOf("  // Colors go on through the DOM"));
   assert.doesNotMatch(src, /replaceChildren\([^;]*\bnull\b/, "replaceChildren turns a null into the text \"null\"");
+});
+
+test("simple: the default home shows only the everyday few, and Advanced holds the rest", { timeout: 30_000 }, async (t) => {
+  const { app, base, token } = await boot();
+  t.after(() => app.close());
+  const page = phoneApp(base, token);
+  await until(() => page.view().includes("data-room=") && page.view().includes("Advanced"), "the home with room cards");
+  const home = page.view();
+  // Everyday: the conversation (the seeded "general" room), Approvals, and one way into everything else.
+  assert.match(home, /data-room=/, "rooms are on the home as cards");
+  assert.match(home, /data-nav="approvals"/, "Approvals is everyday");
+  assert.match(home, /data-nav="advanced"/, "one Advanced entry");
+  assert.match(home, /data-new-room="1"/, "a New room action");
+  assert.match(home, /What do you want to get done\?/, "the goal box");
+  // The technical screens are NOT the first thing you see.
+  for (const gone of ["Permissions", "Subscriptions", "Scorecard", "Remote access", "Control files", "Approval rules", "Résumés", "Night shift"]) {
+    assert.ok(!home.includes(gone), `${gone} is not on the home`);
+  }
+  // Advanced lists them, each still reachable by its own nav.
+  await page.tap({ nav: "advanced" });
+  await until(() => page.view().includes("Permissions"), "the Advanced screen");
+  const adv = page.view();
+  for (const nav of ["permissions", "folders", "resumes", "remote", "subscriptions", "personas", "scorecard", "issues", "appearance", "policy", "control"]) {
+    assert.match(adv, new RegExp(`data-nav="${nav}"`), `Advanced has ${nav}`);
+  }
+  assert.equal(page.title(), "Advanced");
+});
+
+test("simple: Delete room calls DELETE, and a busy room goes through stop-and-delete (force)", { timeout: 30_000 }, async (t) => {
+  const { app, base, token, store } = await boot();
+  t.after(() => app.close());
+  const easy = store.createRoom("easy");
+  const busy = store.createRoom("busy");
+  store.saveGoal({ id: "g_busy", roomId: busy.id, text: "keep going", status: "running", createdAt: Date.now() } as never);
+  const page = phoneApp(base, token);
+  await until(() => page.view().includes("easy") && page.view().includes("busy"), "the home with both rooms");
+
+  // A room with nothing running deletes straight away (confirm() is true in the harness).
+  await page.tap({ delRoom: easy.id });
+  await until(() => !store.getRoom(easy.id), "the easy room is gone");
+  const plain = store.listAudit().find((a) => a.action === "room.deleted");
+  assert.ok(plain && !/forced/.test(plain.detail), "a plain delete, not forced");
+
+  // A busy room is refused first (400), then the app offers stop-and-delete, which forces it.
+  await page.tap({ delRoom: busy.id });
+  await until(() => !store.getRoom(busy.id), "the busy room is gone after stop-and-delete");
+  assert.ok(store.listAudit().some((a) => a.action === "room.deleted" && /\(forced\)$/.test(a.detail)), "the forced delete is audited");
+  // The seeded channel is still here: the last channel is never removed.
+  assert.ok(store.listRooms().some((r) => !r.dmAgentId), "a channel remains");
 });
 
 test("4.5 (Mac app): Settings has the same switch, from the shared default", () => {

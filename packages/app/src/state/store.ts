@@ -1,12 +1,12 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { create } from "zustand";
-import type { AgentConfig, AgentStatus, Approval, Goal, MemoryProposal, Message, Room, ServerEvent, Task } from "@agent-room/shared";
+import type { AgentConfig, AgentStatus, Approval, Goal, MemoryProposal, Message, Room, ServerEvent, Task, UsageLeftResponse } from "@agent-room/shared";
 import { Hub } from "../api/client";
 import { launcher, LOCAL_HUB, readLocalPairSecret } from "../native/hub";
 
 const KEY = "agent-room.connection";
 
-export type Page = "agents" | "approvals" | "memory" | "permissions" | "folders" | "settings" | "scorecard" | "resumes" | "office" | "policy" | "issues"; // 4.2: the approval rules; 3.1: scorecard and resumes are screens of their own; 3.4: the office; issues: recurring problems
+export type Page = "home" | "agents" | "approvals" | "memory" | "permissions" | "folders" | "settings" | "scorecard" | "resumes" | "office" | "policy" | "issues"; // simple by default: "home" is the calm landing; 4.2: the approval rules; 3.1: scorecard and resumes are screens of their own; 3.4: the office; issues: recurring problems
 /** What the main pane shows: a room or direct message, or one of the workspace pages. */
 export type View = { kind: "room" } | { kind: "page"; page: Page };
 
@@ -30,6 +30,8 @@ interface State {
   unread: Record<string, number>;
   approvals: Approval[];
   proposals: MemoryProposal[];
+  /** Usage left per agent, for the live strip. */
+  usage?: UsageLeftResponse;
   calibration: Task[];
   /** Bumped when a control file changes on disk or in the app, so Settings can reload its notices. */
   controlStamp: number;
@@ -43,6 +45,7 @@ interface State {
   unpair(): Promise<void>;
   load(): Promise<void>;
   refreshStatus(fresh?: boolean): Promise<void>;
+  loadUsage(): Promise<void>;
   selectRoom(id: string): Promise<void>;
   openDm(agentId: string): Promise<void>;
   openPage(page: Page): void;
@@ -55,7 +58,7 @@ let stopLive: (() => void) | undefined;
 
 export const useRoom = create<State>((set, get) => ({
   ownerName: "Owner", online: false, rooms: [], messages: [], tasks: {}, goals: {}, agents: [], statuses: {},
-  working: {}, unread: {}, approvals: [], proposals: [], calibration: [], controlStamp: 0, composerStamp: 0, onboarded: true, view: { kind: "room" },
+  working: {}, unread: {}, approvals: [], proposals: [], calibration: [], controlStamp: 0, composerStamp: 0, onboarded: true, view: { kind: "page", page: "home" },
 
   async restore() {
     set({ startupError: undefined });
@@ -108,8 +111,10 @@ export const useRoom = create<State>((set, get) => ({
       stopLive?.();
       stopLive = hub.connect((e) => get().apply(e), (online) => set({ online }));
       void get().refreshStatus();
+      void get().loadUsage();
+      // Preload a room (the last one, or the first) so switching into it is instant, but land on the calm Home by default.
       const id = get().roomId ?? rooms.find((r) => !r.dmAgentId)?.id ?? rooms[0]?.id;
-      if (id) await get().selectRoom(id);
+      if (id) { await get().selectRoom(id); if (get().view.kind === "room") set({ view: { kind: "page", page: "home" } }); }
     } catch (e) { set({ error: (e as Error).message }); }
   },
 
@@ -119,6 +124,11 @@ export const useRoom = create<State>((set, get) => ({
       const list = await hub.allStatus(fresh);
       set({ statuses: Object.fromEntries(list.map((s) => [s.id, s])) });
     } catch { /* keep last known */ }
+  },
+
+  async loadUsage() {
+    const hub = get().hub; if (!hub) return;
+    try { set({ usage: await hub.usage() }); } catch { /* keep last known */ }
   },
 
   async selectRoom(id) {
@@ -174,7 +184,7 @@ export const useRoom = create<State>((set, get) => ({
         set({ working: { ...s.working, [e.roomId]: room } });
         break;
       }
-      case "approval": set({ approvals: e.approval.status === "pending" ? [...s.approvals.filter((a) => a.id !== e.approval.id), e.approval] : s.approvals.filter((a) => a.id !== e.approval.id) }); break;
+      case "approval": set({ approvals: e.approval.status === "pending" ? [...s.approvals.filter((a) => a.id !== e.approval.id), e.approval] : s.approvals.filter((a) => a.id !== e.approval.id) }); void get().loadUsage(); break;
       case "proposal": set({ proposals: e.proposal.status === "pending" ? [...s.proposals.filter((p) => p.id !== e.proposal.id), e.proposal] : s.proposals.filter((p) => p.id !== e.proposal.id) }); break;
       case "calibration": set({ calibration: [...s.calibration, e.task] }); break;
       case "control": set({ controlStamp: e.at }); break;

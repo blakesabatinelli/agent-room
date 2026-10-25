@@ -127,6 +127,7 @@ export function chipMessageIds(messages: Message[]): Map<string, string> {
 
 /** Screens the palette can open. `mac` is the page id in the Mac app; `phone` is the view name in the phone app. */
 export const PALETTE_SCREENS: { id: string; title: string; mac?: string; phone?: string; keywords?: string }[] = [
+  { id: "home", title: "Home", mac: "home", keywords: "home start goal overview" },
   { id: "approvals", title: "Approvals", mac: "approvals", phone: "approvals", keywords: "approve reject waiting" },
   { id: "folders", title: "Folders", mac: "folders", phone: "folders", keywords: "files access grants" },
   { id: "permissions", title: "Permissions", mac: "permissions", phone: "permissions", keywords: "tools shell switches" },

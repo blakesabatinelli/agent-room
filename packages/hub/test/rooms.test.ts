@@ -975,6 +975,10 @@ test("ui: the Mac app and the phone read the room definition; the phone only rea
   const web = readFileSync(join(here, "../web/app.js"), "utf8");
   assert.match(web, /api\(`\/rooms\/\$\{encodeURIComponent\(roomId\)\}\/definition`\)/);
   const info = web.slice(web.indexOf("function renderRoomInfo"), web.indexOf("function renderControl"));
+  // The room definition (roster, tools, folders, schedule) is still read-only on the phone: the render writes nothing and uses no innerHTML.
   assert.ok(info.length > 200 && !/method:\s*"(PUT|POST|DELETE)"/.test(info) && !/innerHTML/.test(info), "read only, built without innerHTML");
+  // Simple by default adds one quiet write: a Delete room action, handled by deleteRoomAction (DELETE, with a force fallback).
+  assert.match(info, /data-del-room/, "the info screen offers Delete room");
+  assert.match(web, /\$\{force \? "\?force=1" : ""\}`, \{ method: "DELETE" \}\)/, "delete uses the force flag");
   assert.match(readFileSync(join(here, "../web/index.html"), "utf8"), /id="infoBtn"/);
 });

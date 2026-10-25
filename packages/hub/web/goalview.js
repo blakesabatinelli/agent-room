@@ -153,6 +153,7 @@
 
   // ---------- the jump sheet
   var SCREENS = [
+    { id: "home", title: "Home", mac: "home", keywords: "home start goal overview" },
     { id: "approvals", title: "Approvals", mac: "approvals", phone: "approvals", keywords: "approve reject waiting" },
     { id: "folders", title: "Folders", mac: "folders", phone: "folders", keywords: "files access grants" },
     { id: "permissions", title: "Permissions", mac: "permissions", phone: "permissions", keywords: "tools shell switches" },

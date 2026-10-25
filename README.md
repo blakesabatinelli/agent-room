@@ -24,6 +24,8 @@ The DMG carries its own Node and the hub, so there is nothing else to install: n
 
 ## How it works
 
+**Simple by default.** Both apps open on a calm home: a greeting, one box ("What do you want to get done?") that starts a goal in the room you last worked in, your rooms as cards with a one-line status, and what is in progress. A slim live strip above the conversation and the home shows what is running, approvals waiting, and each agent's usage left as a coloured dot chip (`GET /agents/usage`); tap a chip for its windows. The everyday nav is Home, the conversation, Agents and Approvals; everything else is behind one **Advanced** entry (⌘K still reaches it all). A room has a quiet **Delete room** action with a confirm, which offers "Stop and delete" if work is running. See [docs/user/home-and-live-strip.md](docs/user/home-and-live-strip.md).
+
 **Talking to the room.** A message with no @mention starts a goal. While a goal is running, your messages become owner instructions that override the plan for the rest of it. `@codex …` goes straight to that agent; tag several and they answer in that order. `@all …` (or a short ask like "have each agent respond") is a roll call: every connected agent in the room answers in turn, and any that can't are named. `/pause`, `/resume` and `/stop` also work as messages.
 
 **Delegation and learning.** The orchestrator plans with its own agent (Claude by default), then routes each task with epsilon-greedy selection over learned per-agent, per-task-type scores. Judges rotate and never grade their own worker. Work can be accepted, sent back for revision, or reassigned. A sample of judgments shows up in the room for your spot check, and your rating nudges the agent's score and tracks how far off the judges are.

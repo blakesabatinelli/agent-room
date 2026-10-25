@@ -95,6 +95,40 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .empty { padding: 30px 20px; color: var(--muted); text-align: center; }
 .capline { padding: 4px 16px 16px; font-size: 13px; color: var(--muted); }
 
+/* simple home: a greeting, one box to say what you want done, what is in progress, rooms and agents as cards */
+.home { padding-bottom: 24px; }
+.greet { font-family: var(--display); font-weight: 600; font-size: 22px; color: var(--ink-strong); padding: 20px 16px 12px; }
+.goalbox { display: flex; gap: 8px; align-items: flex-end; padding: 0 14px 8px; }
+#goalText { flex: 1; resize: none; font: inherit; font-size: 16px; color: var(--ink-strong); background: var(--canvas);
+  border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 2px 10px var(--shadow); padding: 12px 14px; min-height: 48px; max-height: 40vh; }
+#goalText:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--tint); }
+#goalText::placeholder { color: var(--faint); }
+.goalbox .btn { flex: none; padding: 13px 18px; }
+.hcard { align-items: center; }
+.hbody { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.hcard .name { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hwhat { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.addrow .hash, .addrow .name { color: var(--accent); }
+
+/* the live strip: what is running, approvals waiting, and each agent's usage left. Calm, glanceable, one row of chips when idle. */
+#strip { background: var(--canvas); border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 7px; padding: 9px 12px; }
+#strip:empty { display: none; padding: 0; border: 0; }
+.strip-run { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.runitem { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.runpulse { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+.runtext { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.strip-appr { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; }
+.strip-use { display: flex; flex-wrap: wrap; gap: 6px; }
+.uchip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 99px; border: 1px solid var(--line); background: var(--surface); }
+.uchip:active { background: var(--raised); }
+.udot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.udot.ok { background: var(--ok); }
+.udot.warn { background: var(--warn); }
+.udot.danger { background: var(--danger); }
+.udot.neutral { background: var(--muted); }
+.uname { font-size: 13px; font-weight: 600; color: var(--ink-strong); }
+.ustat { font-size: 12px; color: var(--muted); }
+
 /* the goal card: the goal at the top of the conversation (3.1) */
 #goal { border-bottom: 1px solid var(--line); background: var(--canvas); }
 #goal .gc-head { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 14px; text-align: left; }

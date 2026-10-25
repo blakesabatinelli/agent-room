@@ -73,6 +73,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const { rooms, roomId, view, agents, approvals, unread, hub, online } = s;
   const [openCh, setOpenCh] = useState(true);
   const [openDm, setOpenDm] = useState(true);
+  const [openAdv, setOpenAdv] = useState(false); // simple by default: the full set of screens is folded away until asked for
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [issueCount, setIssueCount] = useState(0); // recurring problems the owner has not dismissed; refreshed when the screen changes
@@ -102,10 +103,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 
       <GoToRow />
       <ScrollView contentContainerStyle={{ paddingVertical: space(2) }}>
+        <Row label="Home" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⌂</Text>} active={isPage("home")} onPress={() => page("home")} />
         <Row label="Approvals" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>✓</Text>} active={isPage("approvals")} bold={approvals.length > 0} badge={approvals.length || undefined} onPress={() => page("approvals")} />
-        <Row label="Memory" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>◇</Text>} active={isPage("memory")} badge={s.proposals.length || undefined} onPress={() => page("memory")} />
-        <Row label="Issues" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>!</Text>} active={isPage("issues")} bold={issueCount > 0} badge={issueCount || undefined} onPress={() => page("issues")} />
-        <Row label="Office" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>▦</Text>} active={isPage("office")} onPress={() => page("office")} />
 
         <Heading label="Rooms" open={openCh} toggle={() => setOpenCh(!openCh)} onAdd={() => { setOpenCh(true); setCreating(true); }} />
         {openCh ? channels.map((r) => (
@@ -137,17 +136,24 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           );
         }) : null}
         <Row label="Add an agent" prefix={<Text style={[t.body, { color: p.sidebarMuted }]}>＋</Text>} onPress={() => page("agents")} />
-      </ScrollView>
 
-      <View style={{ borderTopWidth: 1, borderColor: p.line, paddingVertical: space(2) }}>
-        <Row label="Scorecard" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>▥</Text>} active={isPage("scorecard")} onPress={() => page("scorecard")} />
-        <Row label="Résumés" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>☰</Text>} active={isPage("resumes")} onPress={() => page("resumes")} />
-        <Row label="Agents & connections" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚇</Text>} active={isPage("agents")} onPress={() => page("agents")} />
-        <Row label="Permissions" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚿</Text>} active={isPage("permissions")} onPress={() => page("permissions")} />
-        <Row label="Approval rules" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>✓</Text>} active={isPage("policy")} onPress={() => page("policy")} />
-        <Row label="Folders" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>▤</Text>} active={isPage("folders")} onPress={() => page("folders")} />
-        <Row label="Settings" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚙</Text>} active={isPage("settings")} onPress={() => page("settings")} />
-      </View>
+        {/* Simple by default: everything past the everyday few is folded under one Advanced section. Each screen still works, reached from here. */}
+        <Heading label="Advanced" open={openAdv} toggle={() => setOpenAdv(!openAdv)} />
+        {openAdv ? (
+          <>
+            <Row label="Memory" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>◇</Text>} active={isPage("memory")} badge={s.proposals.length || undefined} onPress={() => page("memory")} />
+            <Row label="Issues" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>!</Text>} active={isPage("issues")} bold={issueCount > 0} badge={issueCount || undefined} onPress={() => page("issues")} />
+            <Row label="Office" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>▦</Text>} active={isPage("office")} onPress={() => page("office")} />
+            <Row label="Scorecard" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>▥</Text>} active={isPage("scorecard")} onPress={() => page("scorecard")} />
+            <Row label="Résumés" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>☰</Text>} active={isPage("resumes")} onPress={() => page("resumes")} />
+            <Row label="Agents & connections" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚇</Text>} active={isPage("agents")} onPress={() => page("agents")} />
+            <Row label="Permissions" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚿</Text>} active={isPage("permissions")} onPress={() => page("permissions")} />
+            <Row label="Approval rules" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>✓</Text>} active={isPage("policy")} onPress={() => page("policy")} />
+            <Row label="Folders" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>▤</Text>} active={isPage("folders")} onPress={() => page("folders")} />
+            <Row label="Settings" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>⚙</Text>} active={isPage("settings")} onPress={() => page("settings")} />
+          </>
+        ) : null}
+      </ScrollView>
     </SidebarSurface>
   );
 }
