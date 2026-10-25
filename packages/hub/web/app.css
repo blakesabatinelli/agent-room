@@ -409,3 +409,42 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .rfolder { padding: 10px 0; border-top: 1px solid var(--line); }
 .rfolder .rfname { color: var(--ink); font-weight: 600; overflow-wrap: anywhere; }
 .rfolder .actions { padding: 8px 0 0; }
+
+/* Trace and Issues: a goal's tree (plan, tasks, attempts, what happened in each) and the problems that keep coming back. Status colours are the palette's: ok, warn, danger, accent, muted. */
+.tr-sum .what { font-family: var(--display); overflow-wrap: anywhere; }
+.tr-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.tr-chips .chip { height: auto; min-height: 22px; padding: 2px 8px; white-space: normal; }
+.tr-tree { margin: 0 14px 14px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--canvas); }
+.tr-tree > .tr-node + .tr-node { border-top: 1px solid var(--line); }
+.tr-head { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 8px 12px; text-align: left; }
+.tr-head:active { background: var(--surface); }
+.tdot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+.ts-ok .tdot { background: var(--ok); }
+.ts-sent_back .tdot, .ts-waiting .tdot { background: var(--warn); }
+.ts-failed .tdot { background: var(--danger); }
+.ts-running .tdot { background: var(--accent); }
+.tr-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.tr-t { font-weight: 600; font-size: 15px; line-height: 1.3; color: var(--ink-strong); overflow-wrap: anywhere; }
+.tr-m { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.ts-ok .tr-m { color: var(--ok); }
+.ts-sent_back .tr-m, .ts-waiting .tr-m { color: var(--warn); }
+.ts-failed .tr-m { color: var(--danger); }
+.ts-running .tr-m { color: var(--accent); }
+.tr-body { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px 17px; padding: 2px 0 2px 10px; border-left: 1px solid var(--line-strong); }
+.tr-body.flat { margin: 8px 12px; }
+.tr-node.att .tr-head, .tr-node.helper .tr-head { min-height: 40px; padding: 6px 8px; }
+.tr-line { font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
+.tr-line.bad { color: var(--danger); }
+.tr-ev { display: flex; gap: 8px; font-size: 13px; line-height: 1.35; }
+.tr-ev .evt { flex: none; width: 58px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tr-ev .evx { min-width: 0; overflow-wrap: anywhere; color: var(--ink); }
+.tr-ev.quiet .evx { color: var(--muted); }
+.tr-ev.ev-approval .evx { color: var(--ink-strong); font-weight: 600; }
+.tr-foot { padding: 0 14px 18px; margin-top: 0; }
+.tr-links { margin-top: 8px; }
+.tr-link { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 44px; margin-top: 6px; padding: 8px 12px; text-align: left; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--canvas); }
+.tr-link:active { background: var(--surface); }
+.tr-link .tl-t { min-width: 0; font-size: 14px; color: var(--ink); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tr-link .tl-go { flex: none; font-size: 13px; font-weight: 600; color: var(--link); }
+.card.issue .gc-note { margin-top: 10px; }
+.empty.warn { color: var(--danger); }

@@ -51,6 +51,8 @@ import { A2A_FUNNEL_PATHS, a2aRemoteOpen, isA2aOpenPath } from "../interop/paths
 import { a2aFunnelOn, registerInteropRoutes } from "../interop/routes.js"; // 4.6
 import { registerDistributionRoutes, type DistributionDeps } from "../distribution/routes.js"; // 4.7
 import { recordConnection } from "../placement/index.js"; // where an MCP agent connects from
+import { registerTraceRoutes } from "../trace/index.js"; // Trace and Issues
+import { registerIssueRoutes } from "../issues/index.js"; // Trace and Issues
 
 export interface ServerDeps {
   store: Store; orch: Orchestrator; approvals: Approvals; ownerName: string; restrictInterfaces?: boolean;
@@ -706,6 +708,8 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   registerNightShiftRoutes(app, store, orch.nightshift); // 4.5: GET /nightshift, /nightshift/runs, /nightshift/head-to-head
   registerRoomRoutes(app, () => ({ store, control: () => orch.control, files: orch.files, standing: orch.standing })); // 4.3: GET and PUT /rooms/:id/definition
   registerOfficeRoutes(app, store, () => orch.control); // 3.4: GET /office?roomId= (3.4b: personas come from the control folder)
+  registerTraceRoutes(app, store, () => orch.turns); // Trace and Issues: GET /goals/:id/trace
+  registerIssueRoutes(app, store, () => orch.turns); // Trace and Issues: GET /issues?roomId=, POST /issues/:id/dismiss
   registerDistributionRoutes(app, store, { dataDir: orch.dataDir, ...distribution }); // 4.7: GET /version, /privacy, /telemetry/preview, /crashes
   registerForkRoutes(app, store, () => orch.forks); // 4.4: POST /goals/fork, GET /forks, GET /forks/:id, POST /forks/:id/merge
   registerPolicyRoutes(app, { policy: () => orch.policy, store, approvals }); // 4.2: GET /policy, rules accept/edit/delete, GET and POST /leases, POST /approvals/:id/lease

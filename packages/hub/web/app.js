@@ -7,7 +7,7 @@
   const st = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     ownerName: "",
-    view: "rooms",          // rooms | room | tasks | roominfo | fork | approvals | diff | permissions | folders | control | policy | subscriptions | remote | personas | persona | resumes | scorecard | appearance | pair
+    view: "rooms",          // rooms | room | tasks | roominfo | fork | approvals | diff | permissions | folders | control | policy | subscriptions | remote | personas | persona | resumes | scorecard | appearance | trace | issues | pair
     settings: null, // the owner's settings (PUT /settings), for the night shift switch
     tools: [], control: null, policy: null, quota: [], remote: null, firstPass: null, memExport: [], resumes: null, probationCount: 0,
     scorecard: null, scWeek: "this", ledger: null, attention: null, // 2.7
@@ -31,6 +31,9 @@
     info: { roomId: "", def: null, err: "", grants: null },
     // 4.4 forks: the fork on screen, its tab, a merge waiting for a second tap, and the diffs left open
     fork: { id: "", roomId: "", v: null, err: "", tab: "a", confirm: "", busy: false, open: {} },
+    // Trace and Issues: the goal trace on screen (and where Back goes), and the recurring problems
+    trace: { goalId: "", from: "room", roomId: "", data: null, err: "", open: {} },
+    issues: { data: null, err: "", count: 0 },
   };
 
   // ---------- helpers
@@ -205,6 +208,7 @@
       const [rooms, agents, approvals] = await Promise.all([api("/rooms"), api("/agents"), api("/approvals?status=pending")]);
       st.rooms = rooms; st.agents = Object.fromEntries(agents.map((a) => [a.id, a])); st.approvals = approvals;
       connectWs(); render(); loadControl().catch(() => {}); loadPolicy().catch(() => {});
+      loadIssues().catch(() => {}); // the count under Settings
       openFromHash(); // 3.4: the office page links back here with #room=<id>
       // 1.5: what the hub found about its computer, one line under Settings
       api("/capacity").then((c) => { st.capacity = c; if (st.view === "rooms") renderRooms(); }).catch(() => {});
@@ -271,6 +275,8 @@
     if (st.view === "resumes") $("#title").textContent = "Résumés"; // 2.3
     if (st.view === "appearance") $("#title").textContent = "Appearance"; // 3.1
     if (st.view === "fork") $("#title").textContent = "Fork"; // 4.4
+    if (st.view === "trace") $("#title").textContent = "Trace";
+    if (st.view === "issues") $("#title").textContent = "Issues";
     $("#jumpBtn").hidden = st.view === "pair";
     renderGoal();
     if (st.view === "pair") return renderPair();
@@ -291,6 +297,8 @@
     if (st.view === "tasks") return renderTasks(); // 3.3
     if (st.view === "roominfo") return renderRoomInfo();
     if (st.view === "fork") return renderFork(); // 4.4
+    if (st.view === "trace") return renderTrace();
+    if (st.view === "issues") return renderIssues();
     renderMessages(); renderComposerState();
   }
 
@@ -369,6 +377,7 @@
       <button class="row" data-nav="subscriptions"><span class="hash">☷</span><span class="name">Subscriptions</span></button>
       <button class="row" data-nav="personas"><span class="hash">☺</span><span class="name">Personas</span></button>
       <button class="row" data-nav="scorecard"><span class="hash">▥</span><span class="name">Scorecard</span></button>
+      <button class="row" data-nav="issues"><span class="hash">!</span><span class="name">Issues</span>${st.issues.count ? `<span class="sub">${st.issues.count} open</span>` : ""}</button>
       <button class="row" data-nav="appearance"><span class="hash">☾</span><span class="name">Appearance</span></button>
       <button class="row" data-nav="policy"><span class="hash">✓</span><span class="name">Approval rules</span>${st.policy?.pending ? `<span class="sub">${st.policy.pending} to review</span>` : ""}</button>
       <button class="row" data-nav="control"><span class="hash">⚙︎</span><span class="name">Control files</span>${nCtl ? `<span class="sub">${nCtl} to look at</span>` : ""}</button>
@@ -673,6 +682,168 @@
     }
     if (!proposals.length && !p.leases.length && !p.rules.length && p.ok) kids.push(h("div", { class: "empty", text: "No rules yet. When you approve the same kind of thing a few times, the hub offers a rule here." }));
     kids.push(h("div", { class: "card" }, h("div", { class: "detail", text: "To change a rule's wording or scope, edit POLICY.md on your Mac." })));
+    $("#view").replaceChildren(...kids);
+  }
+
+  // ---------- Trace and Issues
+  // Trace: the whole story of one goal as a tree (plan, tasks, attempts, and what happened during each). Opened from the goal card.
+  // Issues: problems that keep coming back, with a link to the traces behind each and a Dismiss.
+  const TRACE_STATE = { ok: "Accepted", sent_back: "Sent back", failed: "Failed", waiting: "Needs you", running: "Running", stopped: "Stopped" };
+  const TRACE_TAG = { spec: "Unclear task", misalignment: "Drifted off task", verification: "Said done too early", placement: "Blocked by its environment", other: "Failed" };
+  const TRACE_TASK_TONE = { done: "ok", failed: "failed", waiting: "waiting", running: "running", assigned: "running", review: "running", revising: "running", pending: "stopped", cancelled: "stopped" };
+  const TURN_KIND = { owner: "your message", tag: "tagged", rollcall: "roll call", ask: "asked", aside: "side question" };
+  const durText = (s) => {
+    s = Math.max(0, Math.round(s || 0));
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    return m < 60 ? `${m}m ${String(s % 60).padStart(2, "0")}s` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+  };
+  const nOf = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const whenText = (t) => `${dayLabel(t)} ${time(t)}`;
+  const traceOpen = (key, dflt) => (st.trace.open[key] !== undefined ? st.trace.open[key] : dflt);
+
+  async function openTrace(goalId, from) {
+    const roomId = st.roomId || st.trace.roomId;
+    st.trace = { goalId, from, roomId, data: null, err: "", open: {} };
+    go("trace");
+    await loadTrace();
+  }
+  async function loadTrace() {
+    const id = st.trace.goalId;
+    try { const d = await api(`/goals/${encodeURIComponent(id)}/trace`); if (st.trace.goalId === id) { st.trace.data = d; st.trace.err = ""; } }
+    catch (e) { if (e.message === "unpaired") return; st.trace.err = e.message; }
+    if (st.view === "trace") renderTrace();
+  }
+
+  const traceChip = (text, tone) => h("span", { class: `chip${tone ? ` ${tone}` : ""}`, text });
+  function traceSummary(tr) {
+    const s = tr.summary;
+    const chips = [traceChip(`${s.tasksDone} of ${s.tasksTotal} tasks done`, s.tasksTotal && s.tasksDone === s.tasksTotal ? "ok" : "accent"), traceChip(nOf(s.attempts, "attempt"))];
+    if (s.helpers) chips.push(traceChip(nOf(s.helpers, "helper")));
+    if (s.sentBack) chips.push(traceChip(`${s.sentBack} sent back`, "warn"));
+    for (const tag of ["placement", "spec", "misalignment", "verification", "other"]) if (s.failures[tag]) chips.push(traceChip(`${s.failures[tag]} ${TRACE_TAG[tag].toLowerCase()}`, "danger"));
+    chips.push(traceChip(`${durText(s.elapsedSeconds)} in all`));
+    if (s.workSeconds) chips.push(traceChip(`${durText(s.workSeconds)} of agent work`));
+    if (s.approvals.total) chips.push(traceChip(`${nOf(s.approvals.total, "approval")}${s.approvals.pending ? `, ${s.approvals.pending} waiting` : ""}`, s.approvals.pending ? "warn" : ""));
+    if (s.tokens !== undefined) chips.push(traceChip(`${s.tokens.toLocaleString()} tokens`));
+    if (s.costUsd !== undefined) chips.push(traceChip(s.costUsd > 0 && s.costUsd < 0.005 ? "Under $0.01" : `$${s.costUsd.toFixed(2)}`));
+    return h("div", { class: "card tr-sum" }, h("div", { class: "what", text: tr.goal.text }), h("div", { class: "detail", text: `Started ${whenText(tr.goal.createdAt)}. ${tr.goal.status === "running" ? "Still running." : ""}`.trim() }), h("div", { class: "tr-chips" }, chips));
+  }
+
+  function tracePlan(tr) {
+    const p = tr.plan, a = p.approval;
+    const line = a.state === "approved" ? `Approved ${whenText(a.at)}` : a.state === "waiting" ? "Waiting for your approval" : a.state === "planning" ? "Being written" : a.state === "cancelled" ? "You cancelled it" : "Started without needing approval";
+    const open = traceOpen("plan", false);
+    const rows = [];
+    if (open) {
+      for (const s of p.steps) rows.push(h("div", { class: "tr-ev" }, h("span", { class: "evt", text: time(s.at) }), h("span", { class: "evx", text: s.text })));
+      for (const m of p.amendments) rows.push(h("div", { class: "tr-ev" }, h("span", { class: "evt", text: time(m.at) }), h("span", { class: "evx", text: `You asked: ${m.text}` })));
+      for (const r of p.requirements) rows.push(h("div", { class: `req ${r.status}` }, h("span", { class: "rg", "aria-hidden": "true", text: r.status === "met" ? "✓" : r.status === "unmet" ? "✕" : "○" }), h("span", { class: "rid", text: r.id }), h("span", { class: "rt", text: r.text })));
+    }
+    return h("div", { class: "tr-node" },
+      h("button", { type: "button", class: `tr-head ts-${a.state === "waiting" ? "waiting" : a.state === "cancelled" ? "failed" : "ok"}`, "data-trace-toggle": "plan", "aria-expanded": open ? "true" : "false", "data-open": open ? "1" : "0" },
+        h("span", { class: "tdot", "aria-hidden": "true" }),
+        h("span", { class: "tr-main" }, h("span", { class: "tr-t", text: `Plan${p.version ? ` v${p.version}` : ""}` }), h("span", { class: "tr-m", text: line })),
+        h("span", { class: "gc-caret", "aria-hidden": "true", text: open ? "▾" : "▸" })),
+      open ? h("div", { class: "tr-body" }, rows.length ? rows : h("div", { class: "detail", text: "Nothing recorded for the plan." })) : null);
+  }
+
+  function traceEvent(e) {
+    if (e.kind === "approval") {
+      const how = e.status === "pending" ? "Waiting for you" : e.auto ? "Approved automatically" : `${e.status === "approved" ? "Approved" : e.status === "rejected" ? "Declined" : "Expired"}${e.waitSeconds !== undefined ? ` after ${durText(e.waitSeconds)}` : ""}`;
+      return h("div", { class: "tr-ev ev-approval" }, h("span", { class: "evt", text: time(e.at) }), h("span", { class: "evx", text: `Approval, ${e.tool}: ${e.action}. ${how}.` }));
+    }
+    if (e.kind === "turn") {
+      const bits = [e.status === "failed" ? "couldn't reply" : e.status];
+      if (e.via) bits.push(e.via === "post" ? "posted in the room" : "answered by the hub");
+      if (e.dropped) bits.push(`${nOf(e.dropped, "repeat post")} kept out`);
+      return h("div", { class: "tr-ev ev-turn" }, h("span", { class: "evt", text: time(e.at) }), h("span", { class: "evx", text: `Reply (${TURN_KIND[e.turnKind] || e.turnKind}): ${bits.join(", ")}${e.error ? `. ${e.error}` : ""}` }));
+    }
+    return h("div", { class: `tr-ev ev-post${e.quiet ? " quiet" : ""}` }, h("span", { class: "evt", text: time(e.at) }), h("span", { class: "evx", text: `${e.author}: ${e.text}` }));
+  }
+
+  /** The recorded note often starts with the tag already ("blocked by its environment: ..."); say it once. */
+  const failureLine = (label, reason) => (!reason ? label : reason.toLowerCase().startsWith(label.toLowerCase()) ? reason.charAt(0).toUpperCase() + reason.slice(1) : `${label}: ${reason}`);
+
+  function traceAttempt(t, a) {
+    const key = `a:${a.id}`;
+    const open = traceOpen(key, a.state !== "ok");
+    const meta = [TRACE_STATE[a.state] || a.state, a.seconds !== undefined ? durText(a.seconds) : "", a.model || ""].filter(Boolean).join(" · ");
+    const body = [];
+    if (open) {
+      body.push(h("div", { class: "tr-line", text: `${whenText(a.at)}${a.endedAt ? ` to ${time(a.endedAt)}` : ""}` }));
+      const use = [a.tokens !== undefined ? `${a.tokens.toLocaleString()} tokens` : "", a.usage && a.usage.costUsd !== undefined ? `$${a.usage.costUsd.toFixed(4)}` : ""].filter(Boolean).join(" · ");
+      if (use) body.push(h("div", { class: "tr-line", text: use }));
+      if (a.failure) body.push(h("div", { class: "tr-line bad", text: failureLine(TRACE_TAG[a.failure.tag] || a.failure.tag, a.failure.reason) }));
+      if (a.judge) {
+        const v = a.judge.verdict === "accept" ? "accepted" : a.judge.verdict === "revise" ? "sent back" : "given to another agent";
+        body.push(h("div", { class: "tr-line", text: `Judged by ${a.judge.names.join(", ") || "a reviewer"}: ${Math.round(a.judge.score * 100)}/100, ${v}${a.judge.feedback ? `. ${a.judge.feedback}` : ""}` }));
+      } else if (a.note && !a.failure) body.push(h("div", { class: "tr-line", text: a.note }));
+      for (const e of a.events) body.push(traceEvent(e));
+      if (a.hidden) body.push(h("div", { class: "tr-line", text: `${nOf(a.hidden, "more line")} not shown.` }));
+      for (const hp of t.helpers.filter((x) => x.parentAttempt === a.n)) body.push(traceTask(hp));
+    }
+    return h("div", { class: "tr-node att" },
+      h("button", { type: "button", class: `tr-head ts-${a.state}`, "data-trace-toggle": key, "aria-expanded": open ? "true" : "false", "data-open": open ? "1" : "0" },
+        h("span", { class: "tdot", "aria-hidden": "true" }),
+        h("span", { class: "tr-main" }, h("span", { class: "tr-t", text: `Attempt ${a.n}, ${a.agentName}` }), h("span", { class: "tr-m", text: meta })),
+        h("span", { class: "gc-caret", "aria-hidden": "true", text: open ? "▾" : "▸" })),
+      open ? h("div", { class: "tr-body" }, body) : null);
+  }
+
+  function traceTask(t) {
+    const key = `t:${t.id}`;
+    const tone = TRACE_TASK_TONE[t.status] || "stopped";
+    const open = traceOpen(key, t.status !== "done" || t.attempts.some((a) => a.state !== "ok"));
+    const who = t.assigneeName ? ` · ${t.assigneeName}` : "";
+    const tag = t.helper ? (t.native ? "built-in helper" : t.readOnly ? "read-only helper" : "helper") : "";
+    const placed = new Set(t.attempts.map((a) => a.n));
+    const loose = t.helpers.filter((x) => !placed.has(x.parentAttempt));
+    return h("div", { class: `tr-node task${t.helper ? " helper" : ""}` },
+      h("button", { type: "button", class: `tr-head ts-${tone}`, "data-trace-toggle": key, "aria-expanded": open ? "true" : "false", "data-open": open ? "1" : "0" },
+        h("span", { class: "tdot", "aria-hidden": "true" }),
+        h("span", { class: "tr-main" }, h("span", { class: "tr-t", text: t.title }), h("span", { class: "tr-m", text: `${tag ? `${tag} · ` : ""}${TASK_STATUS[t.status] || t.status} · ${nOf(t.attempts.length, "attempt")}${who}` })),
+        h("span", { class: "gc-caret", "aria-hidden": "true", text: open ? "▾" : "▸" })),
+      open ? h("div", { class: "tr-body" }, t.attempts.length ? t.attempts.map((a) => traceAttempt(t, a)) : h("div", { class: "detail", text: t.helper ? "No separate run recorded." : "Not started." }), loose.map(traceTask)) : null);
+  }
+
+  function renderTrace() {
+    const view = $("#view"), tr = st.trace.data;
+    if (!tr) { view.replaceChildren(h("div", { class: st.trace.err ? "empty warn" : "empty", text: st.trace.err || "Loading…" })); return; }
+    const kids = [traceSummary(tr), h("div", { class: "section", text: "Plan and tasks" }), h("div", { class: "tr-tree" }, tracePlan(tr), tr.tasks.map(traceTask))];
+    if (tr.loose.length) kids.push(h("div", { class: "section", text: "Other activity" }), h("div", { class: "tr-tree" }, h("div", { class: "tr-body flat" }, tr.loose.map(traceEvent))));
+    if (tr.lessons.length) kids.push(h("div", { class: "section", text: "Lessons from the retro" }), ...tr.lessons.map((l) => h("div", { class: "card" }, h("div", { class: "what", text: `${l.agentName}, ${l.taskType}` }), h("div", { class: "detail", text: l.text }))));
+    kids.push(h("div", { class: "actions tr-foot" }, h("button", { type: "button", class: "btn small plain", "data-trace-refresh": "1", text: "Refresh" })));
+    const keep = view.scrollTop;
+    view.replaceChildren(...kids); view.scrollTop = keep;
+  }
+
+  async function openIssues() {
+    go("issues");
+    await loadIssues();
+  }
+  async function loadIssues() {
+    try {
+      const r = await api("/issues");
+      st.issues.data = r; st.issues.err = ""; st.issues.count = r.issues.length;
+    } catch (e) { if (e.message === "unpaired") throw e; st.issues.err = e.message; }
+    if (st.view === "issues") renderIssues(); else if (st.view === "rooms") renderRooms();
+  }
+  function renderIssues() {
+    const r = st.issues.data;
+    if (!r) { $("#view").replaceChildren(h("div", { class: st.issues.err ? "empty warn" : "empty", text: st.issues.err || "Loading…" })); return; }
+    const kids = [h("div", { class: "card" }, h("div", { class: "what", text: "Problems that keep coming back" }), h("div", { class: "detail", text: `The last ${r.days} days. Dismiss one and it stays away until it happens again.` }))];
+    for (const i of r.issues) {
+      kids.push(h("div", { class: "card issue" },
+        h("div", { class: "what", text: i.title }),
+        i.reappeared ? h("div", { class: "detail" }, traceChip("Back again", "warn")) : null,
+        h("div", { class: "detail", text: `First seen ${whenText(i.firstSeen)}. Last seen ${whenText(i.lastSeen)}.` }),
+        h("div", { class: "gc-note next" }, h("b", { text: "Next step" }), i.next),
+        i.goals.length ? h("div", { class: "tr-links" }, h("div", { class: "detail", text: i.goals.length === 1 ? "Goal" : "Goals" }), i.goals.map((g) => h("button", { type: "button", class: "tr-link", "data-trace": g.id, "data-trace-from": "issues" }, h("span", { class: "tl-t", text: g.text }), h("span", { class: "tl-go", text: "Trace ›" })))) : null,
+        i.tasks.length ? h("div", { class: "detail", text: `Tasks: ${i.tasks.map((t) => t.title).join(", ")}` }) : null,
+        h("div", { class: "actions" }, h("button", { type: "button", class: "btn small plain", "data-issue-dismiss": i.id, text: "Dismiss" }))));
+    }
+    if (!r.issues.length) kids.push(h("div", { class: "empty", text: r.dismissed ? "Nothing new. Dismissed issues show up again if they happen again." : "No recurring problems this week." }));
     $("#view").replaceChildren(...kids);
   }
 
@@ -1195,7 +1366,8 @@
         m.note ? h("div", { class: `gc-note${m.note.kind === "next" ? " next" : ""}` }, h("b", { text: m.note.kind === "waiting" ? "Waiting on you" : "Next" }), m.note.text, m.note.kind === "waiting" ? h("small", { text: "Reply in the room and the work picks back up." }) : null) : null,
         reqs.length ? h("div", {}, h("div", { class: "gc-h" }, "Done means", h("span", { text: `${m.met} of ${m.total} met` })), reqs)
           : h("div", { class: "gc-line", text: m.state.key === "planning" ? "Writing the plan. The list of what done means shows here once it's ready." : "No list of requirements for this goal." }),
-        line ? h("div", { class: "gc-line", text: line }) : null) : null].filter(Boolean));
+        line ? h("div", { class: "gc-line", text: line }) : null,
+        h("div", { class: "actions" }, h("button", { type: "button", class: "btn small plain", "data-trace": goal.id, "data-trace-from": "room", text: "Trace" }))) : null].filter(Boolean));
     for (const el of host.querySelectorAll("[data-pct]")) el.style.width = `${el.dataset.pct}%`;
   }
 
@@ -1327,7 +1499,7 @@
   }
 
   // ---------- 3.1 the jump sheet: rooms, agents, room commands and screens in one list (the Mac's Command-K)
-  const PHONE_SCREENS = ["approvals", "folders", "permissions", "appearance", "scorecard", "resumes", "agents", "policy"];
+  const PHONE_SCREENS = ["approvals", "folders", "permissions", "appearance", "scorecard", "resumes", "agents", "policy", "issues"];
   function jumpItems() {
     return ARView.paletteItems({
       rooms: st.rooms, agents: Object.values(st.agents), currentRoomId: st.view === "room" ? st.roomId : undefined,
@@ -1365,7 +1537,7 @@
       if (a.kind === "room") go("room", a.roomId);
       else if (a.kind === "dm") { const r = await api(`/rooms/dm/${encodeURIComponent(a.agentId)}`, { method: "POST", body: {} }); if (!st.rooms.some((x) => x.id === r.id)) st.rooms.push(r); go("room", r.id); }
       else if (a.kind === "page") {
-        const sc = { approvals: "approvals", folders: "folders", permissions: "permissions", appearance: "appearance", scorecard: "scorecard", resumes: "resumes", agents: "personas", policy: "policy" }[a.screen];
+        const sc = { approvals: "approvals", folders: "folders", permissions: "permissions", appearance: "appearance", scorecard: "scorecard", resumes: "resumes", agents: "personas", policy: "policy", issues: "issues" }[a.screen];
         if (sc === "approvals") go("approvals"); else if (sc) navigate(sc);
       }
       else if (a.kind === "command") { if (st.roomId) await api(`/rooms/${st.roomId}/messages`, { method: "POST", body: { text: a.text } }); }
@@ -1384,6 +1556,16 @@
         st.goalOpen[g.id] = !cur; renderGoal(); return;
       }
       if (t.dataset.themeMode) { window.ARTheme.set(t.dataset.themeMode); renderAppearance(); return; }
+      if (t.dataset.trace) { void openTrace(t.dataset.trace, t.dataset.traceFrom || "room"); return; }
+      if (t.dataset.traceToggle) { st.trace.open[t.dataset.traceToggle] = t.dataset.open !== "1"; renderTrace(); return; }
+      if (t.dataset.traceRefresh) { await loadTrace(); return; }
+      if (t.dataset.nav === "issues") { void openIssues(); return; }
+      if (t.dataset.issueDismiss) {
+        t.disabled = true;
+        try { await api(`/issues/${encodeURIComponent(t.dataset.issueDismiss)}/dismiss`, { method: "POST", body: {} }); } catch (err) { if (err.message !== "unpaired") toast(err.message); }
+        await loadIssues();
+        return;
+      }
       if (t.dataset.nav === "appearance") { go("appearance"); return; }
       if (t.dataset.room) return go("room", t.dataset.room);
       if (t.dataset.openFork) { void openFork(t.dataset.openFork); return; } // 4.4
@@ -1564,7 +1746,7 @@
     catch (err) { el.checked = !el.checked; el.disabled = false; if (err.message !== "unpaired") toast(err.message); }
   });
 
-  $("#back").onclick = () => (st.view === "tasks" ? go("room", st.taskRoom) : st.view === "roominfo" ? go("room", st.info.roomId) : st.view === "fork" ? go("room", st.fork.roomId) : go(st.view === "diff" ? "approvals" : st.view === "persona" ? "personas" : "rooms"));
+  $("#back").onclick = () => (st.view === "trace" ? (st.trace.from === "issues" ? void openIssues() : go("room", st.trace.roomId)) : st.view === "tasks" ? go("room", st.taskRoom) : st.view === "roominfo" ? go("room", st.info.roomId) : st.view === "fork" ? go("room", st.fork.roomId) : go(st.view === "diff" ? "approvals" : st.view === "persona" ? "personas" : "rooms"));
   $("#tasksBtn").onclick = () => void openTasks(); // 3.3
   $("#infoBtn").onclick = () => void openRoomInfo(); // 4.3
   $("#jumpNew").onclick = () => {

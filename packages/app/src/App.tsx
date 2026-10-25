@@ -13,6 +13,7 @@ import { SettingsScreen } from "./screens/SettingsScreen";
 import { ScorecardScreen } from "./screens/ScorecardScreen"; // 3.1
 import { ResumesScreen } from "./screens/ResumesScreen"; // 3.1
 import { PolicyScreen } from "./screens/PolicyScreen"; // 4.2
+import { IssuesScreen } from "./screens/IssuesScreen"; // Trace and Issues
 import { OnboardingScreen } from "./screens/OnboardingScreen";
 import { OfficeScreen } from "./screens/OfficeScreen"; // 3.4
 import { Sidebar } from "./components/Sidebar";
@@ -60,6 +61,7 @@ export default function App() {
     permissions: <PermissionsScreen />, folders: <FoldersScreen />, settings: <SettingsScreen />,
     scorecard: <ScorecardScreen />, resumes: <ResumesScreen />, office: <OfficeScreen />, // 3.4
     policy: <PolicyScreen />, // 4.2
+    issues: <IssuesScreen />, // Trace and Issues
   };
   const main = view.kind === "room" ? <RoomScreen onBack={back} /> : pages[view.page];
 

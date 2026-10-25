@@ -2114,3 +2114,120 @@ export interface GoalStep {
   /** The minimal data needed to resume from this step (the agent, a finished run's reply, the judgment). */
   data: Record<string, unknown>;
 }
+// ---- Trace and Issues
+/** GET /goals/:id/trace: one tree for a goal, from the plan down to each attempt and what happened around it. Read-only; the hub builds it from what it already records. */
+export type TraceState = "ok" | "sent_back" | "failed" | "waiting" | "running" | "stopped";
+/** One thing that happened during an attempt, oldest first: an approval card, a reply turn, or a post in the room. */
+export type TraceEvent =
+  | { kind: "approval"; at: number; id: string; tool: string; action: string; status: ApprovalStatus; auto?: boolean; decidedAt?: number; waitSeconds?: number }
+  | { kind: "turn"; at: number; id: string; turnKind: string; status: string; endedAt?: number; via?: "post" | "answer"; dropped: number; error?: string }
+  | { kind: "post"; at: number; id: string; author: string; text: string; quiet?: boolean };
+export interface TraceAttempt {
+  /** The routing record's id. */
+  id: string;
+  /** Position in this task's list of attempts (1 = first). */
+  n: number;
+  at: number;
+  endedAt?: number;
+  seconds?: number;
+  agentId: string;
+  agentName: string;
+  model?: string;
+  profileId?: string;
+  /** Why this agent was picked. */
+  reason: RoutingReason;
+  revision: boolean;
+  usage?: RunUsage;
+  /** Input plus output tokens, when the CLI reported them. */
+  tokens?: number;
+  outcome: RoutingOutcome;
+  state: TraceState;
+  accepted: boolean;
+  sentBack?: "revise" | "reassign";
+  failure?: { tag: FailureTag; reason: string };
+  judge?: { agentIds: string[]; names: string[]; score: number; verdict: Judgment["verdict"]; feedback?: string };
+  /** The task's own log line for this attempt (score, or why it failed). */
+  note?: string;
+  events: TraceEvent[];
+  /** Events left out to keep the tree short. */
+  hidden?: number;
+}
+export interface TraceTask {
+  id: string;
+  title: string;
+  taskType: string;
+  status: TaskStatus;
+  /** A helper (subagent) rather than a planned task. */
+  helper: boolean;
+  native?: boolean;
+  readOnly?: boolean;
+  assigneeId?: string;
+  assigneeName?: string;
+  dependsOn: string[];
+  origin?: Task["origin"];
+  flagged?: string[];
+  /** For a helper: the parent's attempt (n) it was started in. */
+  parentAttempt?: number;
+  attempts: TraceAttempt[];
+  helpers: TraceTask[];
+}
+export interface TracePlan {
+  version?: number;
+  lockedAt?: number;
+  approval: { state: "planning" | "waiting" | "approved" | "not_needed" | "cancelled"; at?: number };
+  /** What the owner changed after the plan was written. */
+  amendments: { at: number; text: string }[];
+  /** Plan events in order: written, approved, changes asked for. */
+  steps: { at: number; text: string }[];
+  requirements: { id: string; text: string; status: "open" | "met" | "unmet" }[];
+}
+export interface TraceSummary {
+  tasksDone: number;
+  tasksTotal: number;
+  attempts: number;
+  helpers: number;
+  sentBack: number;
+  failures: Partial<Record<FailureTag, number>>;
+  failureTotal: number;
+  /** Goal start to its last activity (or to now while it runs). */
+  elapsedSeconds: number;
+  /** Time agents spent running attempts. */
+  workSeconds: number;
+  approvals: { total: number; pending: number; auto: number };
+  tokens?: number;
+  costUsd?: number;
+}
+export interface GoalTrace {
+  at: number;
+  goal: { id: string; roomId: string; text: string; status: Goal["status"]; createdAt: number; summary?: string };
+  plan: TracePlan;
+  summary: TraceSummary;
+  tasks: TraceTask[];
+  /** Approvals and replies during the goal that belong to no attempt. */
+  loose: TraceEvent[];
+  /** Lessons the retro wrote after this goal. */
+  lessons: { id: string; agentId: string; agentName: string; taskType: string; text: string; at: number }[];
+}
+
+/** GET /issues: recurring problems from the last 7 days, grouped and named. */
+export type IssueKind = "failure" | "reply" | "placement" | "repeat_post" | "approval_wait" | "judge";
+export interface Issue {
+  /** Stable while the same problem lasts (kind, tag and agent or task type), so a dismissal can find it again. */
+  id: string;
+  kind: IssueKind;
+  title: string;
+  count: number;
+  firstSeen: number;
+  lastSeen: number;
+  tag?: FailureTag;
+  agentId?: string;
+  taskType?: string;
+  goals: { id: string; text: string; roomId: string }[];
+  tasks: { id: string; title: string; goalId: string }[];
+  rooms: string[];
+  /** One step in plain words, from a fixed table. */
+  next: string;
+  /** Shown again after being dismissed, because it happened again. */
+  reappeared?: boolean;
+}
+export interface IssuesResponse { at: number; days: number; issues: Issue[]; dismissed: number }

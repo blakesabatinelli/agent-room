@@ -3,6 +3,7 @@ import type {
   Message, OrchestratorSettings, FolderCheck, FolderGrantUpdate, WriteProposalSummary, RemoteStatus, Room, ServerEvent, SetupTimer, SignInView, Subscription, SubscriptionStatus, Task,
   WriteProposal, JuryCalibration, CommandsResponse, FirstPassMetrics, MemoryExportInfo, PersonaInput, PersonaTemplate, PersonaView, AgentResume, ProbationStatus, Scorecard,
   ReturnLedger, AttentionState, RoomDefinition, RoomDefinitionInput, ForkView, ForkSideId, NightShiftState, PolicyState, PolicyRulePatch, LeaseRequest, LeaseView,
+  GoalTrace, IssuesResponse,
 } from "@agent-room/shared";
 
 export interface SetupInfo {
@@ -136,6 +137,10 @@ export class Hub {
   editRule = (id: string, patch: PolicyRulePatch) => this.send("PATCH", `/policy/rules/${encodeURIComponent(id)}`, patch);
   deleteRule = (id: string) => this.send("DELETE", `/policy/rules/${encodeURIComponent(id)}`);
   openPolicyFile = () => this.send<{ ok: boolean; path: string }>("POST", "/policy/open", {});
+  // Trace and Issues: one goal as a tree, and the problems that keep coming back (a dismissed one stays away until it happens again)
+  goalTrace = (goalId: string) => this.req<GoalTrace>(`/goals/${encodeURIComponent(goalId)}/trace`);
+  issues = (roomId?: string) => this.req<IssuesResponse>(`/issues${roomId ? `?roomId=${encodeURIComponent(roomId)}` : ""}`);
+  dismissIssue = (id: string) => this.send<{ ok: boolean }>("POST", `/issues/${encodeURIComponent(id)}/dismiss`, {});
   leases = () => this.req<LeaseView[]>("/leases");
   grantLease = (l: LeaseRequest) => this.send<{ lease: LeaseView; notes: string[] }>("POST", "/leases", l);
   revokeLease = (id: string) => this.send("DELETE", `/leases/${encodeURIComponent(id)}`);
