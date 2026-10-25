@@ -47,6 +47,7 @@ import { RoomRules, StandingRooms } from "../rooms/index.js"; // 4.3
 import { Forks, type ForkHost } from "../fork/index.js"; // 4.4
 import { PolicyEngine } from "../policy/index.js"; // 4.2
 import { ReplyTurns, type ReplyTurn, type TurnKind } from "../turns/turns.js";
+import { Durable, type ResumeAction } from "../durable/index.js"; // durable goals
 
 const firstLine = (e?: string) => (e ?? "unknown error").split("\n").find((l) => l.trim())?.slice(0, 300) ?? "unknown error";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -145,6 +146,8 @@ export class Orchestrator {
   turns: ReplyTurns;
   /** 4.1: two agents from different vendors draft an email send, a CRM write or a delete; it runs only if they match, else the owner decides. */
   twoKey: TwoKey;
+  /** Durable goals: the step log (`goal_steps`) every step that changes a goal is written to, and what recover() reads after a restart. */
+  durable: Durable;
 
   /** 1.2: the hub's data folder (the API server keeps local-pair.secret there). */
   get dataDir(): string { return this.opts.dataDir; }
@@ -186,6 +189,7 @@ export class Orchestrator {
     // 4.2: started by main.ts with orch.policy.start() (the lease sweep and the daily learning).
     this.policy = new PolicyEngine({ store, approvals, control: () => this.control, rooms: this.rooms, attention: this.attention });
     this.turns = new ReplyTurns(store);
+    this.durable = new Durable(store); // durable goals
     // 4.3: the calendar trigger for standing rooms (started by main.ts with orch.standing.start()).
     this.standing = new StandingRooms({
       store, control: () => this.control, attention: this.attention,
@@ -663,7 +667,7 @@ export class Orchestrator {
     void this.dropWorktrees(g.id); // 1.4
     g.status = "superseded"; g.summary = `Owner changed direction: ${text}`;
     g.state = { ...(g.state ?? { decisions: [] }), nextAction: "Replaced by a new plan." };
-    this.store.saveGoal(g);
+    this.durable.record(g.id, undefined, "goal_stopped", { why: "superseded by the owner" }, () => this.store.saveGoal(g));
     const notes = this.ownerNotes.get(goal.id) ?? [];
     this.ownerNotes.delete(goal.id);
     const next = [
@@ -872,7 +876,7 @@ export class Orchestrator {
       if (c) { c.abort(); this.running.delete(g.id); }
       for (const t of this.store.listTasks({ goalId: g.id })) this.taskRuns.get(t.id)?.ctrl.abort();
       if (g.status === "running" || g.status === "planning" || g.status === "paused") {
-        g.status = "failed"; g.summary = "Stopped by owner."; this.store.saveGoal(g);
+        g.status = "failed"; g.summary = "Stopped by owner."; this.durable.record(g.id, undefined, "goal_stopped", { why: g.summary }, () => this.store.saveGoal(g));
         for (const t of this.store.listTasks({ goalId: g.id })) {
           if (OPEN(t)) { t.status = "cancelled"; this.store.saveTask(t); }
         }
@@ -893,7 +897,7 @@ export class Orchestrator {
       const c = this.running.get(g.id);
       if (c) { c.abort(); this.running.delete(g.id); }
       for (const t of this.store.listTasks({ goalId: g.id })) this.taskRuns.get(t.id)?.ctrl.abort();
-      g.status = "failed"; this.store.saveGoal(g);
+      g.status = "failed"; this.durable.record(g.id, undefined, "goal_stopped", { why: summary }, () => this.store.saveGoal(g));
       for (const t of this.store.listTasks({ goalId: g.id })) {
         if (OPEN(t)) { t.status = "cancelled"; this.store.saveTask(t); }
       }
@@ -951,7 +955,7 @@ export class Orchestrator {
     const ready = await this.readyAgents(roomId); // 4.3: only this room's roster is planned
     const agents = realAgents(this.store, ready); // 2.3: agents on probation get no real work (they practise on copies)
     if (!agents.length) {
-      goal.status = "failed"; goal.summary = "No agents are connected."; this.store.saveGoal(goal);
+      goal.status = "failed"; goal.summary = "No agents are connected."; this.durable.record(goal.id, undefined, "goal_failed", { why: goal.summary }, () => this.store.saveGoal(goal));
       const anyone = this.enabledAgents().length, here = this.enabledAgents(roomId).length;
       this.post(roomId, SYS, anyone && !here
         ? "Nobody on this room's roster is switched on. Change who is here in ROOM.md (or under room settings), or switch an agent on from the sidebar." // 4.3
@@ -1030,14 +1034,16 @@ export class Orchestrator {
     if (this.needsApproval(tasks)) {
       g.status = "awaiting_approval";
       g.state.nextAction = "Waiting for the owner to approve the plan.";
-      this.store.saveGoal(g);
-      this.store.addMessage({ roomId, author: SYS, type: "system", text: planCard(g.contract, tasks, agents, prof), mentions: [], planGoalId: g.id });
+      this.durable.record(g.id, undefined, "plan_made", { tasks: tasks.map((t) => t.id), approval: true }, () => { // the plan card goes in the same transaction: a restart never leaves a plan waiting with no card
+        this.store.saveGoal(g);
+        this.store.addMessage({ roomId, author: SYS, type: "system", text: planCard(g.contract!, tasks, agents, prof), mentions: [], planGoalId: g.id });
+      });
       this.attention.notify("decision", { title: "A plan is ready for approval", body: g.contract.objective, roomId, goalId: g.id, key: `plan:${g.id}:${g.contract.version}` }); // 2.7
       return;
     }
     g.status = "running";
     g.state.nextAction = `Start ${tasks.filter((t) => !t.dependsOn.length).map((t) => `"${t.title}"`).join(", ")}.`;
-    this.store.saveGoal(g);
+    this.durable.record(g.id, undefined, "plan_made", { tasks: tasks.map((t) => t.id), approval: false }, () => this.store.saveGoal(g));
   }
 
   private awaitPlanDecision(goal: Goal, signal: AbortSignal) {
@@ -1058,7 +1064,7 @@ export class Orchestrator {
       g.status = "running"; g.approvedAt = now();
       g.state = { ...(g.state ?? { decisions: [] }), decisions: [...(g.state?.decisions ?? []), { at: now(), text: "Owner approved the plan." }],
         nextAction: `Start ${tasks.filter((t) => !t.dependsOn.length).map((t) => `"${t.title}"`).join(", ")}.` };
-      this.store.saveGoal(g);
+      this.durable.record(g.id, undefined, "plan_approved", {}, () => this.store.saveGoal(g));
       this.post(g.roomId, SYS, "✓ Plan approved. Work is starting.", "system");
     } else if (decision === "revise") {
       const notes = this.ownerNotes.get(goalId) ?? [];
@@ -1066,11 +1072,11 @@ export class Orchestrator {
       for (const t of tasks) this.store.deleteTask(t.id);
       g.status = "planning";
       g.state = { ...(g.state ?? { decisions: [] }), decisions: [...(g.state?.decisions ?? []), { at: now(), text: `Owner asked for plan changes: ${text.slice(0, 200)}` }], nextAction: "Rewriting the plan." };
-      this.store.saveGoal(g);
+      this.durable.record(g.id, undefined, "plan_revised", { note: text.slice(0, 200) }, () => this.store.saveGoal(g));
       this.post(g.roomId, SYS, "↪ Rewriting the plan with your changes.", "system");
     } else {
       for (const t of tasks) { t.status = "cancelled"; this.store.saveTask(t); }
-      g.status = "failed"; g.summary = "Plan cancelled by owner."; this.store.saveGoal(g);
+      g.status = "failed"; g.summary = "Plan cancelled by owner."; this.durable.record(g.id, undefined, "goal_stopped", { why: g.summary }, () => this.store.saveGoal(g));
       this.post(g.roomId, SYS, "Plan cancelled. Nothing was started.", "system");
     }
     this.planWaiters.get(goalId)?.();
@@ -1078,41 +1084,47 @@ export class Orchestrator {
   }
 
   /**
-   * After a restart, pick running work back up. Tasks that were mid-run start again with the
-   * same agent; nothing counts against them. Plans waiting for approval keep waiting.
+   * After a restart, pick running work back up from each goal's step log (durable goals). A task that was mid-run starts again with the
+   * same agent; nothing counts against it. A run that finished but was not judged goes straight to judging, and accepted work that was not
+   * merged is merged: neither runs again. Plans waiting for approval, and goals waiting on the owner, keep waiting.
+   * Safe to call more than once: a goal this orchestrator is already driving is left alone, and every step is applied once.
    */
   recover() {
     const resumed: Goal[] = [];
     this.subagents.cancelOrphans(); // 3.3: helpers that were running died with the hub; they are not picked up again
     for (const room of this.store.listRooms()) {
       for (const g of this.store.listGoals(room.id).filter((x) => ["planning", "awaiting_approval", "running", "paused"].includes(x.status))) {
+        if (this.running.has(g.id)) continue; // durable goals: already picked up by this orchestrator
         const tasks = this.store.listTasks({ goalId: g.id });
         if (!this.cfg().autoResume) {
           for (const t of tasks.filter(OPEN)) { t.status = "cancelled"; this.store.saveTask(t); }
-          g.status = "failed"; g.summary = "Interrupted by a restart."; this.store.saveGoal(g);
+          g.status = "failed"; g.summary = "Interrupted by a restart."; this.durable.record(g.id, undefined, "goal_stopped", { why: g.summary }, () => this.store.saveGoal(g));
           void this.dropWorktrees(g.id); // 1.4
           this.post(room.id, SYS, `"${g.text.slice(0, 80)}" stopped when the hub restarted.`, "system");
           continue;
         }
         if (g.contract?.amendments.length) this.ownerNotes.set(g.id, g.contract.amendments.map((a) => a.text));
+        // durable goals: a plan that was still being written starts over (its half-saved tasks go), and each task that was in flight is read from the step log
+        if (g.status === "planning") for (const t of tasks.splice(0)) this.store.deleteTask(t.id);
+        const plans = this.durable.plan(g.id, tasks);
+        let picked = 0;
         for (const t of tasks.filter((x) => x.status === "running" || x.status === "review")) {
-          t.attempts = Math.max(0, t.attempts - 1);
-          t.status = t.assignee ? "revising" : "pending";
-          t.judgment = { score: 0, verdict: "revise", feedback: "The hub restarted while you were on this. Pick it up again; check the shared folder for anything you already saved.", judgeAgentId: "system" };
-          this.addHistory(t, "system", "redirect", "hub restarted");
-          closeRecord(this.store, t.routingId, { outcome: "interrupted", failureNote: "hub restarted" });
-          t.routingId = undefined;
-          this.store.saveTask(t);
+          const plan: ResumeAction | undefined = plans.get(t.id);
+          if (plan && plan.action !== "interrupt") { this.durable.expect(t.id, plan); picked++; continue; } // finished or accepted: judged or merged by drive(), never run again
+          this.interruptTask(t);
+          picked++;
         }
         if (g.state?.waitingOnOwner) {
           this.post(room.id, SYS, `Still waiting on you for "${(g.contract?.objective ?? g.text).slice(0, 100)}": ${g.state.waitingOnOwner}`, "system");
         } else if (g.status !== "awaiting_approval") {
           const done = tasks.filter((t) => t.status === "done").length;
-          this.post(room.id, SYS, `↻ Picked up where we left off after a restart: "${(g.contract?.objective ?? g.text).slice(0, 100)}"${tasks.length ? ` (${done} of ${tasks.length} tasks done)` : ""}.`, "system");
+          const line = `Picked up where it left off after a restart: ${done} ${done === 1 ? "task" : "tasks"} done, ${picked} resumed.`;
+          this.durable.record(g.id, undefined, "resumed", { done, resumed: picked });
+          this.post(room.id, SYS, line, "system", undefined, true);
         }
         this.checkpoint(g.id, { decision: "Resumed after a hub restart." });
         resumed.push(g);
-        void this.advance(g.id);
+        void this.advance(g.id).catch((e) => this.store.audit("hub", "goal.resume_failed", `${g.id}: ${(e as Error).message}`.slice(0, 300))); // a failure while resuming one goal never takes the hub down
       }
     }
     this.forks.sweep(); // 4.4: a fork whose sides finished before the restart still gets its comparison
@@ -1160,7 +1172,7 @@ export class Orchestrator {
       this.post(goal.roomId, SYS, `${agent.name} couldn't reply: ${firstLine(res.error)}`, "system", task.id);
     }
     this.store.saveTask(task);
-    goal.status = res.ok ? "done" : "failed"; goal.summary = res.ok ? res.text.slice(0, 2000) : res.error; this.store.saveGoal(goal);
+    goal.status = res.ok ? "done" : "failed"; goal.summary = res.ok ? res.text.slice(0, 2000) : res.error; this.durable.record(goal.id, undefined, res.ok ? "goal_done" : "goal_failed", { direct: true }, () => this.store.saveGoal(goal));
     this.ownerNotes.delete(goal.id);
     return goal;
   }
@@ -1213,6 +1225,13 @@ export class Orchestrator {
         break;
       }
 
+      // Durable goals: a task whose run finished (or whose work was accepted) before a restart goes straight to judging or merging, with the agent that did it.
+      for (const t of open) {
+        if (inflight.has(t.id) || !this.durable.has(t.id)) continue;
+        const back = this.resumeAgent(t);
+        if (!back) continue;
+        inflight.set(t.id, this.runTask(goal, t, back, signal).finally(() => { inflight.delete(t.id); this.busy.delete(back.id); this.governor.release(t.id); }));
+      }
       const room = this.store.getRoom(goal.roomId);
       if (!room?.paused) {
         const ready = open.filter((t) => (t.status === "pending" || t.status === "revising") && !inflight.has(t.id)
@@ -1227,6 +1246,7 @@ export class Orchestrator {
           if (this.progress(goal.id).runs + inflight.size >= budget) break;
           const agent = this.assign(t, live, g.text);
           if (!agent) continue;
+          this.durable.record(goal.id, t.id, "task_assigned", { agentId: agent.id });
           const first = t.status === "pending" && !t.attempts; // 2.3: a real task's first attempt is copied for free probation agents
           const pr = this.runTask(goal, t, agent, signal).finally(() => { inflight.delete(t.id); this.busy.delete(agent.id); this.governor.release(t.id); });
           inflight.set(t.id, pr);
@@ -1335,7 +1355,7 @@ export class Orchestrator {
     const doneIds = new Set(this.store.listTasks({ goalId: goal.id }).filter((t) => t.status === "done").map((t) => t.id));
     const inherited = [...new Set(stuck.flatMap((t) => t.dependsOn).filter((d) => doneIds.has(d)))];
     const fresh = this.buildTasks(goal, raw, agents, "recovery", inherited);
-    fresh.forEach((t) => this.store.saveTask(t));
+    this.durable.record(goal.id, undefined, "replanned", { why: "recovery", tasks: fresh.map((t) => t.id) }, () => fresh.forEach((t) => this.store.saveTask(t)));
     const sinks = fresh.filter((t) => !fresh.some((x) => x.dependsOn.includes(t.id))).map((t) => t.id);
     const stuckIds = new Set(stuck.map((t) => t.id));
     for (const t of this.store.listTasks({ goalId: goal.id }).filter((x) => OPEN(x) && x.dependsOn.some((d) => stuckIds.has(d)))) {
@@ -1419,7 +1439,7 @@ export class Orchestrator {
     }
     gaps.forEach((t, i) => { t.key ||= `gap${i}`; t.dependsOn = []; });
     const added = this.buildTasks(goal, gaps, agents, "verify");
-    added.forEach((t) => this.store.saveTask(t));
+    this.durable.record(goal.id, undefined, "replanned", { why: "verify", tasks: added.map((t) => t.id) }, () => added.forEach((t) => this.store.saveTask(t)));
     this.log(goal.roomId, `Final check found ${unmet.length || gaps.length} gap${(unmet.length || gaps.length) === 1 ? "" : "s"}${unmet.length ? ` (${unmet.map((r) => r.id).join(", ")})` : ""}. Fixing: ${added.map((t) => `"${t.title}"`).join(", ")}.`);
     this.checkpoint(goal.id, { decision: `Final check round ${this.progress(goal.id).verifyRounds}: ${added.length} fix task(s).` });
     return true;
@@ -1512,7 +1532,7 @@ export class Orchestrator {
     task.status = "revising";
     task.judgment = { score: 0, verdict: "revise", feedback: `The owner redirected you mid-task: ${text}. Start over with this.`, judgeAgentId: "owner" };
     this.addHistory(task, "owner", "redirect", text);
-    this.store.saveTask(task);
+    this.durable.record(goal.id, task.id, "sent_back", { agentId: agent.id, mode: "redirect" }, () => this.store.saveTask(task));
     this.log(goal.roomId, `${agent.name} was redirected on "${task.title}".`, task.id, "task_update");
     this.checkpoint(goal.id, { decision: `Owner redirected "${task.title}": ${text.slice(0, 200)}` });
   }
@@ -1565,7 +1585,7 @@ export class Orchestrator {
   private stopForLostFolder(goalId: string) {
     const g = this.store.getGoal(goalId);
     if (!g || ["done", "failed", "superseded"].includes(g.status)) return;
-    g.status = "failed"; g.summary = "Stopped: the folder this goal works on is no longer open to it."; this.store.saveGoal(g);
+    g.status = "failed"; g.summary = "Stopped: the folder this goal works on is no longer open to it."; this.durable.record(g.id, undefined, "goal_stopped", { why: "folder grant lost" }, () => this.store.saveGoal(g));
     for (const t of this.store.listTasks({ goalId })) {
       this.taskRuns.get(t.id)?.ctrl.abort();
       if (OPEN(t)) { t.status = "cancelled"; this.store.saveTask(t); }
@@ -1607,21 +1627,24 @@ export class Orchestrator {
     if (strikes >= 3) return this.retryOrFail(goal, task, agent, "revise", goalSignal);
     this.floor.take(agent.id, goal.roomId);
     task.attempts = Math.max(0, task.attempts - 1);
-    task.status = "revising"; this.store.saveTask(task);
+    task.status = "revising"; this.durable.record(goal.id, task.id, "sent_back", { agentId: agent.id, mode: "conflict", files: files.slice(0, 20) }, () => this.store.saveTask(task));
   }
 
   private async runTaskInner(goal: Goal, task: Task, agent: AgentConfig, signal: AbortSignal, goalSignal: AbortSignal, run: { redirect?: string }) {
     const s = this.cfg();
     const stopped = () => signal.aborted;
     const interrupted = () => { if (goalSignal.aborted) return true; if (run.redirect) { this.redirected(goal, task, agent, run.redirect); return true; } return false; };
-    const isRevision = task.status === "revising";
+    const back = this.durable.take(task.id); // durable goals: a task picked up from the step log after a restart
+    if (back?.action === "merge") return this.mergeResumed(goal, task, agent, back, goalSignal);
+    const resumed = back?.action === "judge" ? back : undefined; // its run already finished: it is judged below, never run again
+    const isRevision = resumed ? resumed.run.revision : task.status === "revising";
     const feedback = isRevision ? task.judgment?.feedback : undefined;
-    this.progress(goal.id, (p) => { p.runs += 1; });
-    task.assignee = agent.id; task.status = "running"; task.attempts += 1; task.claimedAt = now();
-    this.store.saveTask(task);
+    if (!resumed) this.progress(goal.id, (p) => { p.runs += 1; });
+    task.assignee = agent.id; if (!resumed) { task.status = "running"; task.attempts += 1; task.claimedAt = now(); }
+    if (resumed) this.store.saveTask(task); else this.durable.record(goal.id, task.id, "run_started", { agentId: agent.id, revision: isRevision }, () => this.store.saveTask(task));
     this.floor.give(agent.id, goal.roomId, 2 * 3600_000);
-    this.log(goal.roomId, isRevision ? `${agent.name} is revising "${task.title}". ${feedback ?? ""}` : `${agent.name} owns "${task.title}".`, task.id);
-    this.checkpoint(goal.id, { next: `${agent.name} working on "${task.title}".` });
+    if (!resumed) this.log(goal.roomId, isRevision ? `${agent.name} is revising "${task.title}". ${feedback ?? ""}` : `${agent.name} owns "${task.title}".`, task.id);
+    if (!resumed) this.checkpoint(goal.id, { next: `${agent.name} working on "${task.title}".` });
     this.working(goal.roomId, agent, true, task.title);
 
     const fresh = this.store.getGoal(goal.id) ?? goal;
@@ -1646,7 +1669,7 @@ export class Orchestrator {
     const notes = this.ownerNotes.get(goal.id) ?? [];
     const before = snapshot(work);
     const prompt = withPersona(taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.rooms.privateFor(agent.id, goal.roomId), notes, this.enabledAgents(goal.roomId), agent.id, feedback, /* 4.3 */ runsHere(agent) ? { path: work, files: [...before.keys()], ledger: join(folder, "LEDGER.md"), note: this.goalSources.note(fresh) /* 1.1 */ } : undefined /* an agent on another machine has no task folder: text-only work */, this.ledgerText(fresh), this.decisionsFor(fresh), learnedBlock(this.store, this.control, agent, task.taskType) /* 2.1 */), this.store, this.control, agent, "task"); // 3.2: persona last, voice only
-    let res = await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: work });
+    let res: RunResult = resumed ? { ok: true, text: resumed.run.text, durationMs: resumed.run.ms, usage: resumed.run.usage, model: resumed.run.model } : await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: work });
     let usage: RunUsage | undefined = res.usage, ms = res.durationMs, ranModel = res.model;
     // A rate limit or timeout says nothing about the agent's work: wait and retry, without spending an attempt.
     for (let retry = 1; !res.ok && retry <= 2 && isTransient(res.error) && !isRateLimit(res.error) && !stopped(); retry++) { // 1.6: rate limits move to another agent, below
@@ -1657,7 +1680,7 @@ export class Orchestrator {
       usage = addUsage(usage, res.usage); ms += res.durationMs; ranModel = res.model ?? ranModel;
     }
     await this.subagents.settle(task.id); // 3.3: this run is over: helpers still running are stopped, changes the agent never accepted are dropped
-    const changed = changedFiles(before, snapshot(work));
+    const changed = resumed?.run.changed ?? changedFiles(before, snapshot(work));
     this.working(goal.roomId, agent, false);
     // 0.2: close the routing record on every way out of this attempt.
     const route = (outcome: RoutingOutcome, extra: Partial<RoutingRecord> = {}) =>
@@ -1665,6 +1688,7 @@ export class Orchestrator {
     if (stopped() && interrupted()) { route("interrupted"); return; }
 
     if (!res.ok) {
+      this.durable.record(goal.id, task.id, "run_failed", { agentId: agent.id, error: firstLine(res.error) });
       // 1.6: a rate limit isn't the agent's work: hand the task to another agent now rather than waiting on this one.
       if (isRateLimit(res.error) && quotaFor(this.store).mayReroute(task.id, this.enabledAgents(goal.roomId).length)) return this.rerouteRateLimited(goal, task, agent, res.error, route);
       route("run_failed", this.tagFailure(task, agent.id, { kind: "run_error" }, firstLine(res.error)));
@@ -1676,7 +1700,8 @@ export class Orchestrator {
 
     const { body, report } = parseReport(res.text);
     const previous = task.judgment?.feedback;
-    task.result = body; task.report = report; task.status = "review"; this.store.saveTask(task);
+    task.result = body; task.report = report; task.status = "review";
+    if (resumed) this.store.saveTask(task); else this.durable.record(goal.id, task.id, "run_finished", { agentId: agent.id, text: res.text, changed, usage, ms, model: ranModel, revision: isRevision }, () => this.store.saveTask(task)); // the reply is on disk before anything is judged
     if (report.decisions?.length) {
       // Implicit choices made explicit, so the next task doesn't contradict them.
       const g = this.store.getGoal(goal.id)!;
@@ -1685,10 +1710,11 @@ export class Orchestrator {
       st.shared = [...(st.shared ?? []), ...report.decisions.filter((d) => !have.has(d.toLowerCase())).map((text) => ({ at: now(), agentId: agent.id, taskTitle: task.title, text }))].slice(-30);
       g.state = st; this.store.saveGoal(g);
     }
-    const m = this.post(goal.roomId, this.agentAuthor(agent), body, "agent", task.id);
-    this.harvestMemory(agent.id, goal.roomId, body, goal.id);
-    this.routeTags(m, 0);
-    this.store.saveMemory({ id: id("mem"), scope: "private", ownerAgentId: agent.id, roomId: goal.roomId,
+    const posted = resumed ? this.postedSince(task.id, agent.id, resumed.run.startedAt) : false; // durable goals: a reply posted before the restart is not posted again
+    const m = posted ? undefined : this.post(goal.roomId, this.agentAuthor(agent), body, "agent", task.id);
+    if (!posted) this.harvestMemory(agent.id, goal.roomId, body, goal.id);
+    if (m) this.routeTags(m, 0);
+    if (!posted) this.store.saveMemory({ id: id("mem"), scope: "private", ownerAgentId: agent.id, roomId: goal.roomId,
       text: `Did "${task.title}" for goal "${goal.text.slice(0, 80)}".`, sourceAgentId: agent.id, confidence: 1, createdAt: now(),
       source: { kind: "goal", id: goal.id, agentId: agent.id, at: now() }, memKind: "status" /* 2.5 */ });
 
@@ -1696,7 +1722,7 @@ export class Orchestrator {
     if (report.status === "needs_input") {
       route("needs_input", this.tagFailure(task, agent.id, { kind: "needs_input", report }, report.reason ?? "needs input"));
       task.status = "waiting"; this.addHistory(task, agent.id, "needs_input", report.reason ?? "needs input");
-      this.store.saveTask(task); this.floor.take(agent.id, goal.roomId);
+      this.durable.record(goal.id, task.id, "needs_input", { agentId: agent.id, reason: report.reason }, () => this.store.saveTask(task)); this.floor.take(agent.id, goal.roomId);
       this.post(goal.roomId, SYS, `${agent.name} needs your input on "${task.title}"${report.reason ? `: ${report.reason}` : "."} Reply here and the work continues.`, "system", task.id);
       this.attention.notify("decision", { title: `${agent.name} needs your input`, body: `"${task.title}"${report.reason ? `: ${report.reason}` : ""}`, roomId: goal.roomId, goalId: goal.id, taskId: task.id, key: `input:${task.id}:${task.attempts}` }); // 2.7
       this.checkpoint(goal.id, { next: `Waiting on owner for "${task.title}".` });
@@ -1765,6 +1791,7 @@ export class Orchestrator {
       judgment.feedback = `Stay on your task and in scope. ${hard.join(" ")} ${judgment.feedback}`.trim();
     }
     task.judgment = judgment;
+    this.durable.record(goal.id, task.id, "judged", { agentId: agent.id, verdict: judgment.verdict, judgment });
     if (drift.length) task.drift = [...(task.drift ?? []), ...drift].slice(-10);
     recordOutcome(this.store, agent.id, task.taskType, { judgment, seconds: res.durationMs / 1000, failed: false, revision: isRevision }, ranModel ?? profile.model /* 2.4 */);
     const crit = Object.entries(judgment.criteria ?? {}).map(([k, v]) => `${k} ${v.verdict}`).join(", ");
@@ -1775,9 +1802,11 @@ export class Orchestrator {
     const judged = { judgment: { score: judgment.score, verdict: judgment.verdict, judgeAgentId: judgment.judgeAgentId }, ...(judgment.jury ? { juryId: judgment.jury.id } : {}) }; // 2.2: the routing record points at its jury
     if (judgment.verdict === "accept") {
       // 1.4: accepted work merges into the goal folder. A conflict with another task's accepted work is a send-back, never "done".
+      this.durable.record(goal.id, task.id, "accepted", { agentId: agent.id, judgment, flagged: task.flagged, drift: task.drift }); // the decision to merge is on disk before the merge starts
       await this.workspaceHook("beforeMerge", ws, agent.id); // 1.9 HOOK: restore the agent's context file in `work` before it is committed
       const merge = await this.workspaces.accept(this.goalSources.ref(this.store.getGoal(goal.id) ?? fresh, folder), task); // 1.1: the grant is checked again at the moment of merging
       if (!merge.ok) { route("revise", judged); return this.sendBackConflict(goal, task, agent, judgment, merge.conflict, !!merge.markers, goalSignal); }
+      this.durable.record(goal.id, task.id, "merged", { how: merge.how, files: merge.merged.length });
       this.nightshift.accepted(task, agent.id, changed, this.deliverableText(work, task, changed)); // 4.5 HOOK: what the accepted attempt handed back, as the judge saw it
       await this.discardWorktree(goal, task);
       if (merge.source) this.goalSources.afterAccept(fresh, task, agent, merge.source, (t) => this.post(goal.roomId, SYS, t, "system", task.id)); // 1.1
@@ -1808,13 +1837,14 @@ export class Orchestrator {
     const fails = (cut < 0 ? sinceReplan : sinceReplan.slice(0, cut)).filter((h) => ["fail", "drift", "blocked"].includes(h.outcome) && h.agentId !== "hub").length; // the hub's own "waiting for ..." notes aren't the work failing
     if ((fails >= 2 || looping) && (task.replans ?? 0) < 1 && !signal.aborted && await this.replan(goal, task, signal)) return;
     if (task.attempts >= s.maxAttempts) {
-      task.status = "failed"; this.store.saveTask(task);
+      task.status = "failed"; this.durable.record(goal.id, task.id, "task_failed", { agentId: agent.id, attempts: task.attempts }, () => this.store.saveTask(task));
       await this.discardWorktree(goal, task); // 1.4: rejected work is discarded
       this.post(task.roomId, SYS, `"${task.title}" failed after ${task.attempts} attempt${task.attempts > 1 ? "s" : ""}${task.replans ? " and a replan" : ""}.`, "system", task.id);
       this.attention.notify("failure", { title: `"${task.title}" failed`, body: `After ${task.attempts} attempt${task.attempts > 1 ? "s" : ""}.`, roomId: task.roomId, goalId: goal.id, taskId: task.id, key: `failed:${task.id}` }); // 2.7: waits for the digest; a goal that then needs the owner asks through waitForOwner
       this.checkpoint(goal.id, { decision: `"${task.title}" failed.` });
       return;
     }
+    this.durable.record(goal.id, task.id, "sent_back", { agentId: agent.id, mode });
     if (mode === "reassign") { task.triedBy = [...(task.triedBy ?? []), agent.id]; task.assignee = undefined; task.status = "pending"; await this.discardWorktree(goal, task); /* 1.4: the next agent starts fresh */ }
     else task.status = "revising";
     this.store.saveTask(task);
@@ -1827,7 +1857,7 @@ export class Orchestrator {
     task.triedBy = [...(task.triedBy ?? []), agent.id]; task.assignee = undefined;
     if (task.status !== "revising") task.status = "pending";
     this.floor.take(agent.id, goal.roomId);
-    this.store.saveTask(task);
+    this.durable.record(goal.id, task.id, "sent_back", { agentId: agent.id, mode: "rate_limit" }, () => this.store.saveTask(task));
     this.log(goal.roomId, `${agent.name} hit a usage limit on "${task.title}" (${firstLine(error)}); moving it to another agent.`, task.id, "task_update");
   }
 
@@ -1852,7 +1882,7 @@ export class Orchestrator {
     task.assignee = undefined; task.status = "pending"; task.judgment = undefined;
     await this.discardWorktree(goal, task); // 1.4: a new approach starts from the current base
     this.addHistory(task, "orchestrator", "replan", r.approach ?? "new approach");
-    this.store.saveTask(task);
+    this.durable.record(goal.id, task.id, "replanned", { approach: r.approach ?? "new approach", tier: task.minTier }, () => this.store.saveTask(task));
     this.log(goal.roomId, `Replanned "${task.title}" after two failures: ${r.approach ?? "new approach"}; next attempt runs at tier ${task.minTier} or above.`, task.id, "task_update");
     this.checkpoint(goal.id, { decision: `Replan "${task.title}": ${r.approach ?? "new approach"}` });
     return true;
@@ -1938,6 +1968,7 @@ export class Orchestrator {
     const unmet = (g.contract?.requirements ?? []).filter((r) => r.status === "unmet");
     const ok = live.every((t) => t.status === "done") && report.passed && !unmet.length;
     g.status = ok ? "done" : "failed";
+    this.durable.record(g.id, undefined, ok ? "goal_done" : "goal_failed", { tasks: tasks.length }); // written before the summary and the retro run
     g.state = { ...(g.state ?? { decisions: [] }), nextAction: ok ? "Complete." : unmet.length ? `Needs the owner: ${unmet.map((r) => r.id).join(", ")} not met.` : "Needs the owner: some checks didn't pass.", gate: report };
     if (tasks.length === 1) {
       g.summary = tasks[0].result ?? (ok ? "Done." : "Failed.");
@@ -2013,5 +2044,73 @@ export class Orchestrator {
     const why = this.rooms.denial(grant.agentId, grant.roomId, tool);
     if (why) this.store.audit(grant.agentId, "room.denied", `${tool}${grant.roomId ? ` in room ${grant.roomId}` : ""}`);
     return why;
+  }
+
+  // ---------- durable goals (step log in durable/; recover() above reads it)
+  /** A task whose run was cut short by a restart goes back to its agent once; the run counts neither as an attempt nor against the goal's budget. */
+  private interruptTask(t: Task) {
+    t.attempts = Math.max(0, t.attempts - 1);
+    this.progress(t.goalId, (p) => { p.runs = Math.max(0, p.runs - 1); });
+    t.status = t.assignee ? "revising" : "pending";
+    t.judgment = { score: 0, verdict: "revise", feedback: "The hub restarted while you were on this. Pick it up again; check the shared folder for anything you already saved.", judgeAgentId: "system" };
+    this.addHistory(t, "system", "redirect", "interrupted by restart");
+    closeRecord(this.store, t.routingId, { outcome: "interrupted", failureNote: "interrupted by restart" });
+    t.routingId = undefined;
+    this.durable.record(t.goalId, t.id, "interrupted", { why: "restart" }, () => this.store.saveTask(t));
+  }
+
+  /** The agent that did a task's work takes it back to be judged or merged. If it is gone or switched off, the task is run again once instead. Undefined: try again on the next pass. */
+  private resumeAgent(t: Task): AgentConfig | undefined {
+    const agent = this.store.getAgent(t.assignee ?? "");
+    if (agent?.enabled) {
+      if (this.busy.has(agent.id)) return undefined;
+      this.busy.add(agent.id); this.governor.start(t.id, agent); // released by drive(), like assign()
+      return agent;
+    }
+    this.durable.drop(t.id);
+    this.interruptTask(t);
+    return undefined;
+  }
+
+  /** A reply this agent already posted for this task since its run started, so judging after a restart does not post it twice. */
+  private postedSince(taskId: string, agentId: string, since: number) {
+    const t = this.store.getTask(taskId);
+    return !!t && this.store.listMessages(t.roomId, 200, since - 1).some((m) => m.taskId === taskId && m.author.kind === "agent" && m.author.id === agentId);
+  }
+
+  /**
+   * Accepted work that was logged but not yet merged when the hub stopped. It is merged now (the work folder makes a second merge a no-op), then the
+   * task finishes exactly as it would have. When the merge itself was already logged only the clean-up and the status are left. Nothing runs or is judged again.
+   * Mirrors the accept branch of runTaskInner.
+   */
+  private async mergeResumed(goal: Goal, task: Task, agent: AgentConfig, back: Extract<ResumeAction, { action: "merge" }>, goalSignal: AbortSignal) {
+    const { run, judgment } = back;
+    const fresh = this.store.getGoal(goal.id) ?? goal;
+    const folder = fresh.folder ?? goalFolder(this.opts.dataDir, goal.id);
+    const ws = this.workspaces.find(goal.id, task.id);
+    const judged = { judgment: { score: judgment.score, verdict: judgment.verdict, judgeAgentId: judgment.judgeAgentId }, ...(judgment.jury ? { juryId: judgment.jury.id } : {}) };
+    const route = (outcome: RoutingOutcome, extra: Partial<RoutingRecord> = {}) =>
+      closeRecord(this.store, task.routingId, { outcome, usage: run.usage, seconds: Math.round(run.ms) / 1000, ...(run.model ? { modelVersion: run.model } : {}), ...extra });
+    task.judgment = judgment;
+    if (back.flagged?.length) task.flagged = back.flagged;
+    if (back.drift?.length) task.drift = back.drift;
+    if (!back.merged) {
+      if (!ws) { this.interruptTask(task); return; } // the work folder is gone, so there is nothing to merge: the task runs again once
+      await this.workspaceHook("beforeMerge", ws, agent.id);
+      const merge = await this.workspaces.accept(this.goalSources.ref(this.store.getGoal(goal.id) ?? fresh, folder), task);
+      if (!merge.ok) { route("revise", judged); return this.sendBackConflict(goal, task, agent, judgment, merge.conflict, !!merge.markers, goalSignal); }
+      this.durable.record(goal.id, task.id, "merged", { how: merge.how, files: merge.merged.length });
+      this.nightshift.accepted(task, agent.id, run.changed, this.deliverableText(ws.path, task, run.changed));
+      await this.discardWorktree(goal, task);
+      if (merge.source) this.goalSources.afterAccept(fresh, task, agent, merge.source, (t) => this.post(goal.roomId, SYS, t, "system", task.id));
+      if (merge.merged.length) this.store.audit(agent.id, "worktree.merge", `"${task.title}" merged (${merge.how}): ${merge.merged.slice(0, 12).join(", ")}`.slice(0, 400));
+    } else {
+      await this.discardWorktree(goal, task);
+      if (!this.store.listAudit().some((a) => a.action === "worktree.merge" && a.detail.startsWith(`"${task.title}"`) && a.at >= run.startedAt)) this.store.audit(agent.id, "worktree.merge", `"${task.title}" merged (finished after a restart)`.slice(0, 400));
+    }
+    route("accepted", judged);
+    this.addHistory(task, agent.id, "ok", `${Math.round(judgment.score * 100)}/100`);
+    task.status = "done"; this.store.saveTask(task); this.floor.take(agent.id, goal.roomId);
+    this.checkpoint(goal.id, { decision: `"${task.title}" accepted from ${agent.name}.` });
   }
 }

@@ -2094,3 +2094,23 @@ export interface OfficeGoal {
 /** The office header: agents on the floor, the goal's tasks, those in progress, and blockers (failed, waiting for the owner, or held by a pending approval). */
 export interface OfficeCounts { agents: number; tasks: number; inProgress: number; blockers: number }
 export interface OfficeState { counts?: OfficeCounts }
+
+// ---- durable goals: the step log
+/** What one orchestrator step did to a goal. Every step that changes a goal is written to the `goal_steps` table before the change counts as done. */
+export type GoalStepKind =
+  | "plan_made" | "plan_approved" | "plan_revised"
+  | "task_assigned" | "run_started" | "run_finished" | "run_failed" | "needs_input"
+  | "judged" | "accepted" | "merged" | "sent_back" | "replanned" | "task_failed" | "interrupted"
+  | "resumed" | "goal_done" | "goal_failed" | "goal_stopped";
+
+/** One row of a goal's step log, oldest first. `round` numbers a task's runs (1, 2, ...); the same step of the same round is never written twice. */
+export interface GoalStep {
+  seq: number;
+  goalId: string;
+  taskId?: string;
+  kind: GoalStepKind;
+  at: number;
+  round?: number;
+  /** The minimal data needed to resume from this step (the agent, a finished run's reply, the judgment). */
+  data: Record<string, unknown>;
+}

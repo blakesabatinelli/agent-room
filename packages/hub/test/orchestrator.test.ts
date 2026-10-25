@@ -542,12 +542,12 @@ test("resume: work running when the hub stopped is picked up and finished after 
   const next = restart(store, dir);
   const resumed = next.recover();
   assert.equal(resumed.length, 1);
-  assert.ok(store.listMessages(room.id).some((m) => /Picked up where we left off/.test(m.text)));
+  assert.ok(store.listMessages(room.id).some((m) => /^Picked up where it left off after a restart: \d+ tasks? done, \d+ resumed/.test(m.text) && m.quiet === true));
   await until(() => store.getGoal(goalId)?.status === "done", 8000);
   const after = store.getTask(t.id)!;
   assert.equal(after.status, "done");
   assert.equal(after.assignee, t.assignee, "same agent finishes it");
-  assert.ok(after.history?.some((h) => h.note === "hub restarted"));
+  assert.ok(after.history?.some((h) => h.note === "interrupted by restart"));
   assert.equal(after.attempts, 1, "the interrupted run doesn't count");
 });
 
