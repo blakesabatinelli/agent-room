@@ -31,7 +31,8 @@ function readContext(cwd: string): string | undefined {
  * wide (the plan is N independent tasks), needs (1.3: every planned task lists these data sources in its `needs`).
  * workspace (true/false: every planned task says whether it works on its task folder), absPath (the first task is told to write to /tmp/vizio-cdp-baseline;
  * the repair round fixes it unless absPathStays), recoverCovers (the recovery's replacement task covers these requirements), recoverWorkspace (it works on its task folder), blockedText (a task reply that
- * says this, with no STATUS block, like an agent that can't do the work from where it runs).
+ * says this, with no STATUS block, like an agent that can't do the work from where it runs),
+ * relayFiles (save relay: a map of relative path -> contents the task reply hands back as "=== FILE: path\n...\n=== END FILE" blocks, like an off-machine agent that can't write files; a path like /etc/x or ../x is handed back too, to prove the hub refuses it).
  * retro (2.1: how a `[[RETRO]]` call is answered: "invalid" | "empty" | "ghost" | "positive"; see the branch below).
  * twokey (4.1: what this agent answers when asked to be the second key of a two-key action: a draft object (sent as JSON), or a string).
  * refuse (true = always, or a number = the first N task runs for this agent fail with the model PROVIDER's own safety/usage refusal; refuseError sets the text),
@@ -219,7 +220,10 @@ export class MockAdapter implements Adapter {
       const tag = st.tag ? `\n@${st.tag} can you double-check one number for me?` : "";
       const blockedText = (st as { blockedText?: string }).blockedText;
       const block = st.noReport ? "" : `\nSTATUS: ${st.status ?? "done"}\n${ids.map((k) => `${k}: ${quality >= 0.6 ? "PASS" : "FAIL"} — see above`).join("\n")}\nOUT_OF_SCOPE: ${st.outOfScope ?? "none"}${(st as { decide?: string }).decide ? `\nDECISIONS: ${(st as { decide?: string }).decide}` : ""}${st.status ? "\nREASON: need the target audience" : ""}`;
-      text = blockedText ?? `${req.agent.name} finished the task.${tag}\nMEMORY: ${req.agent.name} prefers concise output.${block}`;
+      // save relay: an off-machine agent can't write files, so it hands each deliverable back as a === FILE block in its reply. relayFiles maps a relative (or deliberately bad) path to its contents.
+      const relayFiles = (st as { relayFiles?: Record<string, string> }).relayFiles;
+      const relay = relayFiles ? `\n${Object.entries(relayFiles).map(([path, content]) => `=== FILE: ${path}\n${content}\n=== END FILE`).join("\n")}` : "";
+      text = blockedText ?? `${req.agent.name} finished the task.${tag}\nMEMORY: ${req.agent.name} prefers concise output.${relay}${block}`;
     } else {
       text = `${req.agent.name} finished the task.${st.tag ? `\n@${st.tag} what do you think?` : ""}\nMEMORY: ${req.agent.name} prefers concise output.`;
     }

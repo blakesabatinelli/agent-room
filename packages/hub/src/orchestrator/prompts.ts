@@ -4,6 +4,7 @@ import { capabilityText } from "../discovery/routing.js"; // 1.3
 import { stripPersona } from "../jury/neutralize.js"; // 3.2: persona text never reaches a judge
 import { runsHere } from "../placement/index.js"; // where an agent runs: only agents on this Mac can use a task folder
 import { WRITE_RULE, WRITE_RULE_PLAN } from "../placement/paths.js";
+import { RELAY_RULE } from "../placement/relay.js"; // save relay: an off-machine agent hands files back in its reply for a local step to save
 
 const TYPES = "writing | research | coding | analysis | data | other";
 const mem = (m: MemoryEntry[]) => m.map((x) => `- ${x.text}`).join("\n") || "- (none)";
@@ -113,7 +114,7 @@ email, posting to Slack, changing CRM records, deleting files) call request_appr
 const reqList = (reqs: Requirement[] | undefined, mine?: string[]) => reqs?.length
   ? reqs.map((r) => `- ${r.id}${mine?.includes(r.id) ? " (yours)" : ""}: ${r.text}`).join("\n") : "- (none)";
 
-export const taskPrompt = (task: Task, goal: string, contract: Contract | undefined, deps: Task[], shared: MemoryEntry[], priv: MemoryEntry[], ownerNotes: string[], agents: AgentConfig[], self: string, feedback?: string, folder?: { path: string; files: string[]; ledger?: string; /** 1.1: what the owner's granted folder is (label, read/write) */ note?: string }, ledger?: string, decisions: string[] = [], /** 2.1: playbook and lessons from earlier goals (retro/learned.ts), capped at ~2 KB */ learned?: string) => `You are one agent in a room of AI agents. The orchestrator assigned you ONE task under a written work contract.
+export const taskPrompt = (task: Task, goal: string, contract: Contract | undefined, deps: Task[], shared: MemoryEntry[], priv: MemoryEntry[], ownerNotes: string[], agents: AgentConfig[], self: string, feedback?: string, folder?: { path: string; files: string[]; ledger?: string; /** 1.1: what the owner's granted folder is (label, read/write) */ note?: string }, ledger?: string, decisions: string[] = [], /** 2.1: playbook and lessons from earlier goals (retro/learned.ts), capped at ~2 KB */ learned?: string, /** save relay: this agent runs off-machine on a folder task, so it hands files back in its reply */ relay = false) => `You are one agent in a room of AI agents. The orchestrator assigned you ONE task under a written work contract.
 Do your task and nothing else.
 
 # Work contract (v${contract?.version ?? 1})
@@ -133,7 +134,7 @@ Not yours (other tasks or off limits):
 ${list(task.outOfScope)}
 Acceptance criteria:
 ${(task.criteria ?? []).map((c) => `${c.id}: ${c.text}${c.check ? ` (checked automatically by running: ${c.check})` : ""}`).join("\n")}
-${folder ? `\n# Shared folder\nYou are working in the goal's shared folder (your current directory): ${folder.path}\nFiles there now:\n${folder.files.length ? folder.files.slice(0, 80).map((f) => `- ${f}`).join("\n") : "- (empty)"}\nSave your deliverables there.${folder.note ? ` ${folder.note.trim()}` : ""}${folder.ledger ? " This is your own isolated copy of the goal's folder: other tasks' work reaches it only once accepted, and yours joins the shared folder when it is accepted. If you are told your work conflicts with another task's, keep both changes." : ""}${task.files?.length ? ` You may create or change only: ${task.files.join(", ")}. Read anything else, but don't edit it.` : ""}\n${folder.ledger ? `The orchestrator's progress record is ${folder.ledger}` : "LEDGER.md there is the orchestrator's progress record"}: read it any time, never edit it.\n` : ""}${deps.length ? `\n# Inputs from earlier tasks\n${deps.map((d) => `## ${d.title}${d.output ? ` (handed back: ${d.output})` : ""}\n${(d.result ?? "").slice(0, 4000)}${(d.result ?? "").length > 4000 ? "\n(cut here; the full work is in its files)" : ""}`).join("\n\n")}\n` : ""}
+${folder ? `\n# Shared folder\nYou are working in the goal's shared folder (your current directory): ${folder.path}\nFiles there now:\n${folder.files.length ? folder.files.slice(0, 80).map((f) => `- ${f}`).join("\n") : "- (empty)"}\nSave your deliverables there.${folder.note ? ` ${folder.note.trim()}` : ""}${folder.ledger ? " This is your own isolated copy of the goal's folder: other tasks' work reaches it only once accepted, and yours joins the shared folder when it is accepted. If you are told your work conflicts with another task's, keep both changes." : ""}${task.files?.length ? ` You may create or change only: ${task.files.join(", ")}. Read anything else, but don't edit it.` : ""}\n${folder.ledger ? `The orchestrator's progress record is ${folder.ledger}` : "LEDGER.md there is the orchestrator's progress record"}: read it any time, never edit it.\n` : relay ? `\n# Handing files back\nThis task works on a task folder, but you run on another machine and have no folder here. ${RELAY_RULE}${task.files?.length ? ` The files this task should hand back: ${task.files.join(", ")}.` : ""}\n` : ""}${deps.length ? `\n# Inputs from earlier tasks\n${deps.map((d) => `## ${d.title}${d.output ? ` (handed back: ${d.output})` : ""}\n${(d.result ?? "").slice(0, 4000)}${(d.result ?? "").length > 4000 ? "\n(cut here; the full work is in its files)" : ""}`).join("\n\n")}\n` : ""}
 Shared memory:
 ${mem(shared)}
 Your private notes:
@@ -141,7 +142,7 @@ ${mem(priv)}
 ${learned ? `\n${learned}\n` : ""}${task.history?.length ? `\n# Earlier attempts at this task (don't repeat what failed)\n${task.history.slice(-6).map((h) => `- ${h.outcome.toUpperCase()} (${h.agentId}): ${h.note.slice(0, 300)}`).join("\n")}\n` : ""}${feedback ? `\n# Sent back\nYour previous attempt was returned. Fix exactly this: ${feedback}\n${task.result ? `What you handed back last time (start from it; don't throw good work away):\n"""\n${task.result.slice(0, 2500)}\n"""\n` : ""}` : ""}
 # Rules
 - Stay inside your scope. If the right answer needs work outside it, say so in REASON; don't do it.
-- ${folder ? WRITE_RULE : "You have no task folder on your machine: hand your work back as text in your reply, and don't write files."} If a step needs somewhere else, report STATUS: blocked and say which.
+- ${folder ? WRITE_RULE : relay ? "Hand every deliverable file back as a === FILE: <relative path> ... === END FILE block (see \"Handing files back\" above); the hub saves them into the task folder. Use relative paths only." : "You have no task folder on your machine: hand your work back as text in your reply, and don't write files."} If a step needs somewhere else, report STATUS: blocked and say which.
 - ${TAG_RULES(agents, self).replace(/\n/g, " ")}
 - The owner may steer while you work. Call get_updates between major steps and before you
   finish; anything it returns overrides earlier instructions.

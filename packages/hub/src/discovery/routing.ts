@@ -2,6 +2,7 @@ import { TOOLS, type AgentConfig, type Task } from "@agent-room/shared";
 import type { ControlFolder } from "../control/folder.js";
 import { canonicalConnector, coversNeed, reachOf } from "./connectors.js";
 import { WORKSPACE_NEED, runsHere, whereText } from "../placement/index.js"; // "workspace" is a need too: only an agent that runs on this Mac can use the task folder
+import { relayEligible } from "../placement/relay.js"; // save relay: a workspace task with no local command check can go to an off-machine agent, which hands the files back for a local step to save
 
 /**
  * 1.3 (AC6): routing by capability. A task that needs a data source ("salesforce", "gmail", "snowflake") may only go to an
@@ -23,8 +24,9 @@ export interface NeedsGate {
 }
 
 /** Can this agent use `need` right now? `has`: its platform reaches it. `allowed`: the tool, if the Room has one for it, is on. */
-function check(a: AgentConfig, need: string, level: ((tool: string) => string | undefined) | undefined) {
-  if (need === WORKSPACE_NEED) return { has: runsHere(a), allowed: true };
+function check(a: AgentConfig, need: string, level: ((tool: string) => string | undefined) | undefined, relayWorkspace = false) {
+  // 4.3 save relay: the task folder is normally only an agent that runs on this Mac; a relay-eligible workspace task also lets an off-machine agent take it (it hands the files back for a local save).
+  if (need === WORKSPACE_NEED) return { has: runsHere(a) || relayWorkspace, allowed: true };
   const roomTool = ROOM_TOOLS.has(need);
   const allowed = !roomTool || (level ? level(need) !== "off" : !!a.tools?.[need]);
   // An agent discovery has never looked at: the owner's switch is all there is to go on for the Room's own connectors.
@@ -32,10 +34,11 @@ function check(a: AgentConfig, need: string, level: ((tool: string) => string | 
   return { has, allowed };
 }
 
-/** undefined when the task needs nothing. */
-export function needsGate(task: Pick<Task, "needs" | "roomId">, enabled: AgentConfig[], control?: ControlFolder): NeedsGate | undefined {
+/** undefined when the task needs nothing. `relay` (from routing to live agents): a workspace task with no local command check may also go to an off-machine agent. */
+export function needsGate(task: Pick<Task, "needs" | "roomId"> & { criteria?: Task["criteria"] }, enabled: AgentConfig[], control?: ControlFolder, opts?: { relay?: boolean }): NeedsGate | undefined {
   const needs = (task.needs ?? []).map((n) => canonicalConnector(n)).filter(Boolean);
   if (!needs.length) return undefined;
+  const relayWorkspace = !!opts?.relay && relayEligible(task); // this particular task can be saved from an off-machine agent's reply
   const slug = control?.slugFor(task.roomId);
   const ok = new Set<string>(), filteredOut: NeedsGate["filteredOut"] = [], switchedOff: NeedsGate["switchedOff"] = [];
   const hasAny = new Map<string, boolean>(needs.map((n) => [n, false]));
@@ -44,7 +47,7 @@ export function needsGate(task: Pick<Task, "needs" | "roomId">, enabled: AgentCo
     const level = perms ? (t: string) => perms[t] : undefined;
     const missing: string[] = [];
     for (const n of needs) {
-      const c = check(a, n, level);
+      const c = check(a, n, level, relayWorkspace);
       if (c.has) hasAny.set(n, true);
       if (c.has && !c.allowed) switchedOff.push({ agentId: a.id, need: n });
       if (!(c.has && c.allowed)) missing.push(n);

@@ -19,6 +19,7 @@ import { quotaDecide, quotaLimited } from "../quota/router.js";
 import { addFailure, classifyFailure, isPlacementBlock, isProviderRefusal, parseFailureCategory, type FailureEvidence } from "./failures.js";
 import { WORKSPACE_NEED, needsWorkspace, runsHere, whereText, withWorkspaceNeed } from "../placement/index.js"; // tasks that agents can actually do
 import { relativizeTask } from "../placement/paths.js";
+import { RELAY_RULE, parseFileBlocks, relayEligible, saveRelayFiles } from "../placement/relay.js"; // save relay: an off-machine agent does a folder task and a local step saves its files
 import { Library, defaultLibraryRoot } from "../library/library.js";
 import { FileBroker } from "../files/broker.js";
 import { GoalSources, branchFor } from "../files/goalSource.js"; // 1.1
@@ -1003,9 +1004,13 @@ export class Orchestrator {
       if (signal.aborted) return;
       if (fixed?.tasks?.length) { current = fixed; raw = fixed.tasks; problems = validatePlan(raw, reqsOf(current), agentIds, { goalFolder: gf }); }
     }
-    // A task that works on the task folder can't be owned by an agent that runs on another machine: routing would skip the owner anyway, so say "best available".
+    // A task whose checks must run on this Mac can't be owned by an agent that runs on another machine: routing would skip the owner anyway, so say "best available".
+    // A workspace task with no such check stays with an off-machine owner: the save relay lets it do the work and a local step saves its files.
     const away = new Set(agents.filter((a) => !runsHere(a)).map((a) => a.id));
-    for (const t of raw) if (t.owner && away.has(t.owner) && needsWorkspace({ needs: withWorkspaceNeed(cleanNeeds(t.needs), { workspace: t.workspace, files: t.files, criteria: t.criteria, output: t.output, taskType: t.taskType }) })) t.owner = undefined;
+    for (const t of raw) {
+      const needs = withWorkspaceNeed(cleanNeeds(t.needs), { workspace: t.workspace, files: t.files, criteria: t.criteria, output: t.output, taskType: t.taskType });
+      if (t.owner && away.has(t.owner) && needsWorkspace({ needs }) && !relayEligible({ needs, criteria: t.criteria })) t.owner = undefined;
+    }
     const requirements = reqsOf(current);
     // Whatever is still wrong gets a safe mechanical repair instead of a dropped task or a stuck goal.
     if (raw.length > MAX_TASKS) raw = raw.slice(0, MAX_TASKS);
@@ -1455,7 +1460,8 @@ export class Orchestrator {
     const free = (a: AgentConfig) => !this.busy.has(a.id) && !this.chatting.has(a.id) && live.has(a.id);
     const enabled = this.enabledAgents(t.roomId); // 4.3: only this room's roster takes its work
     // 1.3: a task that needs a data source goes only to agents that have it. If no agent can, it waits and the owner is told once.
-    const gate = needsGate(t, enabled, this.control);
+    // Save relay: a workspace task with no local command check may also go to an off-machine agent (relay: true), which hands its files back for a local save.
+    const gate = needsGate(t, enabled, this.control, { relay: true });
     if (gate && !gate.ok.size) { this.holdForNeeds(t, gate, enabled); return undefined; }
     // 1.5: only agents this machine can take right now; cloud agents are the overflow when local work is at its limit.
     const barred = barredSet(this.store, enabled.filter((a) => live.has(a.id))); // 2.3: agents on probation never take real work
@@ -1669,7 +1675,9 @@ export class Orchestrator {
     const deps = this.store.listTasks({ goalId: goal.id }).filter((t) => task.dependsOn.includes(t.id));
     const notes = this.ownerNotes.get(goal.id) ?? [];
     const before = snapshot(work);
-    const prompt = withPersona(taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.rooms.privateFor(agent.id, goal.roomId), notes, this.enabledAgents(goal.roomId), agent.id, feedback, /* 4.3 */ runsHere(agent) ? { path: work, files: [...before.keys()], ledger: join(folder, "LEDGER.md"), note: this.goalSources.note(fresh) /* 1.1 */ } : undefined /* an agent on another machine has no task folder: text-only work */, this.ledgerText(fresh), this.decisionsFor(fresh), learnedBlock(this.store, this.control, agent, task.taskType) /* 2.1 */), this.store, this.control, agent, "task"); // 3.2: persona last, voice only
+    // save relay: an agent that runs elsewhere can still do a folder task when nothing has to run on this Mac; it hands the files back in its reply and a local step below saves them.
+    const relay = !runsHere(agent) && relayEligible(task);
+    const prompt = withPersona(taskPrompt(task, goal.text, fresh.contract, deps, this.store.listShared(goal.roomId), this.rooms.privateFor(agent.id, goal.roomId), notes, this.enabledAgents(goal.roomId), agent.id, feedback, /* 4.3 */ runsHere(agent) ? { path: work, files: [...before.keys()], ledger: join(folder, "LEDGER.md"), note: this.goalSources.note(fresh) /* 1.1 */ } : undefined /* an agent on another machine has no task folder: text-only work, or hands files back for the save relay */, this.ledgerText(fresh), this.decisionsFor(fresh), learnedBlock(this.store, this.control, agent, task.taskType) /* 2.1 */, relay), this.store, this.control, agent, "task"); // 3.2: persona last, voice only
     let res: RunResult = resumed ? { ok: true, text: resumed.run.text, durationMs: resumed.run.ms, usage: resumed.run.usage, model: resumed.run.model } : await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: work });
     let usage: RunUsage | undefined = res.usage, ms = res.durationMs, ranModel = res.model;
     // A rate limit or timeout says nothing about the agent's work: wait and retry, without spending an attempt.
@@ -1681,6 +1689,8 @@ export class Orchestrator {
       usage = addUsage(usage, res.usage); ms += res.durationMs; ranModel = res.model ?? ranModel;
     }
     await this.subagents.settle(task.id); // 3.3: this run is over: helpers still running are stopped, changes the agent never accepted are dropped
+    // save relay: before anything is judged, write the files an off-machine agent handed back into its worktree, so they count as its changed files and the judge sees them.
+    const relaySave = relay && res.ok && !resumed ? this.saveRelay(goal, task, agent, res.text, work) : undefined;
     const changed = resumed?.run.changed ?? changedFiles(before, snapshot(work));
     this.working(goal.roomId, agent, false);
     // 0.2: close the routing record on every way out of this attempt.
@@ -1756,8 +1766,13 @@ export class Orchestrator {
     const failedChecks = task.checks.filter((r) => !r.ok);
     const fileDrift = outsideScope(changed, task.files);
 
+    // Save relay with nothing to save: an off-machine agent that handed back no file blocks for a file task hasn't delivered. Ask once for the format instead of passing it silently.
+    const relayMissing = !!relaySave && relaySave.saved.length === 0;
     // Failed checks send it straight back; no model needs to look at it.
-    const judgment: Judgment = failedChecks.length
+    const judgment: Judgment = relayMissing
+      ? { score: 0, verdict: "revise", judgeAgentId: "hub", criteria: {}, onTask: true,
+          feedback: `You did this task off your machine, so hand back each deliverable file for the hub to save. ${RELAY_RULE}` }
+      : failedChecks.length
       ? { score: 0.3, verdict: "revise", judgeAgentId: "checks",
           feedback: `These checks failed: ${failedChecks.map((r) => `${r.criterionId} \`${r.command}\` exited ${r.exitCode}${r.output ? `: ${r.output.split("\n").slice(-3).join(" ").slice(0, 300)}` : ""}`).join("; ")}.`,
           criteria: {}, onTask: true }
@@ -1951,6 +1966,22 @@ export class Orchestrator {
   }
 
   /** What the reviewer reads: the files this task wrote or was given, not just its chat reply. */
+  /**
+   * Save relay: an agent that runs elsewhere did a folder task and handed its deliverable files back inside its reply. Parse those blocks and
+   * write them into the task's worktree through the same path guards every write uses (absolute paths and traversal are refused), audit it as a
+   * distinct step, and tell the room in one quiet line. The saved files then count as the task's changed files and merge back on accept.
+   */
+  private saveRelay(goal: Goal, task: Task, agent: AgentConfig, reply: string, work: string) {
+    const blocks = parseFileBlocks(reply);
+    const result = saveRelayFiles(work, blocks);
+    if (result.saved.length) {
+      this.store.audit(agent.id, "task.save_relay", `"${task.title}": saved ${result.saved.length} file(s) handed back from ${whereText(agent)}: ${result.saved.slice(0, 20).join(", ")}`.slice(0, 600));
+      this.log(goal.roomId, `${agent.name} did the work off-machine; saved ${result.saved.length} file${result.saved.length === 1 ? "" : "s"} into the task folder.`, task.id, "task_update");
+    }
+    if (result.refused.length) this.store.audit(agent.id, "task.save_relay", `"${task.title}": refused ${result.refused.length} file block(s) from ${whereText(agent)}: ${result.refused.map((r) => `${r.path} (${r.reason})`).slice(0, 20).join("; ")}`.slice(0, 600));
+    return result;
+  }
+
   private deliverableText(folder: string | undefined, task: Task, changed: string[]) {
     const exact = (task.files ?? []).filter((f) => !/[*?[]/.test(f));
     return readDeliverables(folder, [...new Set([...changed, ...exact])], 60000); // a normal deliverable is shown whole so the judge can confirm every criterion
