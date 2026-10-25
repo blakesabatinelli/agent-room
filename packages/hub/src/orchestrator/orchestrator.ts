@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentConfig, AgentStatus, Approval, AttemptLog, Author, Contract, Goal, GoalProgress, GoalState, Judgment, MemoryEntry, Message, OrchestratorSettings, Profile, Role, RoutingOutcome, RoutingRecord, RunUsage, SteerKind, Task, Verdict } from "@agent-room/shared";
+import type { AgentConfig, AgentStatus, Approval, AttemptLog, Author, Contract, FailureTag, Goal, GoalProgress, GoalState, Judgment, MemoryEntry, Message, OrchestratorSettings, Profile, Role, RoutingOutcome, RoutingRecord, RunUsage, SteerKind, Task, Verdict } from "@agent-room/shared";
 import { SETTING_DEFAULTS } from "@agent-room/shared";
 import type { Store } from "../db/store.js";
 import { adapters, type RunResult } from "../adapters/index.js";
@@ -16,7 +16,7 @@ import { addUsage, closeRecord, decide, fixedDecision, openRecord, type RouteDec
 import { quotaFor } from "../quota/index.js";
 import { isRateLimit } from "../quota/limits.js";
 import { quotaDecide, quotaLimited } from "../quota/router.js";
-import { addFailure, classifyFailure, isPlacementBlock, parseFailureCategory, type FailureEvidence } from "./failures.js";
+import { addFailure, classifyFailure, isPlacementBlock, isProviderRefusal, parseFailureCategory, type FailureEvidence } from "./failures.js";
 import { WORKSPACE_NEED, needsWorkspace, runsHere, whereText, withWorkspaceNeed } from "../placement/index.js"; // tasks that agents can actually do
 import { relativizeTask } from "../placement/paths.js";
 import { Library, defaultLibraryRoot } from "../library/library.js";
@@ -30,7 +30,7 @@ import { CapacityGovernor } from "../capacity/governor.js";
 import { detectHardware } from "../capacity/hardware.js";
 import { cleanNeeds } from "../discovery/connectors.js"; // 1.3
 import { needsGate, needsMessage, workspaceMessage, type NeedsGate } from "../discovery/routing.js"; // 1.3
-import { juryLine, jurySummary, recordOwnerRating, review as juryReview, type JuryHost } from "../jury/index.js"; // 2.2
+import { familyOf, juryLine, jurySummary, recordOwnerRating, review as juryReview, type JuryHost } from "../jury/index.js"; // 2.2
 import { loadCommandIndex, plannerCommands } from "../commands/index.js"; // 2.6
 import { buildInvocation, parseCommand, unknownReply, type Invocation } from "../commands/invoke.js"; // 2.6
 import { learnedBlock, runRetro } from "../retro/index.js"; // 2.1
@@ -1201,7 +1201,8 @@ export class Orchestrator {
       // Outer loop 2: nothing accepted for a while. Re-plan the stuck part rather than grinding on it.
       const p = this.progress(goal.id);
       if (p.stall >= cfg.stallLimit && !inflight.size) {
-        const stuck = tasks.filter((t) => OPEN(t) && t.status !== "waiting" && (t.history ?? []).some((h) => h.outcome !== "ok"));
+        // A provider-refused task is parked for the owner (status "waiting", last note "provider refusal"); it is never replanned in a loop.
+        const stuck = tasks.filter((t) => OPEN(t) && t.status !== "waiting" && (t.history ?? []).at(-1)?.note !== "provider refusal" && (t.history ?? []).some((h) => h.outcome !== "ok"));
         if (stuck.length) {
           const ok = await this.recoverGoal(g, stuck, `${p.stall} reviews in a row accepted nothing.`, signal);
           if (signal.aborted) break;
@@ -1630,7 +1631,7 @@ export class Orchestrator {
     task.status = "revising"; this.durable.record(goal.id, task.id, "sent_back", { agentId: agent.id, mode: "conflict", files: files.slice(0, 20) }, () => this.store.saveTask(task));
   }
 
-  private async runTaskInner(goal: Goal, task: Task, agent: AgentConfig, signal: AbortSignal, goalSignal: AbortSignal, run: { redirect?: string }) {
+  private async runTaskInner(goal: Goal, task: Task, agent: AgentConfig, signal: AbortSignal, goalSignal: AbortSignal, run: { redirect?: string }): Promise<void> {
     const s = this.cfg();
     const stopped = () => signal.aborted;
     const interrupted = () => { if (goalSignal.aborted) return true; if (run.redirect) { this.redirected(goal, task, agent, run.redirect); return true; } return false; };
@@ -1672,7 +1673,7 @@ export class Orchestrator {
     let res: RunResult = resumed ? { ok: true, text: resumed.run.text, durationMs: resumed.run.ms, usage: resumed.run.usage, model: resumed.run.model } : await this.call(agent, prompt, { roomId: goal.roomId, taskId: task.id, signal, profile, cwd: work });
     let usage: RunUsage | undefined = res.usage, ms = res.durationMs, ranModel = res.model;
     // A rate limit or timeout says nothing about the agent's work: wait and retry, without spending an attempt.
-    for (let retry = 1; !res.ok && retry <= 2 && isTransient(res.error) && !isRateLimit(res.error) && !stopped(); retry++) { // 1.6: rate limits move to another agent, below
+    for (let retry = 1; !res.ok && retry <= 2 && isTransient(res.error) && !isRateLimit(res.error) && !isProviderRefusal(res.error) && !stopped(); retry++) { // 1.6: rate limits move to another agent, below; a provider refusal is not transient and is handled on its own
       this.log(goal.roomId, `${agent.name} hit a temporary error on "${task.title}" (${firstLine(res.error)}); retrying in a moment.`, task.id, "task_update");
       await sleep((this.opts.retryDelayMs ?? 5000) * retry * retry);
       if (stopped()) break;
@@ -1689,6 +1690,9 @@ export class Orchestrator {
 
     if (!res.ok) {
       this.durable.record(goal.id, task.id, "run_failed", { agentId: agent.id, error: firstLine(res.error) });
+      // Provider refusal: the model's OWN safety/usage system declined (not a rate limit, not the agent's work). Don't spend an attempt
+      // or retry the same model; try one agent from each other family once, and if every family refuses, park it for the owner.
+      if (isProviderRefusal(res.error) && !stopped()) return this.handleProviderRefusal(goal, task, agent, res.error, route, run, signal, goalSignal);
       // 1.6: a rate limit isn't the agent's work: hand the task to another agent now rather than waiting on this one.
       if (isRateLimit(res.error) && quotaFor(this.store).mayReroute(task.id, this.enabledAgents(goal.roomId).length)) return this.rerouteRateLimited(goal, task, agent, res.error, route);
       route("run_failed", this.tagFailure(task, agent.id, { kind: "run_error" }, firstLine(res.error)));
@@ -1761,6 +1765,14 @@ export class Orchestrator {
     if (stopped() && interrupted()) { route("interrupted"); return; }
     // A command's verdict beats a model's.
     for (const r of task.checks) (judgment.criteria ??= {})[r.criterionId] = { verdict: r.ok ? "PASS" : "FAIL", evidence: r.ok ? `\`${r.command}\` passed` : `\`${r.command}\` exited ${r.exitCode}` };
+
+    // 3: no reviewer reply could be read and there was nothing mechanical to go on. The judge's failure must never spend the worker's attempt
+    // or spin the goal: give the attempt back and park the task for the owner. Issues/Trace see it via the "the check couldn't be read" note.
+    if (judgment.needsOwner) {
+      route("needs_input", { failureTag: "other", failureNote: `the check couldn't be read: ${firstLine(judgment.feedback)}`.slice(0, 300), judgment: { score: judgment.score, verdict: judgment.verdict, judgeAgentId: judgment.judgeAgentId } });
+      task.attempts = Math.max(0, task.attempts - 1);
+      return this.parkForOwner(goal, task, agent, judgment.feedback, `Review of "${task.title}" couldn't be read`, `judge:${task.id}`, "unreadable review");
+    }
 
     // UNSURE is "can't tell", not "wrong". Ask once for evidence; if it's still only UNSURE, get a second
     // reviewer; if they can't tell either, accept and flag it for the owner instead of looping forever.
@@ -1861,6 +1873,56 @@ export class Orchestrator {
     this.log(goal.roomId, `${agent.name} hit a usage limit on "${task.title}" (${firstLine(error)}); moving it to another agent.`, task.id, "task_update");
   }
 
+  /** The model provider's own safety/usage system refused this run. Tag it "other" with a distinct "provider refusal" note; the worker's quality is untouched. */
+  private tagProviderRefusal(task: Task, agentId: string, error: string | undefined): { failureTag: FailureTag; failureNote: string } {
+    const note = `provider refusal: ${firstLine(error)}`;
+    addFailure(task, agentId, "other", note, task.routingId);
+    this.store.audit(agentId, "task.failure", `[other] "${task.title}" (provider refusal): ${firstLine(error)}`.slice(0, 600));
+    return { failureTag: "other", failureNote: note.slice(0, 300) };
+  }
+
+  /**
+   * A provider refusal (see isProviderRefusal). No attempt is spent and the agent's score is untouched. A different vendor may not refuse,
+   * so one agent from each family that hasn't refused yet is tried once; if every ready family refuses (or only one is available), the task
+   * is parked for the owner (the waiting path), never replanned in a loop.
+   */
+  private async handleProviderRefusal(goal: Goal, task: Task, agent: AgentConfig, error: string | undefined, route: (o: RoutingOutcome, x?: Partial<RoutingRecord>) => void, run: { redirect?: string }, signal: AbortSignal, goalSignal: AbortSignal): Promise<void> {
+    route("run_failed", this.tagProviderRefusal(task, agent.id, error));
+    task.attempts = Math.max(0, task.attempts - 1); // the refusal is not the agent's attempt
+    await this.discardWorktree(goal, task); // the refusing agent's worktree isn't reused
+    const lm = localModelsFor(this.store);
+    const refusedFamilies = new Set<string>([familyOf(agent, lm)]);
+    for (const f of task.failures ?? []) if (f.note.startsWith("provider refusal")) { const a = this.store.getAgent(f.agentId); if (a) refusedFamilies.add(familyOf(a, lm)); }
+    const tried = new Set([...(task.triedBy ?? []), agent.id]);
+    const ready = await this.readyAgents(goal.roomId); // 4.3: this room's roster
+    const next = ready.find((a) => !tried.has(a.id) && !quotaLimited(this.store, a.id) && !refusedFamilies.has(familyOf(a, lm)));
+    if (next && !signal.aborted && !goalSignal.aborted) {
+      this.floor.take(agent.id, goal.roomId);
+      task.triedBy = [...(task.triedBy ?? []), agent.id]; task.assignee = undefined;
+      this.durable.record(goal.id, task.id, "sent_back", { agentId: agent.id, mode: "provider_refusal" }, () => this.store.saveTask(task));
+      this.log(goal.roomId, `${agent.name}'s provider declined "${task.title}" (its own safety system, not the Room); trying ${next.name} (${familyOf(next, lm)}), a different model.`, task.id, "task_update");
+      return this.runTaskInner(goal, task, next, signal, goalSignal, run); // carry on normally with the other family
+    }
+    const n = new Set((task.failures ?? []).filter((f) => f.note.startsWith("provider refusal")).map((f) => f.agentId)).size || 1;
+    const line = `${agent.name}'s provider declined "${task.title}" (its own safety system, not the Room). ${n} agent${n === 1 ? "" : "s"} tried. Reword the task or @tag a specific agent to retry.`;
+    this.parkForOwner(goal, task, agent, line, `${agent.name}'s provider declined "${task.title}"`, `refusal:${task.id}`, "provider refusal");
+  }
+
+  /**
+   * Park a task for the owner without failing the worker or spinning the goal: the waiting path (durable record + attention.notify), plus the
+   * goal pauses on the owner so the drive loop stops and nothing is replanned. The owner's next message answers and resumes it (resumeIfWaiting).
+   */
+  private parkForOwner(goal: Goal, task: Task, agent: AgentConfig, line: string, title: string, key: string, reason: string) {
+    this.floor.take(agent.id, goal.roomId);
+    task.status = "waiting"; this.addHistory(task, agent.id, "needs_input", reason);
+    this.durable.record(goal.id, task.id, "needs_input", { agentId: agent.id, reason }, () => this.store.saveTask(task));
+    this.post(goal.roomId, SYS, line, "system", task.id);
+    this.attention.notify("decision", { title, body: line, roomId: goal.roomId, goalId: goal.id, taskId: task.id, key }); // 2.7
+    const g = this.store.getGoal(goal.id);
+    if (g) { g.status = "paused"; g.state = { ...(g.state ?? { decisions: [] }), nextAction: `Waiting on the owner: ${title}`, waitingOnOwner: line }; this.store.saveGoal(g); this.writeLedger(g); }
+    this.checkpoint(goal.id, { next: `Waiting on owner: ${title}` });
+  }
+
   private async replan(goal: Goal, task: Task, signal: AbortSignal): Promise<boolean> {
     const agents = realAgents(this.store, await this.readyAgents(goal.roomId)); // 2.3, 4.3
     const contract = this.store.getGoal(goal.id)?.contract;
@@ -1891,7 +1953,7 @@ export class Orchestrator {
   /** What the reviewer reads: the files this task wrote or was given, not just its chat reply. */
   private deliverableText(folder: string | undefined, task: Task, changed: string[]) {
     const exact = (task.files ?? []).filter((f) => !/[*?[]/.test(f));
-    return readDeliverables(folder, [...new Set([...changed, ...exact])], 16000);
+    return readDeliverables(folder, [...new Set([...changed, ...exact])], 60000); // a normal deliverable is shown whole so the judge can confirm every criterion
   }
 
   /** 0.5: tag a failure or send-back, keep it on the task, and put it in the audit log. Returns the routing-log fields. */
@@ -1932,16 +1994,26 @@ export class Orchestrator {
     const ready = new Set((await this.readyAgents()).map((a) => a.id));
     const wide = s.judgeRotation.map((j) => this.store.getAgent(j)).filter((a): a is AgentConfig => !!a && a.enabled && ready.has(a.id) && !quotaLimited(this.store, a.id)); // 1.6: not a judge that is out of quota
     const pool = this.rooms.judgePool(task.roomId, wide, [worker.id, notJudge]).pool; // 4.3: the roster's judges first; others only when nobody inside can judge
-    // rotate judges; avoid letting an agent grade its own work when possible
-    let judge: AgentConfig | undefined;
-    for (let i = 0; i < pool.length; i++) {
+    // rotate judges; avoid letting an agent grade its own work when possible. Pick up to two distinct ones so an unreadable reply can rotate to a second reviewer.
+    const picks: AgentConfig[] = [];
+    for (let i = 0; i < pool.length && picks.length < 2; i++) {
       const cand = pool[(this.judgeTurn + i) % pool.length];
-      if (cand.id !== worker.id && cand.id !== notJudge) { judge = cand; this.judgeTurn += i + 1; break; }
+      if (cand.id === worker.id || cand.id === notJudge || picks.some((p) => p.id === cand.id)) continue;
+      picks.push(cand);
     }
-    judge ??= pool[0] ?? (this.rooms.rosterIds(task.roomId) ? this.enabledAgents(task.roomId)[0] : undefined) ?? this.orchestratorAgent();
-    const j = await this.callJson<{ score: number; verdict: Judgment["verdict"]; feedback: string; criteria?: Record<string, { verdict?: string; evidence?: string }>; on_task?: boolean; drift?: string; failure_category?: string }>(
-      judgePrompt(task, contract, notes, changed, files, previousFeedback), judge, signal, "reviewer");
-    if (!j) return { score: 0.5, verdict: "revise", feedback: "The check couldn't be read; please resubmit with the STATUS block.", judgeAgentId: judge?.id ?? "none" };
+    if (!picks.length) { const fb = pool[0] ?? (this.rooms.rosterIds(task.roomId) ? this.enabledAgents(task.roomId)[0] : undefined) ?? this.orchestratorAgent(); if (fb) picks.push(fb); }
+    this.judgeTurn += 1;
+    // Try each pick once. callJson already retries invalid JSON twice; a null here is the reviewer's OWN reply, unreadable. That is the judge's
+    // fault, not the worker's: rotate to a second reviewer rather than sending good work back.
+    let judge: AgentConfig | undefined; let j: { score: number; verdict: Judgment["verdict"]; feedback: string; criteria?: Record<string, { verdict?: string; evidence?: string }>; on_task?: boolean; drift?: string; failure_category?: string } | null = null;
+    const triedJudges: string[] = [];
+    for (const cand of picks) {
+      judge = cand; triedJudges.push(cand.id);
+      j = await this.callJson(judgePrompt(task, contract, notes, changed, files, previousFeedback), cand, signal, "reviewer");
+      if (j) break;
+      if (picks.length > 1 && cand === picks[0]) this.log(task.roomId, `${cand.name}'s review of "${task.title}" couldn't be read; trying another reviewer.`, task.id, "task_update");
+    }
+    if (!j) return this.unreadableJudge(task, triedJudges); // 3: two reviewers both unreadable; decide from evidence, or park for the owner — never spin the worker's work
     const score = Math.min(1, Math.max(0, Number(j.score) || 0));
     const criteria: NonNullable<Judgment["criteria"]> = {};
     for (const c of task.criteria ?? []) {
@@ -1956,6 +2028,33 @@ export class Orchestrator {
     const feedback = String(j.feedback ?? "") + (verdict === "revise" && failing.length && j.criteria ? ` Not yet passing: ${failing.join(", ")}.` : "");
     const failureCategory = verdict === "accept" ? undefined : parseFailureCategory(j.failure_category);
     return { score, verdict, feedback: feedback.trim(), judgeAgentId: judge?.id ?? "none", criteria, onTask: j.on_task !== false, drift: j.drift ? String(j.drift) : undefined, ...(failureCategory ? { failureCategory } : {}) };
+  }
+
+  /**
+   * 3: both reviewers' own replies couldn't be read. Never send the worker's work back for the judge's failure. Fall back to the runnable
+   * checks and the agent's self-report to decide accept/revise; with nothing to go on, mark needsOwner so the task is parked, not looped.
+   */
+  private unreadableJudge(task: Task, tried: string[]): Judgment {
+    const names = tried.map((id) => this.store.getAgent(id)?.name ?? id).join(", ") || "the reviewers";
+    const judgeId = tried.join(",") || "none";
+    const checks = task.checks ?? [];
+    const self = task.report?.criteria ?? {};
+    if (!checks.length && !Object.keys(self).length) {
+      return { score: 0.5, verdict: "revise", judgeAgentId: judgeId, feedback: `Couldn't get a readable review of "${task.title}" from ${names}; it's waiting for your call.`, needsOwner: true };
+    }
+    const failedChecks = checks.filter((r) => !r.ok).map((r) => r.criterionId);
+    const selfFail = Object.entries(self).filter(([, v]) => v.verdict === "FAIL").map(([k]) => k);
+    const criteria: NonNullable<Judgment["criteria"]> = {};
+    for (const c of task.criteria ?? []) {
+      const chk = checks.find((r) => r.criterionId === c.id);
+      const v = chk ? (chk.ok ? "PASS" : "FAIL") : (self[c.id]?.verdict ?? "UNSURE");
+      criteria[c.id] = { verdict: v as Verdict, evidence: chk ? `\`${chk.command}\` ${chk.ok ? "passed" : `exited ${chk.exitCode}`}` : (self[c.id]?.evidence ?? "self-reported") };
+    }
+    const bad = [...new Set([...failedChecks, ...selfFail])];
+    this.store.audit("hub", "judge.unreadable", `"${task.title}": ${names} unreadable; decided from checks and self-report (${bad.length ? `fails: ${bad.join(", ")}` : "accept"})`.slice(0, 300));
+    return bad.length
+      ? { score: 0.4, verdict: "revise", judgeAgentId: judgeId, criteria, onTask: true, feedback: `The reviewer reply from ${names} couldn't be read; going by the runnable checks and your own report, these still fail: ${bad.join(", ")}.` }
+      : { score: 0.7, verdict: "accept", judgeAgentId: judgeId, criteria, onTask: true, feedback: `Accepted from the runnable checks and your own report; a readable reviewer reply from ${names} wasn't available.` };
   }
 
   private async finish(goal: Goal) {

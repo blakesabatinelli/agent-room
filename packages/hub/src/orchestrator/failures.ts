@@ -50,6 +50,26 @@ export function isPlacementBlock(...texts: (string | undefined)[]): boolean {
   return PLACEMENT.some((re) => re.test(t));
 }
 
+/**
+ * The MODEL PROVIDER's own safety or usage system refusing the message, not the agent speaking in its own words and not a rate limit:
+ * Anthropic "...safeguards flagged this message. Our intentionally broad safeguards...", an OpenAI usage-policy refusal, etc. A refusal
+ * says nothing about the agent's quality and retrying the same model just hits it again, so the orchestrator moves to another model family
+ * (or parks the task for the owner) instead of counting an attempt and replanning in a loop.
+ * The last pattern is kept tight so an agent saying it can't REACH a folder (a placement block, handled above) or finish from its sandbox
+ * does not match: it needs "(assist|help|comply) with (that|this) ... (request|task)", words a placement block never uses.
+ */
+const PROVIDER_REFUSAL: RegExp[] = [
+  /safeguards flagged this message/i,
+  /intentionally broad safeguards/i,
+  /\bflagged by (our|the) (safety|usage)\b/i,
+  /violat\w* (our|the) (usage|content) polic/i,
+  /\b(can'?t|cannot|unable to) (assist|help|comply) with (that|this)\b.*\b(request|task)\b/i,
+];
+export function isProviderRefusal(error?: string): boolean {
+  const t = (error ?? "").slice(0, 4000);
+  return !!t && PROVIDER_REFUSAL.some((re) => re.test(t));
+}
+
 export function classifyFailure(e: FailureEvidence): { tag: FailureTag; why: string } {
   if (e.kind === "run_error") return { tag: "other", why: "run error" };
   if ((e.kind === "blocked" || e.kind === "needs_input") && isPlacementBlock(e.report?.reason, e.text)) return { tag: "placement", why: "blocked by its environment" };

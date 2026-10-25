@@ -2231,3 +2231,10 @@ export interface Issue {
   reappeared?: boolean;
 }
 export interface IssuesResponse { at: number; days: number; issues: Issue[]; dismissed: number }
+
+// ---- Projects stop hanging: provider refusals, whole-deliverable judging, unreadable judge
+/**
+ * Set when the REVIEWER's own reply could not be read after two reviewers were tried (the judge's fault, not the worker's).
+ * The orchestrator parks the task for the owner instead of sending good work back or spinning the goal.
+ */
+export interface Judgment { needsOwner?: boolean }

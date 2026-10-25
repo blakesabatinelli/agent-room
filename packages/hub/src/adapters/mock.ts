@@ -34,6 +34,9 @@ function readContext(cwd: string): string | undefined {
  * says this, with no STATUS block, like an agent that can't do the work from where it runs).
  * retro (2.1: how a `[[RETRO]]` call is answered: "invalid" | "empty" | "ghost" | "positive"; see the branch below).
  * twokey (4.1: what this agent answers when asked to be the second key of a two-key action: a draft object (sent as JSON), or a string).
+ * refuse (true = always, or a number = the first N task runs for this agent fail with the model PROVIDER's own safety/usage refusal; refuseError sets the text),
+ * badJudge (as a judge, the reply is never valid JSON, so the reviewer itself is unreadable),
+ * bigFile ({ path?, marker?, size? }: the task run also writes a deliverable bigger than the old 6000-char judge cap, with `marker` placed past char 6000).
  */
 export class MockAdapter implements Adapter {
   /** Every run, for tests: which profile reached the agent. */
@@ -127,6 +130,12 @@ export class MockAdapter implements Adapter {
     } else if (p.includes("[[JUDGE]]")) {
       const pass = quality >= 0.6;
       const drift = /out of scope: (?!none)/i.test(p);
+      if ((st as { badJudge?: boolean }).badJudge) {
+        // the reviewer's own reply is never valid JSON (callJson gives up after its two retries), so judgeOne rotates to a second reviewer / falls back
+        text = "I looked at the work but I can't put my review into the JSON shape you asked for.";
+        req.onChunk?.(text);
+        return { ok: true, text, durationMs: Date.now() - t0 };
+      }
       if ((st as { unsure?: boolean }).unsure) {
         text = JSON.stringify({ criteria: Object.fromEntries(ids.map((k) => [k, { verdict: "UNSURE", evidence: "needs the live dashboard to confirm" }])),
           on_task: true, drift: "", score: 0.7, verdict: "revise", feedback: "Can't confirm from the work shown." });
@@ -200,6 +209,13 @@ export class MockAdapter implements Adapter {
         const full = join(req.cwd, f); mkdirSync(dirname(full), { recursive: true });
         writeFileSync(full, `${req.agent.name} wrote ${f}\n`);
       }
+      // bigFile: write a deliverable larger than the old 6000-char judge cap, with a marker PAST char 6000 so a test can prove the judge now sees the whole file.
+      const bigFile = (st as { bigFile?: { path?: string; marker?: string; size?: number } }).bigFile;
+      if (bigFile) {
+        const path = bigFile.path ?? "report.md"; const marker = bigFile.marker ?? "NEEDLE_AFTER_CUTOFF"; const size = bigFile.size ?? 8000;
+        const full = join(req.cwd, path); mkdirSync(dirname(full), { recursive: true });
+        writeFileSync(full, `# Report\n${"filler line to push the marker past the old cap\n".repeat(Math.ceil(size / 48))}\nPrioritized next steps: ${marker}\n`);
+      }
       const tag = st.tag ? `\n@${st.tag} can you double-check one number for me?` : "";
       const blockedText = (st as { blockedText?: string }).blockedText;
       const block = st.noReport ? "" : `\nSTATUS: ${st.status ?? "done"}\n${ids.map((k) => `${k}: ${quality >= 0.6 ? "PASS" : "FAIL"} — see above`).join("\n")}\nOUT_OF_SCOPE: ${st.outOfScope ?? "none"}${(st as { decide?: string }).decide ? `\nDECISIONS: ${(st as { decide?: string }).decide}` : ""}${st.status ? "\nREASON: need the target audience" : ""}`;
@@ -212,6 +228,16 @@ export class MockAdapter implements Adapter {
       const k = `${req.agent.id}`;
       MockAdapter.transientSeen.set(k, (MockAdapter.transientSeen.get(k) ?? 0) + 1);
       if (MockAdapter.transientSeen.get(k)! <= n) return { ok: false, text: "", durationMs: Date.now() - t0, error: (st as { transientError?: string }).transientError ?? "429 rate limit exceeded, try again later" };
+    }
+    // refuse: the model provider's OWN safety/usage system declines this task run. true = always; a number = the first N runs for this agent.
+    // refuseError sets the text (defaults to a real Anthropic safeguards refusal). Not a rate limit and not the agent's words.
+    if (p.includes("# Your task:")) {
+      const rn = (st as { refuse?: number | boolean }).refuse;
+      if (rn === true || (typeof rn === "number" && rn > 0)) {
+        const rk = `refuse:${req.agent.id}`;
+        const seen = (MockAdapter.transientSeen.get(rk) ?? 0) + 1; MockAdapter.transientSeen.set(rk, seen);
+        if (rn === true || seen <= rn) return { ok: false, text: "", durationMs: Date.now() - t0, error: (st as { refuseError?: string }).refuseError ?? "API Error: Opus 4.8's safeguards flagged this message. Our intentionally broad safeguards sometimes flag content unnecessarily." };
+      }
     }
     const barrier = p.includes("# Your task:") ? (req.agent.settings as { barrier?: { key: string; n: number } }).barrier : undefined;
     if (barrier && !(await MockAdapter.arrive(barrier.key, barrier.n, req.signal))) return { ok: false, text: "", durationMs: Date.now() - t0, error: "Cancelled." };

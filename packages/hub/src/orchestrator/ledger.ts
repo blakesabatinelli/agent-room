@@ -126,8 +126,14 @@ export function sameFeedback(a?: string, b?: string): boolean {
   return inter / Math.max(wa.size, wb.size) > 0.85;
 }
 
-/** Contents of the task's deliverable files, so reviewers judge the artifact, not the chat message. */
-export function readDeliverables(folder: string | undefined, files: string[], budget = 16000): string {
+/**
+ * Contents of the task's deliverable files, so reviewers judge the artifact, not the chat message.
+ * An ordinary deliverable (a report, a plan, a few source files) is shown WHOLE: the old 6000-char per-file cap meant the judge never saw
+ * evidence for a later criterion and sent good work back forever. There is no artificial per-file cap now (one file may use most of the
+ * budget), only PER_FILE_MAX so a single pathologically huge file can't blow the context, and the total budget is large enough for a normal set.
+ */
+const PER_FILE_MAX = 50000;
+export function readDeliverables(folder: string | undefined, files: string[], budget = 60000): string {
   if (!folder) return "";
   const out: string[] = [];
   let left = budget;
@@ -138,8 +144,8 @@ export function readDeliverables(folder: string | undefined, files: string[], bu
     try {
       if (!statSync(full).isFile()) continue;
       const body = readFileSync(full, "utf8");
-      const cut = body.slice(0, Math.min(left, 6000));
-      out.push(`--- ${f}${cut.length < body.length ? ` (first ${cut.length} of ${body.length} chars)` : ""}\n${cut}`);
+      const cut = body.slice(0, Math.min(left, PER_FILE_MAX));
+      out.push(`--- ${f}${cut.length < body.length ? ` (first ${cut.length} of ${body.length} chars; read the rest in ${folder})` : ""}\n${cut}`);
       left -= cut.length;
     } catch { /* unreadable: skip */ }
   }
