@@ -1605,6 +1605,11 @@ export class Orchestrator {
     void this.dropWorktrees(goalId);
   }
 
+  /** Delete a room: remove every worktree and branch its goals still hold (call before the room's rows go; the hub's own folders only). */
+  dropRoomWorktrees(roomId: string): Promise<void> {
+    return Promise.all(this.store.listGoals(roomId).map((g) => this.dropWorktrees(g.id))).then(() => undefined);
+  }
+
   /** Hub start: remove worktrees of tasks that are no longer open. Call before recover(). */
   pruneWorktrees() {
     return this.workspaces.prune((goalId, taskId) => {

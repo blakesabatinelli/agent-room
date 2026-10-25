@@ -2238,3 +2238,62 @@ export interface IssuesResponse { at: number; days: number; issues: Issue[]; dis
  * The orchestrator parks the task for the owner instead of sending good work back or spinning the goal.
  */
 export interface Judgment { needsOwner?: boolean }
+
+// ---- Usage-left per agent (GET /agents/usage)
+/** "unlimited" = a local or free tier. "learning" = no limit is known yet, so no percentage is shown. "out" carries `outUntil`. */
+export type UsageLeftStatus = "plenty" | "getting_low" | "almost_out" | "out" | "learning" | "unlimited";
+/** One window of one subscription, as the owner reads it. `percentLeft` (0 to 100, whole number) is absent while the limit is unknown (`learning`). */
+export interface UsageLeftWindow {
+  window: QuotaWindowId;
+  /** "5-hour" or "weekly". */
+  label: string;
+  usedTokens: number;
+  usedRuns: number;
+  limitTokens?: number;
+  limitRuns?: number;
+  limitSource?: "owner" | "learned";
+  learning: boolean;
+  percentLeft?: number;
+  /** When the window resets (ms since epoch). */
+  resetAt: number;
+}
+export interface UsageLeftSubscription {
+  subscriptionId: string;
+  /** The subscription's name ("Claude (subscription)"). */
+  name: string;
+  plan?: string;
+  kind: SubscriptionKind;
+  /** A local or free tier (Hermes on Bonsai): effectively unlimited, so the windows are shown for information only. */
+  free: boolean;
+  fiveHour: UsageLeftWindow;
+  weekly: UsageLeftWindow;
+  status: UsageLeftStatus;
+  /** Plain words: "plenty", "getting low", "almost out", "out until 3:15 PM", "learning your limits", "unlimited". */
+  statusText: string;
+  /** Tightest known window, 0 to 100. Absent while learning and for free tiers. */
+  percentLeft?: number;
+  /** Set when status is "out": when it lifts (ms since epoch). */
+  outUntil?: number;
+}
+export interface AgentUsageLeft {
+  agentId: string;
+  agentName: string;
+  /** Every subscription the agent can run on (Hermes has a free local one and a MiniMax one). Empty when none covers it. */
+  subscriptions: UsageLeftSubscription[];
+  /** The best of its subscriptions: the agent can still run when any one has room. */
+  status: UsageLeftStatus;
+  statusText: string;
+  percentLeft?: number;
+  outUntil?: number;
+  /** True when any of its subscriptions is a local or free tier. */
+  free: boolean;
+}
+export interface UsageLeftResponse { at: number; agents: AgentUsageLeft[] }
+
+// ---- Delete a room (DELETE /rooms/:id)
+/** What a room delete removed, by table. Also the audit detail. */
+export interface RoomDeleteCounts {
+  goals: number; tasks: number; messages: number; routing: number; approvals: number; documents: number;
+  replyTurns: number; goalSteps: number; memory: number; proposals: number; forks: number; writeProposals: number; rooms: number;
+}
+export interface RoomDeleteResponse { ok: true; counts: RoomDeleteCounts }
