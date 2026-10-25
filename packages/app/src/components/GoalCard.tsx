@@ -4,7 +4,8 @@ import { Pressable, Text, View } from "react-native";
 import { goalCardModel, goalFraction, goalProgressLine, pickGoal, type GoalCardModel } from "@agent-room/shared/src/goalview";
 import { useRoom } from "../state/store";
 import { space, type as t, usePalette } from "../theme";
-import { Chip } from "./ui";
+import { Button, Chip } from "./ui";
+import { TracePanel } from "./TracePanel"; // Trace and Issues
 
 /**
  * 3.1: the goal card. It sits at the top of the room's conversation and shows the goal's objective, its "Done means" list
@@ -14,7 +15,8 @@ import { Chip } from "./ui";
 export function GoalCardView({ m }: { m: GoalCardModel }) {
   const p = usePalette();
   const [open, setOpen] = useState(m.live);
-  useEffect(() => { setOpen(m.live); }, [m.goalId, m.live]);
+  const [trace, setTrace] = useState(false); // Trace and Issues: the goal's whole story, under the card
+  useEffect(() => { setOpen(m.live); setTrace(false); }, [m.goalId, m.live]);
   const fraction = goalFraction(m);
   const line = goalProgressLine(m);
   const tone = m.state.tone === "neutral" ? p.muted : m.state.tone === "accent" ? p.accent : m.state.tone === "ok" ? p.ok : m.state.tone === "warn" ? p.warn : p.danger;
@@ -61,8 +63,10 @@ export function GoalCardView({ m }: { m: GoalCardModel }) {
             </View>
           ) : <Text style={[t.small, { color: p.muted }]}>{m.state.key === "planning" ? "Writing the plan. The list of what done means shows here once it's ready." : "No list of requirements for this goal."}</Text>}
           {line ? <Text style={[t.tiny, { color: p.muted }]}>{line}</Text> : null}
+          <View style={{ flexDirection: "row" }}><Button small kind="plain" label={trace ? "Hide trace" : "Trace"} onPress={() => setTrace(!trace)} /></View>
         </View>
       ) : null}
+      {open && trace ? <TracePanel goalId={m.goalId} onClose={() => setTrace(false)} maxHeight={360} /> : null}
     </View>
   );
 }

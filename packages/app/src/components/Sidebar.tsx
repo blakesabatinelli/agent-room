@@ -1,5 +1,5 @@
 import { useShallow } from "zustand/react/shallow";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { presence, useRoom, type Page } from "../state/store";
 import { Dot } from "./ui";
@@ -75,6 +75,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const [openDm, setOpenDm] = useState(true);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
+  const [issueCount, setIssueCount] = useState(0); // recurring problems the owner has not dismissed; refreshed when the screen changes
+  useEffect(() => { let live = true; hub?.issues().then((r) => { if (live) setIssueCount(r.issues.length); }).catch(() => {}); return () => { live = false; }; }, [hub, view]);
 
   const channels = rooms.filter((r) => !r.dmAgentId);
   const go = (fn: () => void) => { fn(); onNavigate?.(); };
@@ -102,6 +104,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       <ScrollView contentContainerStyle={{ paddingVertical: space(2) }}>
         <Row label="Approvals" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>✓</Text>} active={isPage("approvals")} bold={approvals.length > 0} badge={approvals.length || undefined} onPress={() => page("approvals")} />
         <Row label="Memory" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>◇</Text>} active={isPage("memory")} badge={s.proposals.length || undefined} onPress={() => page("memory")} />
+        <Row label="Issues" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>!</Text>} active={isPage("issues")} bold={issueCount > 0} badge={issueCount || undefined} onPress={() => page("issues")} />
         <Row label="Office" prefix={<Text style={[t.small, { color: p.sidebarMuted }]}>▦</Text>} active={isPage("office")} onPress={() => page("office")} />
 
         <Heading label="Rooms" open={openCh} toggle={() => setOpenCh(!openCh)} onAdd={() => { setOpenCh(true); setCreating(true); }} />
