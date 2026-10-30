@@ -1,4 +1,5 @@
 import type { AgentConfig, Goal, Judgment, NightShiftNight, NightShiftSettings, NightShiftState, RoutingOutcome, RoutingRecord, Task, TournamentRun } from "@agent-room/shared";
+import { TaintTracker } from "../security/taint.js"; // S12
 import { attentionFor } from "../attention/index.js";
 import type { Store } from "../db/store.js";
 import { localModelsFor } from "../discovery/usage.js";
@@ -207,6 +208,8 @@ export class NightShift {
       if (!goal) continue;
       if (!GOAL_OVER.has(goal.status)) { skip("goal still active"); continue; }
       if (task.needs?.some((n) => n !== WORKSPACE_NEED) || this.askedApproval(rec, task, now)) { skip("needs approvals or outside tools"); continue; }
+      // S12: a task that touched private data stays with the vendor that saw it, unless the owner allowed re-runs of such tasks.
+      if (!cfg.allowLabeledData && TaintTracker.hasSensitiveData(new TaintTracker(store).labels({ agentId: original.id, taskId: task.id }))) { skip("touched private data"); continue; }
       const src = getSource(store, task.id);
       if (!src?.baseCommit) { skip("starting state not saved"); continue; }
       if (!(await host.workspaces.hasCommit(host.ref(goal), src.baseCommit))) { skip(src.mode === "granted-git" ? "needs the owner's files" : "starting state gone"); continue; }

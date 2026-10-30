@@ -70,7 +70,7 @@ export async function defaultSignedIn(agent: AgentConfig): Promise<boolean | und
     return s.state === "ready" ? true : s.state === "signed_out" ? false : undefined;
   }
   if (agent.adapter === "claude-code") {
-    const r = await runProc("claude", ["auth", "status"], { timeoutMs: 8000 });
+    const r = await runProc("claude", ["auth", "status"], { timeoutMs: 8000, keepEnv: /^(ANTHROPIC|CLAUDE)_/ });
     if (r.code === 0) return true;
     if (r.code === null || r.code < 0 || /unknown command|did you mean|unknown option|ENOENT/i.test(`${r.stdout}${r.stderr}`)) return undefined;
     return false;

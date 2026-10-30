@@ -1,4 +1,4 @@
-import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -28,7 +28,8 @@ const dataDir = process.env.AGENT_ROOM_DATA ?? join(homedir(), ".agent-room");
 const port = Number(process.env.AGENT_ROOM_PORT ?? 4747);
 const demo = process.env.AGENT_ROOM_DEMO === "1";
 const ownerName = process.env.AGENT_ROOM_OWNER ?? "Blake";
-mkdirSync(dataDir, { recursive: true });
+mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+try { chmodSync(dataDir, 0o700); } catch { /* S6: best effort; the folder holds the database and keys, so only the owner reads it */ }
 // The owner's own PATH (from their login shell) plus the usual install folders, so `claude`, `codex` and the rest are found from a Finder launch.
 // Speed: the login-shell PATH is cached to <dataDir>/shell-path.json so a restart doesn't pay the ~5s shell probe; it is refreshed in the background.
 const shellPath = demo ? undefined : cachedShellPath({ file: join(dataDir, "shell-path.json"), onRefresh: (p) => { process.env.PATH = hubPath(process.env.PATH, p, knownCliDirs(home)); } });

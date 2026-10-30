@@ -25,5 +25,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # S11: a known-vulnerable dependency fails the build. Critical for now: two high findings are open and tracked in SECURITY.md
+      # (zod 3 -> 4 is a major upgrade; image-size comes in through React Native's tooling). Raise to high when they are fixed.
+      - run: pnpm audit --audit-level critical --prod
       - run: pnpm typecheck
       - run: pnpm test

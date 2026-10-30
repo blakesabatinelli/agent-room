@@ -1,18 +1,19 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { scrubEnv } from "../security/env.js"; // S4
 
 export interface ProcResult { code: number | null; stdout: string; stderr: string }
 
 /** Spawn a process, stream stdout lines, honour abort, never use a shell. */
 export function runProc(
   cmd: string, args: string[],
-  opts: { cwd?: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal; onLine?: (l: string) => void; stdin?: string; timeoutMs?: number },
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal; onLine?: (l: string) => void; stdin?: string; timeoutMs?: number; /** S4: vendor key names this spawn keeps (others are removed) */ keepEnv?: RegExp; /** S4: keep every vendor's API key (an owner-configured command) */ keepAllVendors?: boolean },
 ): Promise<ProcResult> {
   return new Promise((resolve) => {
     let stdout = "", stderr = "", buf = "";
     let child;
     try {
-      child = spawn(cmd, args, { cwd: opts.cwd, env: { ...process.env, ...opts.env }, stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(cmd, args, { cwd: opts.cwd, env: { ...scrubEnv(process.env, { keep: opts.keepEnv, keepAllVendors: opts.keepAllVendors }).env, ...opts.env }, stdio: ["pipe", "pipe", "pipe"] });
     } catch (e) {
       resolve({ code: -1, stdout: "", stderr: String(e) }); return;
     }

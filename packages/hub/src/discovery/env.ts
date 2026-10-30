@@ -47,7 +47,7 @@ export function defaultEnv(overrides: Partial<DiscoveryEnv> = {}): DiscoveryEnv 
         return { status: res.status, json };
       } catch { return undefined; }
     },
-    run: (bin, args, timeoutMs) => runProc(bin, args, { timeoutMs }),
+    run: (bin, args, timeoutMs) => runProc(bin, args, { timeoutMs, keepAllVendors: true }), // S4: discovery reads sign-in state as the CLI sees it
     ...overrides,
   };
 }

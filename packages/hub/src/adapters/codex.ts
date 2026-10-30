@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Adapter, RunRequest, RunResult } from "./types.js";
 import { runProc, which } from "./proc.js";
+import { KEEP_OPENAI } from "../security/env.js"; // S4
 import { codexConfinementArgs } from "../files/confine.js";
 import { NativeTracker } from "../subagents/native.js"; // 3.3
 
@@ -51,7 +52,7 @@ export class CodexAdapter implements Adapter {
     const bin = (agent?.settings as { binary?: string } | undefined)?.binary || "codex";
     const p = await which(bin);
     if (!p) return { ready: false, state: "not_installed" as const, detail: "Codex isn't installed." };
-    const r = await runProc(bin, ["login", "status"], { timeoutMs: 8000 });
+    const r = await runProc(bin, ["login", "status"], { timeoutMs: 8000, keepEnv: KEEP_OPENAI });
     const out = `${r.stdout}\n${r.stderr}`.trim();
     if (/not logged in/i.test(out)) return { ready: false, state: "signed_out" as const, detail: "Installed, but not signed in." };
     if (r.code === 0) return { ready: true, state: "ready" as const, detail: out.split("\n")[0] || "Signed in" };
@@ -75,7 +76,7 @@ export class CodexAdapter implements Adapter {
       let usage: RunResult["usage"], model: string | undefined;
       const r = await runProc(s.binary || "codex", [...args, ...extra, prompt], {
         cwd: req.cwd, signal: req.signal, timeoutMs: 30 * 60_000,
-        env: req.mcp ? { AGENT_ROOM_MCP_TOKEN: req.mcp.token } : undefined,
+        env: req.mcp ? { AGENT_ROOM_MCP_TOKEN: req.mcp.token } : undefined, keepEnv: KEEP_OPENAI, // S4
         onLine: (line) => {
           try {
             const ev = JSON.parse(line);

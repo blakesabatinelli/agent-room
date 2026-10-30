@@ -58,7 +58,7 @@ export interface BrokerOptions {
   home?: string;
   systemRoots?: string[];
   /** Paths that may not be granted besides the usual ones, with the words shown to the owner (the control folder's version history). */
-  extraProtected?: () => { path: string; because: string }[];
+  extraProtected?: () => { path: string; because: string; contains?: boolean }[];
   /** 4.3: what a room's ROOM.md limits (the folder grants its goals and file tools may use, and whether the filesystem tool is off there). */
   rooms?: RoomGate;
   /** 4.1: the two-key check on the files a proposal deletes (see twokey/service.ts `checkDeletes`). Absent: no check (a broker used on its own). */

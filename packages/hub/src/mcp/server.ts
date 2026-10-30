@@ -18,9 +18,23 @@ const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 /** 1.1 round 2 (M3): the file tools already named in the audit log for a run (a read is listed once per tool per run). */
 const fileToolSeen = new WeakMap<object, Set<string>>();
 
+/**
+ * S2: tools a caller that came through Tailscale Funnel (the public internet) is never offered: anything that writes without a card for the
+ * owner (the Library, a task's state), starts more agents, or takes a helper's changes. They are left out of tools/list, and the /mcp route
+ * answers a tools/call for one with 403. propose_file_write stays (D1: vendor-cloud agents propose writes as diffs): every proposal waits for
+ * the owner, through FileBroker, never through requestApproval, so no setting can skip it.
+ */
+export const FUNNEL_BLOCKED_TOOLS = new Set([
+  "save_document", "spawn_agent", "accept_subagent", "discard_subagent", "approval_prompt", "update_task",
+]);
+
 /** Build one MCP server instance bound to a caller's grant (stateless per request). */
 export function buildMcpServer(store: Store, orch: Orchestrator, grant: McpGrant) {
   const server = new McpServer({ name: "agent-room", version: "0.1.0" });
+  if (grant.remote) { // S2
+    const register = server.registerTool.bind(server);
+    server.registerTool = ((name: string, ...rest: unknown[]) => (FUNNEL_BLOCKED_TOOLS.has(name) ? undefined : (register as (...a: unknown[]) => unknown)(name, ...rest))) as typeof server.registerTool;
+  }
   const agent = () => store.getAgent(grant.agentId);
   // 1.1: a key pinned to a room (and a run inside a room) cannot name another room, so room-scoped folder grants and room reads stay in that room.
   const scoped = (r?: string) => (grant.locked && grant.roomId ? grant.roomId : r);

@@ -9,6 +9,8 @@ export interface RunRequest {
   cwd: string;
   /** 1.1: the hub's data folder, so a confined Claude Code run can keep the hub's database and other tasks' folders off limits. */
   dataDir?: string;
+  /** S4: files and folders a confined run may neither read nor write (the control files that steer agents). */
+  protectedPaths?: string[];
   /** hub MCP endpoint the agent can use to talk to the room */
   mcp?: { url: string; token: string };
   /** true for orchestrator planning/judging calls: no tools, JSON out */

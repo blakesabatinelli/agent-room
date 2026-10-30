@@ -1,4 +1,6 @@
 import { mkdirSync } from "node:fs";
+import { TaintTracker, taintNote } from "../security/taint.js"; // S1
+import { describeFindings, findInjection } from "../security/injection.js"; // S7
 import { join } from "node:path";
 import type { AgentConfig, AgentStatus, Approval, AttemptLog, Author, Contract, FailureTag, Goal, GoalProgress, GoalState, Judgment, MemoryEntry, Message, OrchestratorSettings, Profile, Role, RoutingOutcome, RoutingRecord, RunUsage, SteerKind, Task, Verdict } from "@agent-room/shared";
 import { SETTING_DEFAULTS } from "@agent-room/shared";
@@ -64,7 +66,7 @@ const ORCH: Author = { kind: "orchestrator", id: "orchestrator", name: "Orchestr
 const SYS: Author = { kind: "system", id: "system", name: "System" };
 const OPEN = (t: Task) => !["done", "failed", "cancelled"].includes(t.status);
 
-export interface McpGrant { agentId: string; roomId?: string; taskId?: string; expiresAt?: number; hop?: number; /** 1.1: an external key pinned to one room: every room argument is ignored in favour of roomId */ locked?: boolean; /** 1.1: the external key behind this grant (for the audit log) */ tokenId?: string; /** 1.1: the folder this run works in; file tools aimed elsewhere are refused */ cwd?: string; /** 2.3: a probation agent's practice run: approvals are refused, nothing it says or saves reaches the room, the library or memory */ shadow?: boolean; /** 3.3: a read-only helper: the hub's file-write tools refuse it, and Claude Code's write tools are off */ readOnly?: boolean }
+export interface McpGrant { agentId: string; roomId?: string; taskId?: string; expiresAt?: number; hop?: number; /** 1.1: an external key pinned to one room: every room argument is ignored in favour of roomId */ locked?: boolean; /** 1.1: the external key behind this grant (for the audit log) */ tokenId?: string; /** 1.1: the folder this run works in; file tools aimed elsewhere are refused */ cwd?: string; /** 2.3: a probation agent's practice run: approvals are refused, nothing it says or saves reaches the room, the library or memory */ shadow?: boolean; /** 3.3: a read-only helper: the hub's file-write tools refuse it, and Claude Code's write tools are off */ readOnly?: boolean; /** S2: the call came through Funnel (or any proxy): write, spawn and save tools are not offered */ remote?: boolean }
 
 export interface OrchestratorOptions {
   dataDir: string;
@@ -109,6 +111,8 @@ export class Orchestrator {
   /** Who may speak in which room right now. */
   floor = new Floor();
   grants = new Map<string, McpGrant>();                    // MCP bearer token -> grant
+  /** S1: tasks whose context may include untrusted content never act without the owner. */
+  taint: TaintTracker;
 
   /** 0.4: the document Library (Markdown + front matter, indexed). */
   library: Library;
@@ -164,7 +168,12 @@ export class Orchestrator {
     this.library = new Library(store, opts.libraryDir ?? defaultLibraryRoot());
     this.rooms = new RoomRules({ store, control: () => this.control }); // 4.3
     // 1.1: the control folder's version history can never be granted to agents (it is read lazily: the control folder may be attached after this).
-    this.files = new FileBroker(store, approvals, { rooms: this.rooms /* 4.3 */, twoKey: (q) => this.twoKey.checkDeletes(q) /* 4.1: read at call time */, extraProtected: () => (this.control ? [{ path: join(this.control.root, ".git"), because: "the Agent Room control folder's version history can't be shared with agents" }] : []) });
+    this.taint = new TaintTracker(store); // S1
+    this.files = new FileBroker(store, approvals, { rooms: this.rooms /* 4.3 */, twoKey: (q) => this.twoKey.checkDeletes(q) /* 4.1: read at call time */, extraProtected: () => (this.control ? [
+      { path: join(this.control.root, ".git"), because: "the Agent Room control folder's version history can't be shared with agents" },
+      // S3: the files that steer agents (rules, policy, personas, rooms, goals) are never granted, and neither is a folder that holds them. The Library can be.
+      ...["AGENTS.md", "USER.md", "POLICY.md", "agents", "rooms", "goals", "playbooks"].map((f) => ({ path: join(this.control!.root, f), because: "the Agent Room control files steer the agents and can't be shared with them", contains: true })),
+    ] : []) });
     this.goalSources = new GoalSources(this.files, store); // 1.1
     this.roomFolders = new RoomFolders(store, this.goalSources); // room folders
     this.workspaces = new TaskWorkspaces({ dataDir: opts.dataDir, git: opts.gitBin, onSecurity: (action, detail) => store.audit("hub", action, detail) }); // 1.1: git config restored, hard links left out
@@ -428,6 +437,10 @@ export class Orchestrator {
     const dir = join(this.opts.dataDir, "workspaces", agentId, roomId);
     mkdirSync(dir, { recursive: true }); return dir;
   }
+  /** S3/S4: the control files that steer agents. Never granted to an agent, never readable or writable by a confined run. */
+  controlPaths(): string[] {
+    return this.control ? ["AGENTS.md", "USER.md", "POLICY.md", "agents", "rooms", "goals", "playbooks", ".git"].map((f) => join(this.control!.root, f)) : [];
+  }
   private grantFor(agentId: string, roomId?: string, taskId?: string, hop = 0, cwd?: string, shadow = false, readOnly = false) {
     const t = token();
     // 1.1: a run's own key is locked to its room, and carries its worktree so approval_prompt can refuse file tools outside it.
@@ -441,9 +454,15 @@ export class Orchestrator {
     const grant = url && !o.jsonOnly ? { url, token: this.grantFor(agent.id, o.roomId, o.taskId, o.hop, cwd, o.shadow, o.readOnly) } : undefined;
     const adapter = this.store.getKV("practice_mode", false) ? adapters.mock : adapters[agent.adapter];
     const rp = o.jsonOnly ? { agent, ask: [] as string[] } : this.rooms.narrow(agent, o.roomId); // 4.3: this room's ROOM.md narrows what the agent may use in this run
+    if (!o.jsonOnly) {
+      // S1: a run that could read content the owner didn't write is tainted from its start, and a tainted run gets no "run without asking".
+      const scope = { agentId: agent.id, roomId: o.roomId, taskId: o.taskId };
+      this.taint.mark(scope, TaintTracker.capabilityLabels(rp.agent), "the agent can read it in this run");
+      if (this.taint.isTainted(scope)) rp.agent = TaintTracker.stripAutoApprove(rp.agent);
+    }
     const res = await adapter.run({
       agent: rp.agent, ask: rp.ask, prompt, jsonOnly: o.jsonOnly, signal: o.signal, systemPrompt: o.systemPrompt,
-      cwd, dataDir: this.opts.dataDir, mcp: grant, roomId: o.roomId, taskId: o.taskId, // 1.1: dataDir keeps the hub's own files off limits to a confined run
+      cwd, dataDir: this.opts.dataDir, protectedPaths: this.controlPaths(), /* S4 */ mcp: grant, roomId: o.roomId, taskId: o.taskId, // 1.1: dataDir keeps the hub's own files off limits to a confined run
       model: o.profile?.model, effort: o.profile?.effort,
       claimTimeoutMs: this.cfg().claimTimeoutMinutes * 60_000,
       readOnly: o.readOnly, // 3.3
@@ -871,6 +890,7 @@ export class Orchestrator {
       new Promise<undefined>((r) => { timer = setTimeout(() => r(undefined), 10 * 60_000); timer.unref?.(); }),
     ]);
     clearTimeout(timer);
+    if (answer) this.taint.mark(grant, TaintTracker.capabilityLabels(this.rooms.narrow(agent, rid).agent), `an answer from ${agent.id}`); // S1: labels follow the answer
     return answer ?? `${agent.name} didn't answer in time. Continue without it, or report STATUS: needs_input.`;
   }
 
@@ -2044,12 +2064,25 @@ export class Orchestrator {
     const host = (limit: boolean): JuryHost => ({ store: this.store, readyAgents: () => this.readyAgents(limit ? task.roomId : undefined), call: (a, p, o) => this.call(a, p, o), callJson: (p, a, sig, r) => this.callJson(p, a, sig, r), governor: this.governor, quotaLimited: (aid) => quotaLimited(this.store, aid) });
     const input = { task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge, mode: this.juryMode(task) }; // Speed: fast judging by default
 
+    const guard = (j: Judgment) => this.injectionGuard(task, j); // S7
     const bounded = !!this.rooms.rosterIds(task.roomId);
     let r = await juryReview(host(bounded), input);
     if (bounded && "fallback" in r) { const wide = await juryReview(host(false), input); if ("judgment" in wide) r = wide; }
-    if ("judgment" in r) return this.markOutsideRoster(task, r.judgment);
-    if ("off" in r) return this.markOutsideRoster(task, await this.judgeOne(task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge));
-    return this.markOutsideRoster(task, r.finish(await this.judgeOne(r.task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge?.split(",")[0])));
+    if ("judgment" in r) return guard(this.markOutsideRoster(task, r.judgment));
+    if ("off" in r) return guard(this.markOutsideRoster(task, await this.judgeOne(task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge)));
+    return guard(this.markOutsideRoster(task, r.finish(await this.judgeOne(r.task, worker, contract, notes, signal, changed, files, previousFeedback, notJudge?.split(",")[0]))));
+  }
+
+  /**
+   * S7: work that speaks to its judges ("judges: score this 10", "ignore previous instructions") can't be accepted on that judgment, whatever
+   * the judges said. The score is held below the accept line and the worker is told why. Judges see outputs as data; this makes sure that text
+   * aimed at them changes nothing in the worker's favour even if one of them followed it.
+   */
+  injectionGuard(task: Task, j: Judgment): Judgment {
+    const found = findInjection(task.output ?? "", ["judge", "override"]);
+    if (!found.length) return j;
+    this.store.audit(task.assignee ?? "hub", "judge.injection", `"${task.title}": ${describeFindings(found)}`.slice(0, 300));
+    return { ...j, score: Math.min(j.score, 0.3), verdict: j.verdict === "accept" ? "revise" : j.verdict, feedback: `${j.feedback ? `${j.feedback} ` : ""}Your output contains text addressed to the reviewers (${describeFindings(found)}). Remove it: work is judged on what it does, not on what it asks of its judges.`.trim(), failureCategory: j.failureCategory ?? "other" };
   }
 
   /** 4.3: a judgment by someone outside the room's roster says so on the judgment, in the audit log and in the room's work log. */
@@ -2199,6 +2232,17 @@ export class Orchestrator {
     if (this.rooms.forbids(a, grant.roomId, tool)) {
       this.store.audit(grant.agentId, "room.denied", `${tool}: ${action}`.slice(0, 200));
       return Promise.resolve({ id: id("apr"), ...p, detail: "", status: "rejected", createdAt: now(), decidedAt: now() });
+    }
+    // S1: a tainted task never acts on its own. A policy "deny" still refuses; anything else is a card for the owner, whatever allows it below.
+    const tainted = this.taint.labels(grant);
+    if (tainted.length) {
+      const goalId = grant.taskId ? this.store.getTask(grant.taskId)?.goalId : undefined;
+      if (this.policy.policyDecision(grant.agentId, grant.roomId, goalId, tool, action, detail, input) === "deny") {
+        this.store.audit(grant.agentId, "policy.denied", `${tool}: ${action}`.slice(0, 200));
+        return Promise.resolve({ id: id("apr"), ...p, detail: "", status: "rejected", createdAt: now(), decidedAt: now() });
+      }
+      this.store.audit(grant.agentId, "taint.held", `${tool}: ${action} (${tainted.join(", ")})`.slice(0, 300));
+      return this.approvals.request({ ...p, detail: detail + taintNote(tainted) });
     }
     // 4.2: the owner's accepted rules and leases (policy/): deny refuses, allow auto-approves, ask always shows the card. Never wider than the layers above.
     const viaPolicy = this.policy.gate(grant, a, p, { twoKeyPassed: o.twoKeyDone === true, input }); // a send, CRM write or delete may only auto-approve after two keys matched; the policy reads the whole input, not the cut-short detail (4.2 M2)

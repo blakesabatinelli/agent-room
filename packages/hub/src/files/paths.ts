@@ -81,7 +81,7 @@ export interface GrantRootOptions {
   dataDir?: string;
   home?: string;
   /** Other paths that may not be granted, each with the words shown to the owner (the control folder's version history). */
-  extraProtected?: { path: string; because: string }[];
+  extraProtected?: { path: string; because: string; /** S3: also protected when the granted folder would contain it (the control files) */ contains?: boolean }[];
   /** Replaces the system folder list (tests). */
   systemRoots?: string[];
 }
@@ -126,7 +126,7 @@ export function inspectGrantRoot(input: string, opts: GrantRootOptions = {}): { 
   if (data && (isInside(root, data) || isInside(data, root))) reasons.push("the Agent Room data folder holds the database and keys");
   for (const x of opts.extraProtected ?? []) {
     const r = realIfExists(x.path);
-    if (r && isInside(r, root)) reasons.push(x.because);
+    if (r && (isInside(r, root) || (x.contains && isInside(root, r)))) reasons.push(x.because);
   }
   return { root, because: reasons.length ? reasons.join("; ") : undefined };
 }

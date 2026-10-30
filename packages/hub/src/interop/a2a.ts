@@ -295,6 +295,7 @@ export class A2aService {
     void this.orch.runGoal(room.id, goalText).catch(() => undefined);
     const goal = this.store.listGoals(room.id).find((g) => !before.has(g.id));
     if (!goal) throw new RpcError(RPC.internal, "The goal didn't start.");
+    this.orch.taint.markGoal(goal.id, ["a2a"], "the goal came from an outside agent", "a2a"); // S1
     const entry: Entry = { keyId: rec.id, roomId: room.id, at: now() };
     this.remember(goal.id, entry);
     this.orch.attention.notify("info", { title: "An outside agent started a goal", body: `${stripControl(rec.name).slice(0, 60)} over A2A: ${goalText}`, roomId: room.id, goalId: goal.id, key: `a2a:${goal.id}` });

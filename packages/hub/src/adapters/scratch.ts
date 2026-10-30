@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Adapter, RunRequest, RunResult } from "./types.js";
@@ -19,6 +19,9 @@ export async function inJsonScratch<T>(req: Pick<RunRequest, "dataDir">, run: (c
     mkdirSync(base, { recursive: true, mode: 0o700 });
     cwd = mkdtempSync(join(base, "json-"));
   } else cwd = mkdtempSync(join(tmpdir(), "agent-room-json-"));
+  // The real path: on macOS the temp folder is /var/..., a link to /private/var/.... A CLI resolves its working folder, so passing the
+  // linked form gives it a -C (and a sandbox root) that differs from where it actually runs.
+  cwd = realpathSync.native(cwd);
   try { return await run(cwd); } finally { try { rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ } }
 }
 

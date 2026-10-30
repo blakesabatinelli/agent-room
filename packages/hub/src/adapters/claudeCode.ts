@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { TOOLS } from "@agent-room/shared";
 import type { Adapter, RunRequest, RunResult } from "./types.js";
 import { runProc, which } from "./proc.js";
+import { KEEP_CLAUDE } from "../security/env.js"; // S4
 import { claudeConfinementArgs, scopeAllowedTools } from "../files/confine.js";
 import { NativeTracker } from "../subagents/native.js"; // 3.3
 
@@ -95,7 +96,7 @@ export class ClaudeCodeAdapter implements Adapter {
     const bin = (req.agent.settings.binary as string) || "claude";
     const native = req.onSubagent ? new NativeTracker(req.onSubagent) : undefined; // 3.3: subagents the run launches
     const r = await runProc(bin, this.buildArgs(req), {
-      cwd: req.cwd, signal: req.signal, timeoutMs: 30 * 60_000,
+      cwd: req.cwd, signal: req.signal, timeoutMs: 30 * 60_000, keepEnv: KEEP_CLAUDE, // S4: Claude keeps its own key family only
       onLine: (line) => {
         if (!line.trim()) return;
         try {

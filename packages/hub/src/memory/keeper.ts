@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import { describeFindings, findInjection } from "../security/injection.js"; // S7
 import { join } from "node:path";
 import type { AgentConfig, Approval, MemoryEntry, MemoryExportInfo, MemoryKind, MemoryProposal, MemoryQuestion, MemorySource, ServerEvent } from "@agent-room/shared";
 import { contradicts } from "../control/facts.js";
@@ -144,6 +145,14 @@ export class MemoryKeeper {
     const at = this.now();
     const p: MemoryProposal = { id: id("prop"), roomId, text: t, sourceAgentId: agentId, confidence, status: "pending", createdAt: at, source: this.sourceFor(agentId, o), expiresInDays: validDays(o.expiresInDays), memKind: o.kind };
     const store = this.d.store;
+    // S7: a "fact" that reads like an instruction (to agents, judges or the approval path) is held for the owner. The keeper's model never sees it.
+    const poison = findInjection(t);
+    if (poison.length) {
+      p.flagged = `reads like an instruction (${describeFindings(poison)})`;
+      store.saveProposal(p);
+      store.audit(agentId, "memory.flagged", `${p.id}: ${p.flagged}`.slice(0, 300));
+      return p;
+    }
     store.saveProposal(p);
 
     const all = this.sharedRows(roomId);

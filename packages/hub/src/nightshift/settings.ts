@@ -19,6 +19,7 @@ export function nightSettings(store: Pick<Store, "getSettings">): NightShiftSett
     maxRunsPerNight: Math.floor(clamp(s.maxRunsPerNight, 0, 200, d.maxRunsPerNight)),
     minExpiringShare: clamp(s.minExpiringShare, 0, 1, d.minExpiringShare),
     weight: clamp(s.weight, 0, 1, d.weight),
+    ...(s.allowLabeledData === true ? { allowLabeledData: true } : {}), // S12: present only when the owner turned it on
   };
 }
 

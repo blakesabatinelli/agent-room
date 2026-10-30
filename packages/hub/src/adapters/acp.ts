@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { scrubEnv } from "../security/env.js"; // S4
 import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { TOOLS, type RunUsage } from "@agent-room/shared";
@@ -184,7 +185,7 @@ export class AcpAdapter implements Adapter {
 
     let child: ChildProcess;
     let stderr = "";
-    try { child = spawn(s.command!, args, { cwd, stdio: ["pipe", "pipe", "pipe"] }); } catch (e) { return fail(String(e)); }
+    try { child = spawn(s.command!, args, { cwd, env: scrubEnv(process.env, { keepAllVendors: true }).env /* S4 */, stdio: ["pipe", "pipe", "pipe"] }); } catch (e) { return fail(String(e)); }
     child.stderr!.setEncoding("utf8");
     child.stderr!.on("data", (d: string) => { stderr = (stderr + d).slice(-4000); });
     child.on("error", (e) => { stderr += String(e); });

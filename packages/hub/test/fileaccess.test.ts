@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Approval, WriteProposal } from "@agent-room/shared";
@@ -313,7 +313,10 @@ test("ungrantable folders are refused; protected ones are allowed only with forc
   mkdirSync(join(home, "Documents", "work")); mkdirSync(join(control, ".git"));
   const broker = new FileBroker(e.store, e.approvals, { home, extraProtected: () => [{ path: join(control, ".git"), because: "the control folder's version history" }] });
   // the system folders that exist on this machine (a Mac has /System, /Library, /Applications; Linux has /etc, /usr, /bin...)
-  const systemDirs = ["/System", "/Library", "/Applications", "/private", "/etc", "/usr", "/usr/bin", "/bin", "/sbin", "/var", "/lib", "/proc", "/sys"].filter((p) => existsSync(p));
+  // On a Mac the test's stand-in home folder is under /private/var/folders, so /private and /var contain it: those are refused outright as
+  // "a folder containing the home folder" (stricter, never forceable), checked with the other never-allowed paths below.
+  const containsHome = (p: string) => { const r = realpathSync(p); return home === r || home.startsWith(r.endsWith(sep) ? r : r + sep); };
+  const systemDirs = ["/System", "/Library", "/Applications", "/private", "/etc", "/usr", "/usr/bin", "/bin", "/sbin", "/var", "/lib", "/proc", "/sys"].filter((p) => existsSync(p) && !containsHome(p));
   assert.ok(systemDirs.length >= 3);
   const protectedPaths = [join(home, ".ssh"), join(home, ".config"), join(home, ".aws"), join(home, ".hidden-tool"), join(home, "Library"), join(home, "Library", "Application Support"), ...systemDirs];
   for (const p of protectedPaths) {
@@ -326,7 +329,7 @@ test("ungrantable folders are refused; protected ones are allowed only with forc
 
   // never allowed, even with force: /, the home folder and the folders that contain it, and things that aren't folders
   // (1.1 round 2, L1: a .git folder itself, such as the control folder's version history, is never grantable either)
-  for (const p of ["/", home, join(home, ".."), "relative", join(home, "missing"), join(home, "Documents", "work", "nope"), join(control, ".git")]) {
+  for (const p of ["/", home, join(home, ".."), ...["/private", "/var"].filter((d) => existsSync(d) && containsHome(d)), "relative", join(home, "missing"), join(home, "Documents", "work", "nope"), join(control, ".git")]) {
     assert.throws(() => broker.addGrant({ path: p, agentId: "claude", read: true, write: false, force: true, reason: "I really want this one" }), (x: unknown) => x instanceof GrantRefused && x.canForce === false, p);
   }
   // force without a real reason is refused

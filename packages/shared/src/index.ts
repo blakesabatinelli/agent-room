@@ -1235,6 +1235,8 @@ export interface MemoryEntry {
 }
 
 export interface MemoryProposal {
+  /** S7: why the hub held this proposal for the owner without asking the memory keeper (it reads like an instruction, not a fact). */
+  flagged?: string;
   source?: MemorySource;
   /** An expiry the proposing agent suggested. The keeper decides. */
   expiresInDays?: number;
@@ -1826,6 +1828,8 @@ export interface NightShiftSettings {
   minExpiringShare: number;
   /** How much a tournament result counts in the challenger's scores, next to a real graded run (1 = the same). */
   weight: number;
+  /** S12: re-run tasks that touched private data (mail, chat, Drive, CRM) on another vendor. Off unless the owner turns it on. */
+  allowLabeledData?: boolean;
 }
 export const NIGHT_SHIFT_DEFAULTS: NightShiftSettings = { enabled: false, from: "23:00", to: "06:00", maxRunsPerNight: 20, minExpiringShare: 0.2, weight: 1 };
 export interface OrchestratorSettings { nightShift?: Partial<NightShiftSettings> }

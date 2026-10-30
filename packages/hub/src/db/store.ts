@@ -5,7 +5,15 @@ import type {
   Message, OrchestratorSettings, Room, RoomDeleteCounts, RoutingRecord, ServerEvent, Task,
 } from "@agent-room/shared";
 import { SETTING_DEFAULTS } from "@agent-room/shared";
+import { createHash } from "node:crypto";
 import { id, now } from "../util.js";
+
+/** S8: the audit chain's starting value and its link: sha256(previous hash + the row's JSON). */
+export const AUDIT_GENESIS = "agent-room-audit-v1";
+export const chainHash = (prev: string, data: string) => createHash("sha256").update(prev).update("\n").update(data).digest("hex");
+
+/** S6: how stored secrets (device tokens) are kept: SHA-256, hex. */
+export const hashSecret = (t: string) => createHash("sha256").update(t).digest("hex");
 import { ensureProvenance, isLive, ttlSetting, type Bare } from "../memory/model.js"; // 2.5
 
 /**
@@ -50,6 +58,16 @@ export class Store extends EventEmitter {
       CREATE INDEX IF NOT EXISTS audit_at ON audit(at);
       CREATE INDEX IF NOT EXISTS approvals_status ON approvals(status);
       CREATE INDEX IF NOT EXISTS proposals_status ON proposals(status);
+    `);
+    this.migrateDevices(); // S6
+    // S8: the audit log is append-only (triggers refuse UPDATE and DELETE) and hash-chained: each row's hash covers the row and the hash
+    // before it, so an edit or a removal anywhere breaks verifyAudit() from that row on. Rows written before S8 start the chain at genesis.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS audit_chain (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, hash TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
+      CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
+      CREATE TRIGGER IF NOT EXISTS audit_chain_no_update BEFORE UPDATE ON audit_chain BEGIN SELECT RAISE(ABORT, 'the audit chain is append-only'); END;
+      CREATE TRIGGER IF NOT EXISTS audit_chain_no_delete BEFORE DELETE ON audit_chain BEGIN SELECT RAISE(ABORT, 'the audit chain is append-only'); END;
     `);
   }
 
@@ -96,9 +114,33 @@ export class Store extends EventEmitter {
   setSettings(s: OrchestratorSettings) { this.setKV("orchestrator", s); }
 
   // ---- devices (paired clients)
-  addDevice(token: string, name: string) { this.put("devices", { token, name, created_at: now() }); }
-  hasDevice(token: string) { return !!this.stmt("SELECT 1 FROM devices WHERE token=?").get(token); }
-  listDevices() { return this.stmt("SELECT name, created_at FROM devices").all(); }
+  // S6: the token column holds a SHA-256 of the device token, never the token itself, so a copy of the database can't call the hub.
+  // Rows from before S6 (plaintext) are rewritten as hashes on start (migrateDevices). Each device has an id the owner can revoke.
+  addDevice(token: string, name: string) { this.put("devices", { token: hashSecret(token), name, created_at: now() }); }
+  hasDevice(token: string) {
+    if (!token || token.length > 512) return false;
+    return !!this.stmt("SELECT 1 FROM devices WHERE token=?").get(hashSecret(token));
+  }
+  listDevices() { return (this.stmt("SELECT token, name, created_at FROM devices").all() as { token: string; name: string; created_at: number }[]).map((d) => ({ id: d.token.slice(0, 12), name: d.name, created_at: d.created_at })); }
+  /** S6: forget one paired device by the id listDevices shows. */
+  revokeDevice(deviceId: string): boolean {
+    if (!/^[0-9a-f]{12}$/.test(deviceId)) return false;
+    const n = this.stmt("DELETE FROM devices WHERE substr(token, 1, 12)=?").run(deviceId).changes;
+    if (n) this.audit("owner", "device.revoked", deviceId);
+    return n > 0;
+  }
+  /** S6: every row stored before tokens were hashed holds a plaintext token: rewrite each as its hash, once. */
+  private migrateDevices() {
+    if (this.getKV<boolean>("devices_hashed_v1", false)) return;
+    const rows = this.db.prepare("SELECT token, name, created_at FROM devices").all() as { token: string; name: string; created_at: number }[];
+    this.db.transaction(() => {
+      for (const r of rows) {
+        this.db.prepare("DELETE FROM devices WHERE token=?").run(r.token);
+        this.db.prepare("INSERT OR REPLACE INTO devices (token, name, created_at) VALUES (?, ?, ?)").run(hashSecret(r.token), r.name, r.created_at);
+      }
+      this.setKV("devices_hashed_v1", true);
+    })();
+  }
 
   // ---- rooms
   createRoom(name: string, extra: { dmAgentId?: string; topic?: string } = {}): Room {
@@ -276,7 +318,24 @@ export class Store extends EventEmitter {
   // ---- audit
   audit(actor: string, action: string, detail: string) {
     const e: AuditEntry = { id: id("aud"), at: now(), actor, action, detail };
-    this.put("audit", { id: e.id, at: e.at, data: JSON.stringify(e) });
+    const data = JSON.stringify(e);
+    // The head is read inside the write transaction, so a second connection to the same file (a review tool) can't fork the chain.
+    this.db.transaction(() => {
+      const head = (this.stmt("SELECT hash FROM audit_chain ORDER BY seq DESC LIMIT 1").get() as { hash: string } | undefined)?.hash ?? AUDIT_GENESIS;
+      this.stmt("INSERT INTO audit (id, at, data) VALUES (?, ?, ?)").run(e.id, e.at, data);
+      this.stmt("INSERT INTO audit_chain (id, hash) VALUES (?, ?)").run(e.id, chainHash(head, data));
+    }).immediate();
+  }
+  /** S8: walk the chain from genesis. ok=false names the first row whose hash doesn't match (edited, removed or inserted out of order). */
+  verifyAudit(): { ok: boolean; rows: number; brokenAt?: string; why?: string } {
+    let prev = AUDIT_GENESIS, rows = 0;
+    const it = this.db.prepare("SELECT c.id AS id, c.hash AS hash, a.data AS data FROM audit_chain c LEFT JOIN audit a ON a.id = c.id ORDER BY c.seq").iterate() as Iterable<{ id: string; hash: string; data: string | null }>;
+    for (const r of it) {
+      if (r.data === null) return { ok: false, rows, brokenAt: r.id, why: "a chained row is missing from the audit log" };
+      if (chainHash(prev, r.data) !== r.hash) return { ok: false, rows, brokenAt: r.id, why: "a row was changed after it was written" };
+      prev = r.hash; rows++;
+    }
+    return { ok: true, rows };
   }
   listAudit(limit = 500) { return this.all<AuditEntry>("SELECT data FROM audit ORDER BY at DESC LIMIT ?", limit); }
 }

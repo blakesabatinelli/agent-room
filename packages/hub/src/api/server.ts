@@ -8,7 +8,7 @@ import type { Store } from "../db/store.js";
 import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { Approvals } from "../orchestrator/approvals.js";
 import { adapters, inbox } from "../adapters/index.js";
-import { handleMcp } from "../mcp/server.js";
+import { FUNNEL_BLOCKED_TOOLS, handleMcp } from "../mcp/server.js";
 import { isAllowedLocalAddress } from "../net.js";
 import { signInLog } from "../setup.js";
 import { pairingCode, token } from "../util.js";
@@ -126,7 +126,12 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     if (!t || !store.hasDevice(t)) return reply.code(401).send({ error: "Pair this device first." });
   });
 
-  app.get("/health", async () => ({ ok: true, name: "agent-room" }));
+  app.get("/health", async () => ({ ok: true, name: "agent-room" })); // public: says nothing else
+  // S8/N18: for the owner's devices only. Whether the audit chain verifies, and what security state the hub is in.
+  app.get("/security/status", async () => {
+    const tasks = store.listRooms().flatMap((r) => store.listGoals(r.id)).filter((g) => ["planning", "running", "verifying"].includes(g.status as string)).length;
+    return { audit: store.verifyAudit(), devices: store.listDevices().length, activeGoals: tasks, heldForTaint: store.listAudit(500).filter((e) => e.action === "taint.held").length };
+  });
 
   // ---------- phone web app (open the Tailscale address in Safari, pair, Add to Home Screen)
   // A fixed list of files read once at startup; request paths never touch the filesystem.
@@ -301,7 +306,11 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     // 1.2: callers that came through Funnel get a failed-auth limit (checked first, so guessing gains nothing) and every call is audited.
     const remote = isRemoteRequest(req);
     const from = remote ? forwardedIp(req) : "";
+    // S2: a browser page (any Origin that isn't this Mac or its tailnet name) never reaches /mcp: closes cross-site and DNS-rebinding requests.
+    if (!originAllowed(req.headers.origin)) { store.audit("remote", "mcp.origin.denied", `origin ${String(req.headers.origin).slice(0, 120)}`); return reply.code(403).send({ error: "Cross-origin requests are not allowed." }); }
     if (remote && authLimiter.blocked(from)) return reply.code(429).send({ error: "Too many failed attempts. Try again in a minute." });
+    // S2: a smaller body cap for proxied callers (the global cap is 5 MB for the Mac's own apps).
+    if (remote && Number(req.headers["content-length"] ?? 0) > REMOTE_MCP_BODY_LIMIT) return reply.code(413).send({ error: "Request too large." });
     const t = bearer(req.headers.authorization);
     // 1.2: the orchestrator's short-lived task grants are for agents the hub itself started on this Mac. A proxied caller never gets one, even
     // if it somehow holds one: it can only use an external MCP key (below), which the owner made on purpose and can revoke.
@@ -323,6 +332,12 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
     // Where an external MCP agent connects from tells the hub whether it runs on this Mac (loopback) or elsewhere (Tailscale 100.x, a proxy, anything else).
     if (grant.tokenId) recordConnection(store, grant.agentId, { address: remote ? from : req.socket.remoteAddress, proxied: remote });
     if (remote) store.audit(grant.agentId, "mcp.remote", `agent=${grant.agentId}${grant.tokenId ? ` key=${grant.tokenId}` : ""} ${rpcSummary(req.body)} from ${from}`);
+    if (remote) {
+      // S2: write, spawn and save tools are never offered over Funnel; a call that names one anyway is refused outright.
+      const blocked = calledTools(req.body).find((n) => FUNNEL_BLOCKED_TOOLS.has(n));
+      if (blocked) { store.audit(grant.agentId, "mcp.remote.tool_denied", `${blocked} from ${from}`); return reply.code(403).send({ error: `${blocked} is not available over a remote connection.` }); }
+      grant = { ...grant, remote: true };
+    }
     reply.hijack();
     await handleMcp(store, orch, grant, req.raw, reply.raw, req.body);
   });
@@ -927,6 +942,8 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   // One proposal with its full stored diff: for a task proposal, every file's diff, the one the owner approves.
   app.get("/write-proposals/:id", async (req, reply) => orch.files.proposal((req.params as { id: string }).id) ?? reply.code(404).send({ error: "Proposal not found." }));
   app.get("/devices", async () => store.listDevices());
+  // S6: forget a paired device (a lost phone). Its token stops working at once.
+  app.delete("/devices/:id", async (req, reply) => (store.revokeDevice((req.params as { id: string }).id) ? { ok: true } : reply.code(404).send({ error: "Device not found." })));
 
   // ---------- live events
   const sockets = new Set<{ send: (s: string) => void; readyState: number }>();
@@ -945,4 +962,26 @@ export async function buildServer({ store, orch, approvals, ownerName, restrictI
   });
 
   return app;
+}
+
+/** S2: proxied (Funnel) /mcp bodies are capped lower than the Mac's own. */
+export const REMOTE_MCP_BODY_LIMIT = 1024 * 1024;
+
+/** S2: no Origin (a server-side MCP client) or an Origin on this Mac or the tailnet. */
+export function originAllowed(origin: string | string[] | undefined): boolean {
+  if (origin === undefined) return true;
+  const o = Array.isArray(origin) ? origin[0] : origin;
+  if (!o || o === "null") return false;
+  let host: string;
+  try { host = new URL(o).hostname.toLowerCase().replace(/\.+$/, ""); } catch { return false; }
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1" || host.endsWith(".ts.net");
+}
+
+/** Tool names a JSON-RPC body (or batch) calls. */
+export function calledTools(body: unknown): string[] {
+  const one = (m: unknown) => {
+    const x = m as { method?: unknown; params?: { name?: unknown } } | null;
+    return x && x.method === "tools/call" && typeof x.params?.name === "string" ? [x.params.name] : [];
+  };
+  return Array.isArray(body) ? body.flatMap(one) : one(body);
 }

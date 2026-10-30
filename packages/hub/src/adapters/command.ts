@@ -2,6 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Adapter, RunRequest, RunResult } from "./types.js";
 import { runProc, which } from "./proc.js";
+import { confineCommand } from "../security/sandbox.js"; // S4
 
 /**
  * Generic adapter for any CLI or local runner (Hermes, Muse, local models...).
@@ -25,8 +26,11 @@ export class CommandAdapter implements Adapter {
     const args = (s.args ?? ["{prompt}"]).map((a) => a.replace("{promptFile}", promptFile).replace("{prompt}", prompt)
       .replace("{model}", req.model ?? (req.agent.settings.model as string | undefined) ?? "").replace("{effort}", req.effort ?? ""));
     const env = req.mcp ? { AGENT_ROOM_MCP_URL: req.mcp.url, AGENT_ROOM_MCP_TOKEN: req.mcp.token } : undefined;
-    const r = await runProc(s.command, args, {
-      cwd: req.cwd, env, signal: req.signal, stdin: s.stdin ? prompt : undefined, timeoutMs: 30 * 60_000,
+    // S4: confined on macOS unless the owner switched it off for this agent (settings.sandbox = false).
+    const set = req.agent.settings as { sandbox?: boolean; writablePaths?: string[]; ownCredentials?: string[] };
+    const run = confineCommand(s.command, args, { cwd: req.cwd, dataDir: req.dataDir, protectedPaths: req.protectedPaths, writablePaths: set.writablePaths, ownCredentials: set.ownCredentials, enabled: set.sandbox !== false });
+    const r = await runProc(run.cmd, run.args, {
+      cwd: req.cwd, env, keepAllVendors: true /* S4: the owner configured this command and its keys */, signal: req.signal, stdin: s.stdin ? prompt : undefined, timeoutMs: 30 * 60_000,
       onLine: (l) => req.onChunk?.(l + "\n"),
     });
     const text = r.stdout.trim();
